@@ -36,10 +36,13 @@ qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
 ```
 
 After the OpenSBI banner, the kernel prints `Clavenar kernel booted` with the
-version from `native/kernel/Cargo.toml`. It then prints `boot frame=0x...` with
-the physical address of the first zeroed frame and idles. The boot allocator
-has a fixed pool of 16 frames of 4 KiB each. To exit QEMU, press `Ctrl+a`, then
-`x`.
+version from `native/kernel/Cargo.toml`. It prints `boot frame=0x...` with the
+physical address of the Sv39 root table, then prints `Sv39 paging enabled`
+after activating the supervisor identity map. The map covers the kernel and
+UART with 4 KiB pages. Code is read/execute, constants are read-only, and the
+stack, writable data, frame pool, and UART are read/write with execution
+disabled. The kernel image, stack, and 16-frame boot pool fit within one aligned
+2 MiB region. To exit QEMU, press `Ctrl+a`, then `x`.
 
 A supervisor trap prints one `fatal trap` line over UART before the CPU idles.
 The hexadecimal fields are `scause` (trap cause), `sepc` (instruction address),

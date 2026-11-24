@@ -1,23 +1,28 @@
 use core::ptr;
 use core::slice::IterMut;
 
-const FRAME_SIZE: usize = 4096;
+pub(crate) const FRAME_SIZE: usize = 4096;
 const FRAME_COUNT: usize = 16;
+const WORDS_PER_FRAME: usize = FRAME_SIZE / size_of::<u64>();
 
 #[repr(C, align(4096))]
-pub(crate) struct Frame([u8; FRAME_SIZE]);
+pub(crate) struct Frame([u64; WORDS_PER_FRAME]);
 
 impl Frame {
-    // Boot runs with address translation disabled.
+    // The boot map keeps frame addresses equal to their physical addresses.
     pub(crate) fn physical_address(&self) -> usize {
         ptr::from_ref(self).addr()
+    }
+
+    pub(crate) fn words_mut(&mut self) -> &mut [u64; WORDS_PER_FRAME] {
+        &mut self.0
     }
 }
 
 // SAFETY: The linker places this zero-initialized array in the writable LOAD
 // segment. The ELF loader supplies the zero-filled memory for the section.
 #[unsafe(link_section = ".frame_pool")]
-static mut BOOT_FRAMES: [Frame; FRAME_COUNT] = [const { Frame([0; FRAME_SIZE]) }; FRAME_COUNT];
+static mut BOOT_FRAMES: [Frame; FRAME_COUNT] = [const { Frame([0; WORDS_PER_FRAME]) }; FRAME_COUNT];
 
 pub(crate) struct FrameAllocator<'a> {
     remaining: IterMut<'a, Frame>,

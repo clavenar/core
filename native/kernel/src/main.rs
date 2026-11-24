@@ -7,6 +7,7 @@ use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::ptr::{without_provenance, without_provenance_mut};
 use memory::frame::FrameAllocator;
+use memory::sv39;
 
 global_asm!(include_str!("arch/riscv64/boot.S"));
 global_asm!(include_str!("arch/riscv64/trap.S"));
@@ -34,6 +35,13 @@ extern "C" fn kernel_main() -> ! {
     uart_write(b"boot frame=");
     uart_write_hex(frame.physical_address());
     uart_write(b"\r\n");
+
+    // SAFETY: This is the first address-space switch on the boot hart.
+    if unsafe { sv39::enable_identity_map(frame, &mut frames, UART_BASE) } {
+        uart_write(b"Sv39 paging enabled\r\n");
+    } else {
+        uart_write(b"Sv39 paging setup failed\r\n");
+    }
     idle();
 }
 
