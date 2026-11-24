@@ -11,6 +11,7 @@ use memory::sv39;
 
 global_asm!(include_str!("arch/riscv64/boot.S"));
 global_asm!(include_str!("arch/riscv64/trap.S"));
+global_asm!(include_str!("arch/riscv64/user.S"));
 
 // Make Cargo rebuild the kernel when the linker script changes.
 const _: &str = include_str!("../../linker/riscv64.ld");
@@ -18,6 +19,11 @@ const _: &str = include_str!("../../linker/riscv64.ld");
 const UART_BASE: usize = 0x1000_0000;
 const UART_LINE_STATUS: usize = 5;
 const UART_TX_READY: u8 = 1 << 5;
+const USER_ECALL: usize = 8;
+
+unsafe extern "C" {
+    fn enter_user() -> !;
+}
 
 // SAFETY: The boot stub calls this symbol with a RISC-V ABI-aligned stack.
 #[unsafe(no_mangle)]
@@ -37,18 +43,25 @@ extern "C" fn kernel_main() -> ! {
     uart_write(b"\r\n");
 
     // SAFETY: This is the first address-space switch on the boot hart.
-    if unsafe { sv39::enable_identity_map(frame, &mut frames, UART_BASE) } {
-        uart_write(b"Sv39 paging enabled\r\n");
-    } else {
+    if !unsafe { sv39::enable_identity_map(frame, &mut frames, UART_BASE) } {
         uart_write(b"Sv39 paging setup failed\r\n");
+        idle();
     }
-    idle();
+    uart_write(b"Sv39 paging enabled\r\n");
+    // SAFETY: The user code and stack pages are mapped and the supervisor
+    // trap vector is installed.
+    unsafe { enter_user() }
 }
 
 // SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.
 #[unsafe(no_mangle)]
-extern "C" fn supervisor_trap_fatal(scause: usize, sepc: usize, stval: usize) -> ! {
-    uart_write(b"fatal trap scause=");
+extern "C" fn supervisor_trap(scause: usize, sepc: usize, stval: usize) -> ! {
+    if scause == USER_ECALL {
+        uart_write(b"user ecall");
+    } else {
+        uart_write(b"fatal trap");
+    }
+    uart_write(b" scause=");
     uart_write_hex(scause);
     uart_write(b" sepc=");
     uart_write_hex(sepc);

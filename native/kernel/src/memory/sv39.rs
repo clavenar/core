@@ -11,17 +11,20 @@ const VALID: u64 = 1 << 0;
 const READ: u64 = 1 << 1;
 const WRITE: u64 = 1 << 2;
 const EXECUTE: u64 = 1 << 3;
+const USER: u64 = 1 << 4;
 const ACCESSED: u64 = 1 << 6;
 const DIRTY: u64 = 1 << 7;
 
 unsafe extern "C" {
     static __text_start: u8;
     static __rodata_start: u8;
+    static __user_text_start: u8;
     static __writable_start: u8;
+    static __user_stack_start: u8;
     static __kernel_end: u8;
 }
 
-/// Installs the boot supervisor address space.
+/// Installs the boot address space.
 ///
 /// # Safety
 ///
@@ -45,14 +48,18 @@ pub(crate) unsafe fn enable_identity_map(
     // The linker symbols mark page boundaries. Only their addresses are used.
     let text = (&raw const __text_start).addr();
     let rodata = (&raw const __rodata_start).addr();
+    let user_text = (&raw const __user_text_start).addr();
     let writable = (&raw const __writable_start).addr();
+    let user_stack = (&raw const __user_stack_start).addr();
     let end = (&raw const __kernel_end).addr();
 
     // The image fits in one aligned 2 MiB region. UART is in a separate
     // root entry on QEMU virt, so each region needs one pair of child tables.
     map_range(kernel_leaves, text, rodata, READ | EXECUTE);
-    map_range(kernel_leaves, rodata, writable, READ);
-    map_range(kernel_leaves, writable, end, READ | WRITE | DIRTY);
+    map_range(kernel_leaves, rodata, user_text, READ);
+    map_range(kernel_leaves, user_text, writable, READ | EXECUTE | USER);
+    map_range(kernel_leaves, writable, user_stack, READ | WRITE | DIRTY);
+    map_range(kernel_leaves, user_stack, end, READ | WRITE | DIRTY | USER);
     map_range(
         uart_leaves,
         uart_base,

@@ -38,15 +38,17 @@ qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
 After the OpenSBI banner, the kernel prints `Clavenar kernel booted` with the
 version from `native/kernel/Cargo.toml`. It prints `boot frame=0x...` with the
 physical address of the Sv39 root table, then prints `Sv39 paging enabled`
-after activating the supervisor identity map. The map covers the kernel and
-UART with 4 KiB pages. Code is read/execute, constants are read-only, and the
-stack, writable data, frame pool, and UART are read/write with execution
-disabled. The kernel image, stack, and 16-frame boot pool fit within one aligned
-2 MiB region. To exit QEMU, press `Ctrl+a`, then `x`.
+after activating the identity map. The kernel and UART use supervisor-only
+4 KiB pages. The embedded user program has its own read/execute code page and
+a read/write, non-executable stack page. The image, stacks, and 16-frame boot
+pool fit within one aligned 2 MiB region.
 
-A supervisor trap prints one `fatal trap` line over UART before the CPU idles.
-The hexadecimal fields are `scause` (trap cause), `sepc` (instruction address),
-and `stval` (additional information for the trap, when provided).
+The kernel enters user mode, where the program uses its stack and executes
+`ecall`. The trap handler switches to the supervisor stack, prints a
+`user ecall` line with `scause=0x0000000000000008`, and idles. Other traps print
+`fatal trap`. Both lines include `scause` (trap cause), `sepc` (instruction
+address), and `stval` (additional information, when provided).
+To exit QEMU, press `Ctrl+a`, then `x`.
 
 Check Rust formatting with `rustfmt` from the stable toolchain.
 
