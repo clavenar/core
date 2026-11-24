@@ -1,9 +1,12 @@
 #![no_std]
 #![no_main]
 
+mod memory;
+
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::ptr::{without_provenance, without_provenance_mut};
+use memory::frame::FrameAllocator;
 
 global_asm!(include_str!("arch/riscv64/boot.S"));
 global_asm!(include_str!("arch/riscv64/trap.S"));
@@ -24,6 +27,13 @@ extern "C" fn kernel_main() -> ! {
         ")\r\n"
     );
     uart_write(banner.as_bytes());
+
+    // SAFETY: The single boot hart claims the frame pool here once.
+    let mut frames = unsafe { FrameAllocator::from_boot_pool() };
+    let frame = frames.allocate_zeroed().expect("boot frame pool is empty");
+    uart_write(b"boot frame=");
+    uart_write_hex(frame.physical_address());
+    uart_write(b"\r\n");
     idle();
 }
 

@@ -34,4 +34,8 @@ SECTIONS
         . += 16K;
         __stack_top = .;
     } :data
+
+    .frame_pool ALIGN(0x1000) (NOLOAD) : {
+        KEEP(*(.frame_pool))
+    } :data
 }
