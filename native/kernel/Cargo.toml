@@ -3,5 +3,13 @@ name = "clavenar-kernel"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "clavenar-kernel"
+path = "src/main.rs"
+test = false
+
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 panic = "abort"
