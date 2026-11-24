@@ -18,7 +18,12 @@ const UART_TX_READY: u8 = 1 << 5;
 // SAFETY: The boot stub calls this symbol with a RISC-V ABI-aligned stack.
 #[unsafe(no_mangle)]
 extern "C" fn kernel_main() -> ! {
-    uart_write(b"Clavenar kernel booted\r\n");
+    let banner = concat!(
+        "Clavenar kernel booted (v",
+        env!("CARGO_PKG_VERSION"),
+        ")\r\n"
+    );
+    uart_write(banner.as_bytes());
     idle();
 }
 

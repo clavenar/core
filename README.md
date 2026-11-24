@@ -35,8 +35,9 @@ qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
   -kernel target/riscv64gc-unknown-none-elf/release/clavenar-kernel
 ```
 
-After the OpenSBI banner, the kernel prints `Clavenar kernel booted` once and
-idles. To exit QEMU, press `Ctrl+a`, then `x`.
+After the OpenSBI banner, the kernel prints `Clavenar kernel booted` with the
+version from `native/kernel/Cargo.toml`, then idles. To exit QEMU, press `Ctrl+a`,
+then `x`.
 
 A supervisor trap prints one `fatal trap` line over UART before the CPU idles.
 The hexadecimal fields are `scause` (trap cause), `sepc` (instruction address),
