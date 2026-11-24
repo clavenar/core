@@ -13,4 +13,33 @@ targets RV64 on QEMU `virt`.
 
 See the [repository layout](../specifications/engineering/repository-layout.md)
 in a sibling checkout for the day-one bootstrap and future components.
-Build and run instructions will accompany the first implementation.
+
+## Build and run the RV64 kernel
+
+With stable Rust installed via `rustup`, add the bare-metal target. On Debian 13,
+`qemu-system-riscv` provides the emulator and pulls in OpenSBI.
+
+```sh
+rustup target add --toolchain stable riscv64gc-unknown-none-elf
+sudo apt-get install --no-install-recommends qemu-system-riscv
+```
+
+Run these commands from the `core` repository root.
+
+```sh
+cargo +stable rustc --manifest-path native/kernel/Cargo.toml \
+  --target riscv64gc-unknown-none-elf --target-dir target --release \
+  -- -C "link-arg=-T${PWD}/native/linker/riscv64.ld" -C link-arg=--no-relax
+
+qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
+  -kernel target/riscv64gc-unknown-none-elf/release/clavenar-kernel
+```
+
+After the OpenSBI banner, the kernel prints `Clavenar kernel booted` once and
+idles. To exit QEMU, press `Ctrl+a`, then `x`.
+
+Check Rust formatting with `rustfmt` from the stable toolchain.
+
+```sh
+cargo +stable fmt --manifest-path native/kernel/Cargo.toml --check
+```
