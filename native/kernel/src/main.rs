@@ -6,6 +6,7 @@ use core::panic::PanicInfo;
 use core::ptr::{without_provenance, without_provenance_mut};
 
 global_asm!(include_str!("arch/riscv64/boot.S"));
+global_asm!(include_str!("arch/riscv64/trap.S"));
 
 // Make Cargo rebuild the kernel when the linker script changes.
 const _: &str = include_str!("../../linker/riscv64.ld");
@@ -17,10 +18,35 @@ const UART_TX_READY: u8 = 1 << 5;
 // SAFETY: The boot stub calls this symbol with a RISC-V ABI-aligned stack.
 #[unsafe(no_mangle)]
 extern "C" fn kernel_main() -> ! {
-    for &byte in b"Clavenar kernel booted\r\n" {
+    uart_write(b"Clavenar kernel booted\r\n");
+    idle();
+}
+
+// SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.
+#[unsafe(no_mangle)]
+extern "C" fn supervisor_trap_fatal(scause: usize, sepc: usize, stval: usize) -> ! {
+    uart_write(b"fatal trap scause=");
+    uart_write_hex(scause);
+    uart_write(b" sepc=");
+    uart_write_hex(sepc);
+    uart_write(b" stval=");
+    uart_write_hex(stval);
+    uart_write(b"\r\n");
+    idle();
+}
+
+fn uart_write(bytes: &[u8]) {
+    for &byte in bytes {
         uart_write_byte(byte);
     }
-    idle();
+}
+
+fn uart_write_hex(value: usize) {
+    uart_write(b"0x");
+    for shift in (0..usize::BITS).step_by(4).rev() {
+        let digit = (value >> shift) & 0xf;
+        uart_write_byte(b"0123456789abcdef"[digit]);
+    }
 }
 
 fn uart_write_byte(byte: u8) {

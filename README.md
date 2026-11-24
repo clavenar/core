@@ -38,6 +38,10 @@ qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
 After the OpenSBI banner, the kernel prints `Clavenar kernel booted` once and
 idles. To exit QEMU, press `Ctrl+a`, then `x`.
 
+A supervisor trap prints one `fatal trap` line over UART before the CPU idles.
+The hexadecimal fields are `scause` (trap cause), `sepc` (instruction address),
+and `stval` (additional information for the trap, when provided).
+
 Check Rust formatting with `rustfmt` from the stable toolchain.
 
 ```sh
