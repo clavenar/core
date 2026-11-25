@@ -87,6 +87,17 @@ The next successful launch starts with an empty reply mailbox.
 echoed reply `hello from shell`. The request is available to the child when
 it starts.
 
+`askat hello /notes todo.txt` grants access to `/notes` and asks `hello` to
+read `todo.txt` through that directory handle. The shell prints the first
+63 bytes, reports an empty file, or reports a failed read.
+
+```text
+mkdir /notes
+write /notes/todo.txt Hello from notes
+askat hello /notes todo.txt
+wait hello
+```
+
 `wait hello` collects the exit status or fault cause of the latest launch.
 The shell waits for a running program and returns immediately if the result is
 already available. A successful wait consumes the result, and a successful
@@ -203,6 +214,16 @@ address in `a1`, and a length from 1 to 64 bytes in `a2`. It copies the request
 before making the child runnable and returns 0 on success or -1 on error.
 The child consumes the request with `message_recv`. Exit or fault discards
 any unread request.
+
+Call 22 (`spawn_at_with_message`) takes program selector 0 in `a0`, a
+directory handle in `a1`, a user stack path address in `a2`, and a path length
+from 1 to 64 bytes in `a3`. It validates the grant and copies the request
+before scheduling the child. It returns 0 on success or -1 on error.
+
+For this launch, `hello` resolves the requested path with `open_at`. A reply
+with status byte 0 carries zero to 63 file bytes. Status byte 1 reports a
+failed read and carries just that byte. The child exits with status 0 after
+sending a successful reply and status 1 on failure.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

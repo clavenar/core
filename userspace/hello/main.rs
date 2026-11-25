@@ -2,8 +2,9 @@
 #![no_main]
 
 use clv_abi::{
-    MESSAGE_MAX_BYTES, PROBE_VALUE, SYS_CLOSE, SYS_EXIT, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND,
-    SYS_OPEN_AT, SYS_PROBE, SYS_READ, SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, PROBE_VALUE, SYS_CLOSE, SYS_EXIT,
+    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_OPEN_AT, SYS_PROBE, SYS_READ, SYS_TIMER_FIRED,
+    SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
@@ -19,11 +20,14 @@ global_asm!(
     print_granted_hello = sym print_granted_hello,
 );
 
-extern "C" fn reply_or_report_ready() -> usize {
+extern "C" fn reply_or_report_ready(directory: usize, scoped: usize) -> usize {
     let mut buffer = [0; MESSAGE_MAX_BYTES];
     let address = buffer.as_mut_ptr().expose_provenance();
     let count = syscall(SYS_MESSAGE_RECV, address, buffer.len(), 0);
     if (1..=buffer.len()).contains(&count) {
+        if scoped != 0 {
+            return reply_with_file(directory, &mut buffer, count);
+        }
         return usize::from(syscall(SYS_MESSAGE_SEND, address, count, 0) != count);
     }
 
@@ -32,6 +36,36 @@ extern "C" fn reply_or_report_ready() -> usize {
     syscall(SYS_MESSAGE_SEND, address, ready.len(), 0);
     // Continue with the ordinary greeting or granted file.
     SYSCALL_ERROR
+}
+
+fn reply_with_file(
+    directory: usize,
+    buffer: &mut [u8; MESSAGE_MAX_BYTES],
+    path_length: usize,
+) -> usize {
+    let address = buffer.as_mut_ptr().expose_provenance();
+    let handle = syscall(SYS_OPEN_AT, directory, address, path_length);
+    let count = if handle == SYSCALL_ERROR {
+        SYSCALL_ERROR
+    } else {
+        let data = &mut buffer[1..];
+        let count = syscall(
+            SYS_READ,
+            handle,
+            data.as_mut_ptr().expose_provenance(),
+            data.len(),
+        );
+        syscall(SYS_CLOSE, handle, 0, 0);
+        count
+    };
+    let (status, length) = if count < buffer.len() {
+        (FILE_REPLY_OK, count + 1)
+    } else {
+        (FILE_REPLY_ERROR, 1)
+    };
+    buffer[0] = status;
+    let sent = syscall(SYS_MESSAGE_SEND, address, length, 0);
+    usize::from(status == FILE_REPLY_ERROR || sent != length)
 }
 
 extern "C" fn print_granted_hello(directory: usize) -> usize {

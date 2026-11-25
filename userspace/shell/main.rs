@@ -2,10 +2,11 @@
 #![no_main]
 
 use clv_abi::{
-    MESSAGE_MAX_BYTES, OPEN_READ, OPEN_WRITE_TRUNCATE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE,
-    SYS_EXIT, SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MKDIR, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
-    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, OPEN_READ, OPEN_WRITE_TRUNCATE,
+    PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MKDIR,
+    SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -73,7 +74,7 @@ fn run_command(line: &[u8]) {
     let (command, arguments) = split_word(line.trim_ascii());
     match command {
         b"help" if arguments.is_empty() => write(
-            b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\nrun hello [dir]  ask hello <text>  recv hello  wait hello\r\n",
+            b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\nrun hello [dir]  ask hello <text>  recv hello  wait hello\r\naskat hello <dir> <path>\r\n",
         ),
         b"pwd" if arguments.is_empty() => pwd(),
         b"cd" => run_path_command(
@@ -107,6 +108,7 @@ fn run_command(line: &[u8]) {
         ),
         b"run" => run_hello(arguments),
         b"ask" => ask_hello(arguments),
+        b"askat" => ask_at_hello(arguments),
         b"recv" if arguments == b"hello" => recv_hello(),
         b"recv" => write(b"usage: recv hello\r\n"),
         b"wait" if arguments == b"hello" => wait_hello(),
@@ -164,20 +166,38 @@ fn run_hello(arguments: &[u8]) {
         return;
     }
 
+    run_scoped_hello(directory, None);
+}
+
+fn run_scoped_hello(directory: &[u8], request: Option<&[u8]>) -> bool {
     let handle = call_path(SYS_OPEN, directory, OPEN_READ);
     if handle == SYSCALL_ERROR {
         write(b"cannot open path\r\n");
-        return;
+        return false;
     }
-    let result = syscall(SYS_SPAWN_AT, PROGRAM_HELLO, handle, 0);
+    let result = match request {
+        Some(path) => {
+            ecall(
+                SYS_SPAWN_AT_WITH_MESSAGE,
+                PROGRAM_HELLO,
+                handle,
+                path.as_ptr().expose_provenance(),
+                path.len(),
+            )
+            .0
+        }
+        None => syscall(SYS_SPAWN_AT, PROGRAM_HELLO, handle, 0),
+    };
     syscall(SYS_CLOSE, handle, 0, 0);
     if result == SYSCALL_ERROR {
         write(b"cannot run scoped hello\r\n");
+        return false;
     }
+    true
 }
 
 fn wait_hello() {
-    let (kind, mut value) = ecall(SYS_WAIT, PROGRAM_HELLO, 0, 0);
+    let (kind, mut value) = ecall(SYS_WAIT, PROGRAM_HELLO, 0, 0, 0);
     match kind {
         WAIT_EXITED => write(b"hello exited 0x"),
         WAIT_FAULTED => write(b"hello fault scause=0x"),
@@ -217,13 +237,7 @@ fn ask_hello(arguments: &[u8]) {
 
 fn recv_hello() {
     let mut buffer = [0; MESSAGE_MAX_BYTES];
-    let count = syscall(
-        SYS_MESSAGE_RECV,
-        buffer.as_mut_ptr().expose_provenance(),
-        buffer.len(),
-        0,
-    );
-    match buffer.get(..count) {
+    match receive_message(&mut buffer) {
         Some([]) => write(b"no message\r\n"),
         Some(message) => {
             write_stack(message);
@@ -231,6 +245,42 @@ fn recv_hello() {
         }
         None => write(b"recv failed\r\n"),
     }
+}
+
+fn ask_at_hello(arguments: &[u8]) {
+    let (program, arguments) = split_word(arguments);
+    let (directory, path) = split_word(arguments);
+    if program != b"hello" || directory.is_empty() || path.is_empty() {
+        write(b"usage: askat hello <dir> <path>\r\n");
+        return;
+    }
+    if !run_scoped_hello(directory, Some(path)) {
+        return;
+    }
+
+    let mut buffer = [0; MESSAGE_MAX_BYTES];
+    match receive_message(&mut buffer) {
+        Some([FILE_REPLY_OK]) => write(b"empty file\r\n"),
+        Some([FILE_REPLY_OK, contents @ ..]) => {
+            write_stack(contents);
+            if !contents.ends_with(b"\n") {
+                write(b"\r\n");
+            }
+        }
+        Some([FILE_REPLY_ERROR]) => write(b"cannot read requested file\r\n"),
+        Some([]) => write(b"no message\r\n"),
+        _ => write(b"recv failed\r\n"),
+    }
+}
+
+fn receive_message(buffer: &mut [u8]) -> Option<&[u8]> {
+    let count = syscall(
+        SYS_MESSAGE_RECV,
+        buffer.as_mut_ptr().expose_provenance(),
+        buffer.len(),
+        0,
+    );
+    buffer.get(..count)
 }
 
 fn show(path: &[u8], operation: usize) {
@@ -328,11 +378,11 @@ fn exit(status: usize) -> ! {
 }
 
 fn syscall(number: usize, a0: usize, a1: usize, a2: usize) -> usize {
-    ecall(number, a0, a1, a2).0
+    ecall(number, a0, a1, a2, 0).0
 }
 
 #[inline(never)]
-fn ecall(number: usize, mut a0: usize, mut a1: usize, a2: usize) -> (usize, usize) {
+fn ecall(number: usize, mut a0: usize, mut a1: usize, a2: usize, a3: usize) -> (usize, usize) {
     // SAFETY: Clavenar returns results in a0 and a1 and preserves other registers.
     unsafe {
         asm!(
@@ -340,6 +390,7 @@ fn ecall(number: usize, mut a0: usize, mut a1: usize, a2: usize) -> (usize, usiz
             inlateout("a0") a0,
             inlateout("a1") a1,
             in("a2") a2,
+            in("a3") a3,
             in("a7") number,
             options(nostack),
         );

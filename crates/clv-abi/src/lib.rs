@@ -24,8 +24,11 @@ pub const SYS_SPAWN_AT: usize = 18;
 pub const SYS_MESSAGE_SEND: usize = 19;
 pub const SYS_MESSAGE_RECV: usize = 20;
 pub const SYS_SPAWN_WITH_MESSAGE: usize = 21;
+pub const SYS_SPAWN_AT_WITH_MESSAGE: usize = 22;
 
 pub const MESSAGE_MAX_BYTES: usize = 64;
+pub const FILE_REPLY_OK: u8 = 0;
+pub const FILE_REPLY_ERROR: u8 = 1;
 pub const PROGRAM_HELLO: usize = 0;
 pub const WAIT_EXITED: usize = 0;
 pub const WAIT_FAULTED: usize = 1;

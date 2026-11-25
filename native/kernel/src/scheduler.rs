@@ -40,12 +40,6 @@ pub(crate) enum ReceiveResult {
     Received { length: usize, sender: usize },
 }
 
-pub(crate) enum HelloLaunch {
-    Ordinary,
-    Directory(usize),
-    Request(Message),
-}
-
 pub(crate) struct Message {
     bytes: [u8; MESSAGE_MAX_BYTES],
     length: usize,
@@ -141,19 +135,23 @@ impl Scheduler {
         fs.rmdir(&self.tasks[self.current].fs, path, live_task_fs)
     }
 
-    pub(crate) fn spawn_hello(&mut self, fs: &mut RamFs, launch: HelloLaunch) -> Option<usize> {
+    pub(crate) fn spawn_hello(
+        &mut self,
+        fs: &mut RamFs,
+        directory_fd: Option<usize>,
+        request: Option<Message>,
+    ) -> Option<usize> {
         if self.current != SHELL_TASK_INDEX
             || self.tasks[HELLO_TASK_INDEX].state != TaskState::Stopped
         {
             return None;
         }
-        let (task_fs, grant, request) = match launch {
-            HelloLaunch::Ordinary => (TaskFs::new(), None, None),
-            HelloLaunch::Directory(fd) => {
+        let (task_fs, grant) = match directory_fd {
+            Some(fd) => {
                 let (task_fs, child_fd) = self.tasks[self.current].fs.grant_directory(fs, fd)?;
-                (task_fs, Some(child_fd), None)
+                (task_fs, Some(child_fd))
             }
-            HelloLaunch::Request(message) => (TaskFs::new(), None, Some(message)),
+            None => (TaskFs::new(), None),
         };
 
         let task = &mut self.tasks[HELLO_TASK_INDEX];

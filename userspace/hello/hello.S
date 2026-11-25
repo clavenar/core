@@ -35,6 +35,8 @@ _start:
     ld t1, 8(sp)
     bne t1, s1, .Luser_failed
 
+    mv a0, s2
+    mv a1, s3
     call {reply_or_report_ready}
     li t0, -1
     bne a0, t0, .Luser_exit

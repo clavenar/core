@@ -2,8 +2,8 @@ use clv_abi::{
     OPEN_READ, OPEN_WRITE_TRUNCATE, PROBE_VALUE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT,
     SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PROBE,
     SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
-    SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE,
-    SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -11,15 +11,14 @@ use crate::console::write_task;
 use crate::drivers::uart;
 use crate::fs::ramfs::{RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
 use crate::memory::usercopy::{copy_from_user_stack, copy_to_user_stack, in_user_stack};
-use crate::scheduler::{
-    HelloLaunch, Message, ReceiveResult, Scheduler, TaskCompletion, WaitResult,
-};
+use crate::scheduler::{Message, ReceiveResult, Scheduler, TaskCompletion, WaitResult};
 
 const CONSOLE_WRITE_LIMIT: usize = 128;
 const PATH_LIMIT: usize = 64;
 const REG_A0: usize = 10;
 const REG_A1: usize = 11;
 const REG_A2: usize = 12;
+const REG_A3: usize = 13;
 const REG_A7: usize = 17;
 
 pub(crate) enum Outcome {
@@ -73,17 +72,17 @@ pub(crate) fn dispatch(
             with_user_path(a0, a1, |path| scheduler.rmdir(fs, path)).unwrap_or(SYSCALL_ERROR)
         }
         SYS_SPAWN if a0 == PROGRAM_HELLO => scheduler
-            .spawn_hello(fs, HelloLaunch::Ordinary)
+            .spawn_hello(fs, None, None)
             .unwrap_or(SYSCALL_ERROR),
         SYS_SPAWN_AT if a0 == PROGRAM_HELLO => scheduler
-            .spawn_hello(fs, HelloLaunch::Directory(a1))
+            .spawn_hello(fs, Some(a1), None)
             .unwrap_or(SYSCALL_ERROR),
         SYS_SPAWN_WITH_MESSAGE if a0 == PROGRAM_HELLO => {
-            Message::new(scheduler.current_id(), a2, |bytes| {
-                copy_from_user_stack(a1, bytes)
-            })
-            .and_then(|request| scheduler.spawn_hello(fs, HelloLaunch::Request(request)))
-            .unwrap_or(SYSCALL_ERROR)
+            spawn_with_message(scheduler, fs, None, a1, a2).unwrap_or(SYSCALL_ERROR)
+        }
+        SYS_SPAWN_AT_WITH_MESSAGE if a0 == PROGRAM_HELLO => {
+            spawn_with_message(scheduler, fs, Some(a1), a2, frame.registers[REG_A3])
+                .unwrap_or(SYSCALL_ERROR)
         }
         SYS_WAIT if a0 == PROGRAM_HELLO => match scheduler.wait_hello(frame) {
             WaitResult::NoLaunch => SYSCALL_ERROR,
@@ -119,6 +118,19 @@ pub(crate) fn dispatch(
     // ECALL is a 32-bit instruction, including on cores with compressed code.
     frame.sepc += 4;
     Outcome::Resume
+}
+
+fn spawn_with_message(
+    scheduler: &mut Scheduler,
+    fs: &mut RamFs,
+    directory_fd: Option<usize>,
+    address: usize,
+    length: usize,
+) -> Option<usize> {
+    let request = Message::new(scheduler.current_id(), length, |bytes| {
+        copy_from_user_stack(address, bytes)
+    })?;
+    scheduler.spawn_hello(fs, directory_fd, Some(request))
 }
 
 fn open_file(
