@@ -7,7 +7,8 @@ targets RV64 on QEMU `virt`.
 - `native/kernel/` and `native/linker/` hold kernel source and linker scripts.
 - `crates/` holds shared Rust types and ABI definitions. [`clv-abi`](crates/clv-abi/)
   defines the syscall numbers used by the kernel and user programs.
-- `userspace/` holds native programs and libraries.
+- `userspace/` holds the native programs. They share RV64 syscall wrappers in
+  [libclv](userspace/libclv/).
 - `platforms/qemu-riscv64-virt/` holds the reference platform definition.
 - `tests/` holds cross-component tests and fixtures.
 - `docs/` holds implementation notes. `xtask/` will hold build orchestration.
@@ -259,5 +260,5 @@ Check Rust formatting with `rustfmt` from the stable toolchain.
 cargo +stable fmt --manifest-path native/kernel/Cargo.toml --check
 cargo +stable fmt --manifest-path crates/clv-abi/Cargo.toml --check
 rustfmt +stable --edition 2024 --check \
-  userspace/echo/main.rs userspace/hello/main.rs userspace/shell/main.rs
+  userspace/libclv/lib.rs userspace/echo/main.rs userspace/hello/main.rs userspace/shell/main.rs
 ```

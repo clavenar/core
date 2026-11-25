@@ -1,4 +1,7 @@
-const HANDLE_COUNT: usize = 4;
+mod handles;
+
+pub(crate) use handles::TaskFs;
+
 const WRITABLE_FILE_COUNT: usize = 4;
 const DIRECTORY_COUNT: usize = 4;
 const NAME_LIMIT: usize = 64;
@@ -114,25 +117,6 @@ impl RamFs {
         }
     }
 
-    fn allocate_handle(
-        &mut self,
-        writable: bool,
-        open: impl FnOnce(&mut Self) -> Option<Node>,
-    ) -> Option<Handle> {
-        // Reserve usize::MAX for syscall errors. Check before opening, since
-        // opening a writable file can truncate it.
-        let id = self.next_handle_id;
-        let next = id.checked_add(1)?;
-        let node = open(self)?;
-        self.next_handle_id = next;
-        Some(Handle {
-            id,
-            node,
-            cursor: 0,
-            writable,
-        })
-    }
-
     fn open(&mut self, base: PathBase, path: &[u8], writable: bool) -> Option<Node> {
         let (parent, name) = match self.resolve_path(base, path)? {
             ResolvedPath::Directory(directory) => {
@@ -183,14 +167,14 @@ impl RamFs {
         Some(0)
     }
 
-    pub(crate) fn rmdir<'a>(
+    fn rmdir(
         &mut self,
-        current: &TaskFs,
+        cwd: DirectoryId,
         path: &[u8],
-        mut live_task_fs: impl Iterator<Item = &'a TaskFs>,
+        in_use: impl FnOnce(DirectoryId) -> bool,
     ) -> Option<usize> {
         let ResolvedPath::Entry(parent, name) =
-            self.resolve_path(PathBase::WorkingDirectory(current.cwd?), path)?
+            self.resolve_path(PathBase::WorkingDirectory(cwd), path)?
         else {
             return None;
         };
@@ -198,9 +182,7 @@ impl RamFs {
         else {
             return None;
         };
-        if self.next_entry(directory, 0).is_some()
-            || live_task_fs.any(|task_fs| task_fs.uses_directory(directory))
-        {
+        if self.next_entry(directory, 0).is_some() || in_use(directory) {
             return None;
         }
         self.directories[index] = None;
@@ -227,6 +209,40 @@ impl RamFs {
             file.linked = false;
         }
         Some(0)
+    }
+
+    fn absolute_path(
+        &self,
+        mut directory: DirectoryId,
+        deliver: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<usize> {
+        let mut buffer = [0; CWD_PATH_CAPACITY];
+        let mut start = buffer.len();
+        while let DirectoryId::Child(index) = directory {
+            let entry = self.directories[index].as_ref()?;
+            let name = entry.name.as_bytes();
+            let end = start;
+            start = start.checked_sub(name.len() + 1)?;
+            buffer[start] = b'/';
+            buffer[start + 1..end].copy_from_slice(name);
+            directory = entry.parent;
+        }
+        if start == buffer.len() {
+            start -= 1;
+            buffer[start] = b'/';
+        }
+        let path = &buffer[start..];
+        deliver(path).then_some(path.len())
+    }
+
+    fn resolve_directory(&self, cwd: DirectoryId, path: &[u8]) -> Option<DirectoryId> {
+        match self.resolve_path(PathBase::WorkingDirectory(cwd), path)? {
+            ResolvedPath::Directory(directory) => Some(directory),
+            ResolvedPath::Entry(parent, name) => match self.lookup(parent, name)? {
+                Node::Directory(directory) => Some(directory),
+                _ => None,
+            },
+        }
     }
 
     fn resolve_path<'a>(&self, base: PathBase, path: &'a [u8]) -> Option<ResolvedPath<'a>> {
@@ -315,6 +331,20 @@ impl RamFs {
         }
     }
 
+    fn write_at(&mut self, node: Node, offset: usize, bytes: &[u8]) -> Option<usize> {
+        let Node::WritableFile(index) = node else {
+            return None;
+        };
+        if bytes.is_empty() {
+            return Some(0);
+        }
+        let file = self.writable[index].as_mut()?;
+        let end = offset.checked_add(bytes.len())?;
+        file.contents.get_mut(offset..end)?.copy_from_slice(bytes);
+        file.length = file.length.max(end);
+        Some(bytes.len())
+    }
+
     fn next_entry(&self, parent: DirectoryId, cursor: usize) -> Option<(usize, &[u8])> {
         let boot_names = BOOT_FILES
             .iter()
@@ -336,208 +366,5 @@ impl RamFs {
             .enumerate()
             .skip(cursor)
             .find_map(|(index, name)| name.map(|name| (index + 1, name)))
-    }
-}
-
-struct Handle {
-    id: usize,
-    node: Node,
-    cursor: usize,
-    writable: bool,
-}
-
-pub(crate) struct TaskFs {
-    // A scoped task resolves paths through its directory handles.
-    cwd: Option<DirectoryId>,
-    slots: [Option<Handle>; HANDLE_COUNT],
-}
-
-impl TaskFs {
-    pub(crate) const fn new() -> Self {
-        Self {
-            cwd: Some(DirectoryId::Root),
-            slots: [const { None }; HANDLE_COUNT],
-        }
-    }
-
-    pub(crate) fn grant_directory(&self, fs: &mut RamFs, fd: usize) -> Option<(Self, usize)> {
-        let directory = self.directory_for_handle(fd)?;
-        let handle = fs.allocate_handle(false, |_| Some(Node::Directory(directory)))?;
-        let child_fd = handle.id;
-        let mut slots = [const { None }; HANDLE_COUNT];
-        slots[0] = Some(handle);
-        Some((Self { cwd: None, slots }, child_fd))
-    }
-
-    pub(crate) fn open(&mut self, fs: &mut RamFs, path: &[u8], writable: bool) -> Option<usize> {
-        self.open_path(fs, PathBase::WorkingDirectory(self.cwd?), path, writable)
-    }
-
-    pub(crate) fn open_at(
-        &mut self,
-        fs: &mut RamFs,
-        directory_fd: usize,
-        path: &[u8],
-    ) -> Option<usize> {
-        let directory = self.directory_for_handle(directory_fd)?;
-        self.open_path(fs, PathBase::Confined(directory), path, false)
-    }
-
-    fn directory_for_handle(&self, fd: usize) -> Option<DirectoryId> {
-        let slot = self.handle_slot(fd)?;
-        let Node::Directory(directory) = self.slots[slot].as_ref()?.node else {
-            return None;
-        };
-        Some(directory)
-    }
-
-    fn handle_slot(&self, fd: usize) -> Option<usize> {
-        self.slots
-            .iter()
-            .position(|slot| slot.as_ref().is_some_and(|handle| handle.id == fd))
-    }
-
-    fn open_path(
-        &mut self,
-        fs: &mut RamFs,
-        base: PathBase,
-        path: &[u8],
-        writable: bool,
-    ) -> Option<usize> {
-        let slot = self.slots.iter().position(Option::is_none)?;
-        let handle = fs.allocate_handle(writable, |fs| fs.open(base, path, writable))?;
-        let id = handle.id;
-        self.slots[slot] = Some(handle);
-        Some(id)
-    }
-
-    pub(crate) fn mkdir(&self, fs: &mut RamFs, path: &[u8]) -> Option<usize> {
-        fs.mkdir(self.cwd?, path)
-    }
-
-    pub(crate) fn unlink(&self, fs: &mut RamFs, path: &[u8]) -> Option<usize> {
-        fs.unlink(self.cwd?, path)
-    }
-
-    fn uses_directory(&self, directory: DirectoryId) -> bool {
-        self.cwd == Some(directory)
-            || self
-                .slots
-                .iter()
-                .flatten()
-                .any(|handle| matches!(handle.node, Node::Directory(open) if open == directory))
-    }
-
-    pub(crate) fn chdir(&mut self, fs: &RamFs, path: &[u8]) -> Option<usize> {
-        let directory = match fs.resolve_path(PathBase::WorkingDirectory(self.cwd?), path)? {
-            ResolvedPath::Directory(directory) => directory,
-            ResolvedPath::Entry(parent, name) => {
-                let Node::Directory(directory) = fs.lookup(parent, name)? else {
-                    return None;
-                };
-                directory
-            }
-        };
-        self.cwd = Some(directory);
-        Some(0)
-    }
-
-    pub(crate) fn getcwd(&self, fs: &RamFs, deliver: impl FnOnce(&[u8]) -> bool) -> Option<usize> {
-        let mut directory = self.cwd?;
-        let mut buffer = [0; CWD_PATH_CAPACITY];
-        let mut start = buffer.len();
-        while let DirectoryId::Child(index) = directory {
-            let entry = fs.directories[index].as_ref()?;
-            let name = entry.name.as_bytes();
-            let end = start;
-            start = start.checked_sub(name.len() + 1)?;
-            buffer[start] = b'/';
-            buffer[start + 1..end].copy_from_slice(name);
-            directory = entry.parent;
-        }
-        if start == buffer.len() {
-            start -= 1;
-            buffer[start] = b'/';
-        }
-        let path = &buffer[start..];
-        deliver(path).then_some(path.len())
-    }
-
-    pub(crate) fn read(
-        &mut self,
-        fs: &RamFs,
-        fd: usize,
-        length: usize,
-        deliver: impl FnOnce(&[u8]) -> bool,
-    ) -> Option<usize> {
-        let slot = self.handle_slot(fd)?;
-        let handle = self.slots[slot].as_mut()?;
-        // Another handle can truncate the file below this cursor.
-        let remaining = fs
-            .contents(handle.node)?
-            .get(handle.cursor..)
-            .unwrap_or(&[]);
-        let bytes = &remaining[..remaining.len().min(length)];
-        if !deliver(bytes) {
-            return None;
-        }
-        handle.cursor += bytes.len();
-        Some(bytes.len())
-    }
-
-    pub(crate) fn write(&mut self, fs: &mut RamFs, fd: usize, bytes: &[u8]) -> Option<usize> {
-        let slot = self.handle_slot(fd)?;
-        let handle = self.slots[slot].as_mut()?;
-        if !handle.writable {
-            return None;
-        }
-        let Node::WritableFile(index) = handle.node else {
-            return None;
-        };
-        if bytes.is_empty() {
-            return Some(0);
-        }
-        let file = fs.writable[index].as_mut()?;
-        let end = handle.cursor.checked_add(bytes.len())?;
-        file.contents
-            .get_mut(handle.cursor..end)?
-            .copy_from_slice(bytes);
-        file.length = file.length.max(end);
-        handle.cursor = end;
-        Some(bytes.len())
-    }
-
-    pub(crate) fn readdir(
-        &mut self,
-        fs: &RamFs,
-        fd: usize,
-        deliver: impl FnOnce(&[u8]) -> bool,
-    ) -> Option<usize> {
-        let slot = self.handle_slot(fd)?;
-        let handle = self.slots[slot].as_mut()?;
-        let Node::Directory(directory) = handle.node else {
-            return None;
-        };
-        let (next, name) = fs
-            .next_entry(directory, handle.cursor)
-            .unwrap_or((handle.cursor, &[]));
-        if !deliver(name) {
-            return None;
-        }
-        handle.cursor = next;
-        Some(name.len())
-    }
-
-    pub(crate) fn close(&mut self, fs: &mut RamFs, fd: usize) -> Option<usize> {
-        let slot = self.handle_slot(fd)?;
-        let handle = self.slots[slot].take()?;
-        fs.release(handle.node);
-        Some(0)
-    }
-
-    pub(crate) fn close_all(&mut self, fs: &mut RamFs) {
-        for handle in self.slots.iter_mut().filter_map(Option::take) {
-            fs.release(handle.node);
-        }
     }
 }

@@ -139,7 +139,7 @@ impl Scheduler {
             .iter()
             .filter(|task| task.state != TaskState::Stopped)
             .map(|task| &task.fs);
-        fs.rmdir(&self.tasks[self.current].fs, path, live_task_fs)
+        self.tasks[self.current].fs.rmdir(fs, path, live_task_fs)
     }
 
     pub(crate) fn spawn(
