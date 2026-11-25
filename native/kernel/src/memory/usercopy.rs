@@ -1,47 +1,58 @@
 use core::arch::asm;
 
-use super::sv39::{USER_STACK_BASE, USER_STACK_TOP};
+use super::frame::FRAME_SIZE;
 
 pub(crate) const SSTATUS_SUM: usize = 1 << 18;
 
-pub(crate) fn copy_from_user_stack(source: usize, destination: &mut [u8]) -> bool {
-    if !in_user_stack(source, destination.len()) {
-        return false;
-    }
-    // SAFETY: The source is in the current task's stack and the destination
-    // slice is writable supervisor memory.
-    unsafe {
-        copy_bytes(
-            source,
-            destination.as_mut_ptr().expose_provenance(),
-            destination.len(),
-        );
-    }
-    true
+#[derive(Clone, Copy)]
+pub(crate) struct UserStack {
+    pub(super) base: usize,
 }
 
-pub(crate) fn copy_to_user_stack(source: &[u8], destination: usize, capacity: usize) -> bool {
-    if source.len() > capacity || !in_user_stack(destination, capacity) {
-        return false;
+impl UserStack {
+    pub(crate) fn top(self) -> usize {
+        self.base + FRAME_SIZE
     }
-    // SAFETY: The source slice is readable supervisor memory and the copied
-    // bytes fit within the validated user destination.
-    unsafe {
-        copy_bytes(
-            source.as_ptr().expose_provenance(),
-            destination,
-            source.len(),
-        )
-    };
-    true
-}
 
-pub(crate) fn in_user_stack(address: usize, length: usize) -> bool {
-    length == 0
-        || (address >= USER_STACK_BASE
-            && address
-                .checked_add(length)
-                .is_some_and(|end| end <= USER_STACK_TOP))
+    pub(crate) fn contains(self, address: usize, length: usize) -> bool {
+        length == 0
+            || (address >= self.base
+                && address
+                    .checked_add(length)
+                    .is_some_and(|end| end <= self.top()))
+    }
+
+    pub(crate) fn copy_from_user(self, source: usize, destination: &mut [u8]) -> bool {
+        if !self.contains(source, destination.len()) {
+            return false;
+        }
+        // SAFETY: Syscall dispatch uses the active task's stack. The source is
+        // in that stack and the destination slice is writable supervisor memory.
+        unsafe {
+            copy_bytes(
+                source,
+                destination.as_mut_ptr().expose_provenance(),
+                destination.len(),
+            );
+        }
+        true
+    }
+
+    pub(crate) fn copy_to_user(self, source: &[u8], destination: usize, capacity: usize) -> bool {
+        if source.len() > capacity || !self.contains(destination, capacity) {
+            return false;
+        }
+        // SAFETY: The source slice is readable supervisor memory and the copied
+        // bytes fit within the active task's stack.
+        unsafe {
+            copy_bytes(
+                source.as_ptr().expose_provenance(),
+                destination,
+                source.len(),
+            );
+        }
+        true
+    }
 }
 
 // The caller supplies readable and writable ranges on the active address space.

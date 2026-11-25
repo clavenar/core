@@ -16,7 +16,7 @@ use crate::drivers::uart;
 use crate::fs::ramfs::{RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
 use crate::ipc::pipe::PipeResult;
 use crate::ipc::{Message, MessageKind};
-use crate::memory::usercopy::{copy_from_user_stack, copy_to_user_stack, in_user_stack};
+use crate::memory::usercopy::UserStack;
 use crate::scheduler::{LaunchScope, Mailbox, ReceiveResult, Scheduler, WaitResult};
 
 const CONSOLE_WRITE_LIMIT: usize = 128;
@@ -43,6 +43,7 @@ pub(crate) fn dispatch(
     let a2 = frame.registers[REG_A2];
     let a3 = frame.registers[REG_A3];
     let number = frame.registers[REG_A7];
+    let stack = scheduler.address_space().stack;
     frame.registers[REG_A0] = match number {
         SYS_PROBE => {
             write_task(scheduler.current_id());
@@ -50,34 +51,38 @@ pub(crate) fn dispatch(
             PROBE_VALUE
         }
         SYS_EXIT => return Outcome::Exit(a0),
-        SYS_WRITE_CONSOLE => write_console(a0, a1),
+        SYS_WRITE_CONSOLE => write_console(stack, a0, a1),
         SYS_TIMER_FIRED => usize::from(scheduler.timer_fired()),
         SYS_READ_CONSOLE => uart::read_byte().map_or(SYSCALL_ERROR, usize::from),
-        SYS_OPEN => open_file(scheduler.task_fs(), fs, a0, a1, a2).unwrap_or(SYSCALL_ERROR),
-        SYS_OPEN_AT => with_user_path(a1, a2, |path| scheduler.task_fs().open_at(fs, a0, path))
-            .unwrap_or(SYSCALL_ERROR),
+        SYS_OPEN => open_file(scheduler.task_fs(), fs, stack, a0, a1, a2).unwrap_or(SYSCALL_ERROR),
+        SYS_OPEN_AT => with_user_path(stack, a1, a2, |path| {
+            scheduler.task_fs().open_at(fs, a0, path)
+        })
+        .unwrap_or(SYSCALL_ERROR),
         SYS_READ => scheduler
             .task_fs()
-            .read(fs, a0, a2, |bytes| copy_to_user_stack(bytes, a1, a2))
+            .read(fs, a0, a2, |bytes| stack.copy_to_user(bytes, a1, a2))
             .unwrap_or(SYSCALL_ERROR),
         SYS_READDIR => scheduler
             .task_fs()
-            .readdir(fs, a0, |name| copy_to_user_stack(name, a1, a2))
+            .readdir(fs, a0, |name| stack.copy_to_user(name, a1, a2))
             .unwrap_or(SYSCALL_ERROR),
         SYS_CLOSE => scheduler.task_fs().close(fs, a0).unwrap_or(SYSCALL_ERROR),
-        SYS_WRITE => write_file(scheduler.task_fs(), fs, a0, a1, a2).unwrap_or(SYSCALL_ERROR),
-        SYS_UNLINK => with_user_path(a0, a1, |path| scheduler.task_fs().unlink(fs, path))
+        SYS_WRITE => {
+            write_file(scheduler.task_fs(), fs, stack, a0, a1, a2).unwrap_or(SYSCALL_ERROR)
+        }
+        SYS_UNLINK => with_user_path(stack, a0, a1, |path| scheduler.task_fs().unlink(fs, path))
             .unwrap_or(SYSCALL_ERROR),
-        SYS_MKDIR => with_user_path(a0, a1, |path| scheduler.task_fs().mkdir(fs, path))
+        SYS_MKDIR => with_user_path(stack, a0, a1, |path| scheduler.task_fs().mkdir(fs, path))
             .unwrap_or(SYSCALL_ERROR),
-        SYS_CHDIR => with_user_path(a0, a1, |path| scheduler.task_fs().chdir(fs, path))
+        SYS_CHDIR => with_user_path(stack, a0, a1, |path| scheduler.task_fs().chdir(fs, path))
             .unwrap_or(SYSCALL_ERROR),
         SYS_GETCWD => scheduler
             .task_fs()
-            .getcwd(fs, |path| copy_to_user_stack(path, a0, a1))
+            .getcwd(fs, |path| stack.copy_to_user(path, a0, a1))
             .unwrap_or(SYSCALL_ERROR),
         SYS_RMDIR => {
-            with_user_path(a0, a1, |path| scheduler.rmdir(fs, path)).unwrap_or(SYSCALL_ERROR)
+            with_user_path(stack, a0, a1, |path| scheduler.rmdir(fs, path)).unwrap_or(SYSCALL_ERROR)
         }
         SYS_SPAWN => scheduler
             .spawn(fs, a0, LaunchScope::Plain, None)
@@ -107,11 +112,11 @@ pub(crate) fn dispatch(
         SYS_GOAL_CLOSE => scheduler
             .close_goal(a0)
             .map_or(SYSCALL_ERROR, |result| result as usize),
-        SYS_PIPE_READ | SYS_PIPE_WRITE if in_user_stack(a1, a2) => {
+        SYS_PIPE_READ | SYS_PIPE_WRITE if stack.contains(a1, a2) => {
             let result = if number == SYS_PIPE_READ {
-                scheduler.read_pipe(a0, a2, frame, |bytes| copy_to_user_stack(bytes, a1, a2))
+                scheduler.read_pipe(a0, a2, frame, |bytes| stack.copy_to_user(bytes, a1, a2))
             } else {
-                scheduler.write_pipe(a0, a2, frame, |bytes| copy_from_user_stack(a1, bytes))
+                scheduler.write_pipe(a0, a2, frame, |bytes| stack.copy_from_user(a1, bytes))
             };
             match result {
                 PipeResult::Ready(count) => count,
@@ -168,15 +173,15 @@ pub(crate) fn dispatch(
             }
         },
         SYS_MESSAGE_SEND => scheduler
-            .send_reply(None, a1, |bytes| copy_from_user_stack(a0, bytes))
+            .send_reply(None, a1, |bytes| stack.copy_from_user(a0, bytes))
             .unwrap_or(SYSCALL_ERROR),
         SYS_REPLY_SEND => ReplyKind::from_raw(a2)
             .and_then(|kind| {
-                scheduler.send_reply(Some(kind), a1, |bytes| copy_from_user_stack(a0, bytes))
+                scheduler.send_reply(Some(kind), a1, |bytes| stack.copy_from_user(a0, bytes))
             })
             .unwrap_or(SYSCALL_ERROR),
         SYS_MESSAGE_RECV | SYS_REQUEST_RECV | SYS_REPLY_RECV
-            if (a1 > 0 || number == SYS_REPLY_RECV) && in_user_stack(a0, a1) =>
+            if (a1 > 0 || number == SYS_REPLY_RECV) && stack.contains(a0, a1) =>
         {
             let legacy = number == SYS_MESSAGE_RECV;
             let mailbox = match number {
@@ -185,7 +190,7 @@ pub(crate) fn dispatch(
                 _ => Mailbox::ChildReply(a2),
             };
             match scheduler.receive_message(mailbox, legacy, frame, |bytes| {
-                copy_to_user_stack(bytes, a0, a1)
+                stack.copy_to_user(bytes, a0, a1)
             }) {
                 ReceiveResult::Error => SYSCALL_ERROR,
                 ReceiveResult::Blocked => return Outcome::Wait,
@@ -218,11 +223,12 @@ fn spawn_with_request(
     address: usize,
     length: usize,
 ) -> Option<usize> {
+    let stack = scheduler.address_space().stack;
     let request = Message::new(
         scheduler.current_id(),
         MessageKind::Request(kind),
         length,
-        |bytes| copy_from_user_stack(address, bytes),
+        |bytes| stack.copy_from_user(address, bytes),
     )?;
     let scope = directory_fd.map_or(LaunchScope::Plain, LaunchScope::Directory);
     scheduler.spawn(fs, program, scope, Some(request))
@@ -231,6 +237,7 @@ fn spawn_with_request(
 fn open_file(
     task_fs: &mut TaskFs,
     fs: &mut RamFs,
+    stack: UserStack,
     address: usize,
     length: usize,
     mode: usize,
@@ -240,17 +247,20 @@ fn open_file(
         OPEN_WRITE_TRUNCATE => true,
         _ => return None,
     };
-    with_user_path(address, length, |path| task_fs.open(fs, path, writable))
+    with_user_path(stack, address, length, |path| {
+        task_fs.open(fs, path, writable)
+    })
 }
 
 fn with_user_path(
+    stack: UserStack,
     address: usize,
     length: usize,
     operation: impl FnOnce(&[u8]) -> Option<usize>,
 ) -> Option<usize> {
     let mut buffer = [0; PATH_MAX_BYTES];
     let path = buffer.get_mut(..length)?;
-    if !copy_from_user_stack(address, path) {
+    if !stack.copy_from_user(address, path) {
         return None;
     }
     operation(path)
@@ -259,24 +269,25 @@ fn with_user_path(
 fn write_file(
     task_fs: &mut TaskFs,
     fs: &mut RamFs,
+    stack: UserStack,
     fd: usize,
     address: usize,
     length: usize,
 ) -> Option<usize> {
     let mut buffer = [0; WRITABLE_FILE_CAPACITY];
     let bytes = buffer.get_mut(..length)?;
-    if !copy_from_user_stack(address, bytes) {
+    if !stack.copy_from_user(address, bytes) {
         return None;
     }
     task_fs.write(fs, fd, bytes)
 }
 
-fn write_console(address: usize, length: usize) -> usize {
+fn write_console(stack: UserStack, address: usize, length: usize) -> usize {
     let mut buffer = [0; CONSOLE_WRITE_LIMIT];
     let Some(bytes) = buffer.get_mut(..length) else {
         return SYSCALL_ERROR;
     };
-    if !copy_from_user_stack(address, bytes) {
+    if !stack.copy_from_user(address, bytes) {
         return SYSCALL_ERROR;
     }
 

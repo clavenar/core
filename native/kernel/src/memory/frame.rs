@@ -1,9 +1,12 @@
 use core::ptr;
 use core::slice::IterMut;
 
+use super::user_image::MAX_USER_IMAGE_PAGES;
+use crate::scheduler::TASK_COUNT;
+
 pub(crate) const FRAME_SIZE: usize = 4096;
-// Three shared mapping frames and up to six frames for each of three tasks.
-const FRAME_COUNT: usize = 21;
+// Three shared page tables. Each task needs three tables, a stack, and its image.
+const FRAME_COUNT: usize = 3 + TASK_COUNT * (4 + MAX_USER_IMAGE_PAGES);
 const WORDS_PER_FRAME: usize = FRAME_SIZE / size_of::<u64>();
 
 #[repr(C, align(4096))]

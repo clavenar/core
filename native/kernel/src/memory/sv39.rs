@@ -2,10 +2,11 @@ use core::arch::asm;
 use core::ptr::NonNull;
 
 use super::frame::{FRAME_SIZE, Frame, FrameAllocator};
-use super::user_image::{USER_IMAGE_PAGES, USER_IMAGE_SIZE, USER_TEXT_BASE};
+use super::user_image::{MAX_USER_IMAGE_PAGES, USER_TEXT_BASE};
+use super::usercopy::UserStack;
 
-pub(crate) const USER_STACK_BASE: usize = USER_TEXT_BASE + USER_IMAGE_SIZE;
-pub(crate) const USER_STACK_TOP: usize = USER_STACK_BASE + FRAME_SIZE;
+// Preserve the original stack address for one- and two-page programs.
+const MIN_USER_STACK_BASE: usize = USER_TEXT_BASE + 2 * FRAME_SIZE;
 
 const PAGE_SHIFT: usize = 12;
 const VPN_BITS: usize = 9;
@@ -30,7 +31,7 @@ unsafe extern "C" {
 pub(crate) struct BootMappings<const PROGRAMS: usize> {
     text: usize,
     uart: usize,
-    user_code: [[Option<usize>; USER_IMAGE_PAGES]; PROGRAMS],
+    user_code: [[Option<usize>; MAX_USER_IMAGE_PAGES]; PROGRAMS],
     kernel_middle: usize,
     uart_leaves: usize,
 }
@@ -38,7 +39,7 @@ pub(crate) struct BootMappings<const PROGRAMS: usize> {
 impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
     pub(crate) fn new(
         frames: &mut FrameAllocator<'_>,
-        user_code: [[Option<&Frame>; USER_IMAGE_PAGES]; PROGRAMS],
+        user_code: [[Option<&Frame>; MAX_USER_IMAGE_PAGES]; PROGRAMS],
         uart: usize,
     ) -> Option<Self> {
         let kernel_middle = frames.allocate_zeroed()?;
@@ -82,20 +83,22 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
         let root = frames.allocate_zeroed()?;
         let low_middle = frames.allocate_zeroed()?;
         let user_leaves = frames.allocate_zeroed()?;
-        let user_stack = frames.allocate_zeroed()?;
+        let stack_frame = frames.allocate_zeroed()?;
 
         // The user image and stack share a leaf table. The UART uses a separate
         // leaf table under the same low root entry on QEMU virt.
         let entries = user_leaves.words_mut();
+        let mut stack_base = MIN_USER_STACK_BASE;
         for (index, page) in user_code.into_iter().enumerate() {
             if let Some(address) = page {
                 let virtual_address = USER_TEXT_BASE + index * FRAME_SIZE;
                 entries[vpn_index(virtual_address, 0)] =
                     pte(address, VALID | ACCESSED | READ | EXECUTE | USER);
+                stack_base = stack_base.max(virtual_address + FRAME_SIZE);
             }
         }
-        entries[vpn_index(USER_STACK_BASE, 0)] = pte(
-            user_stack.physical_address(),
+        entries[vpn_index(stack_base, 0)] = pte(
+            stack_frame.physical_address(),
             VALID | ACCESSED | READ | WRITE | DIRTY | USER,
         );
 
@@ -106,7 +109,8 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
         root.words_mut()[vpn_index(self.uart, 2)] = pte(low_middle.physical_address(), VALID);
         Some(AddressSpace {
             root: root.physical_address(),
-            user_stack: NonNull::from(user_stack),
+            stack: UserStack { base: stack_base },
+            stack_frame: NonNull::from(stack_frame),
         })
     }
 }
@@ -114,7 +118,8 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
 #[derive(Clone, Copy)]
 pub(crate) struct AddressSpace {
     root: usize,
-    user_stack: NonNull<Frame>,
+    pub(crate) stack: UserStack,
+    stack_frame: NonNull<Frame>,
 }
 
 impl AddressSpace {
@@ -128,7 +133,7 @@ impl AddressSpace {
     pub(crate) unsafe fn clear_user_stack(self) {
         // SAFETY: The frame is reserved for this task and the caller ensures
         // exclusive access while clearing it.
-        unsafe { self.user_stack.as_ptr().write_bytes(0, 1) };
+        unsafe { self.stack_frame.as_ptr().write_bytes(0, 1) };
     }
 
     pub(crate) fn activate(self) -> bool {

@@ -1,8 +1,8 @@
 use super::frame::{FRAME_SIZE, Frame, FrameAllocator};
 
 pub(crate) const USER_TEXT_BASE: usize = 0x0040_0000;
-pub(crate) const USER_IMAGE_PAGES: usize = 2;
-pub(crate) const USER_IMAGE_SIZE: usize = USER_IMAGE_PAGES * FRAME_SIZE;
+pub(super) const MAX_USER_IMAGE_PAGES: usize = 4;
+const MAX_USER_IMAGE_SIZE: usize = MAX_USER_IMAGE_PAGES * FRAME_SIZE;
 
 const ELF_HEADER_SIZE: usize = 64;
 const PROGRAM_HEADER_SIZE: usize = 56;
@@ -15,10 +15,10 @@ const PF_READ_EXECUTE: u32 = 5;
 
 pub(crate) struct LoadedImage<'a> {
     pub(crate) entry: usize,
-    pub(crate) pages: [Option<&'a Frame>; USER_IMAGE_PAGES],
+    pub(crate) pages: [Option<&'a Frame>; MAX_USER_IMAGE_PAGES],
 }
 
-/// Loads a static RV64 executable into one or two zeroed frames.
+/// Loads a static RV64 executable, allocating only the frames its segment uses.
 pub(crate) fn load<'a>(image: &[u8], frames: &mut FrameAllocator<'a>) -> Option<LoadedImage<'a>> {
     let header = image.get(..ELF_HEADER_SIZE)?;
     // Magic, ELF64 class, little-endian data, and the identification version.
@@ -54,7 +54,7 @@ pub(crate) fn load<'a>(image: &[u8], frames: &mut FrameAllocator<'a>) -> Option<
     if entry % 2 != 0 || entry_offset.checked_add(2)? > bytes.len() {
         return None;
     }
-    let mut pages = [None; USER_IMAGE_PAGES];
+    let mut pages = [None; MAX_USER_IMAGE_PAGES];
     let mut chunks = bytes.chunks(FRAME_SIZE);
     for page in pages.iter_mut().take(memory_size.div_ceil(FRAME_SIZE)) {
         let frame = frames.allocate_zeroed()?;
@@ -76,7 +76,7 @@ fn load_segment<'a>(image: &'a [u8], header: &[u8]) -> Option<(&'a [u8], usize)>
         || offset % FRAME_SIZE != 0
         || file_size == 0
         || file_size > memory_size
-        || memory_size > USER_IMAGE_SIZE
+        || memory_size > MAX_USER_IMAGE_SIZE
     {
         return None;
     }

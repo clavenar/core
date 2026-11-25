@@ -10,7 +10,7 @@ use crate::arch::riscv64::trap::TrapFrame;
 use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::ipc::pipe::Pipe;
 use crate::ipc::{Message, MessageKind};
-use crate::memory::sv39::{AddressSpace, USER_STACK_TOP};
+use crate::memory::sv39::AddressSpace;
 
 pub(crate) const TASK_COUNT: usize = 3;
 const HELLO_TASK_INDEX: usize = 0;
@@ -129,7 +129,7 @@ impl Scheduler {
             let (address_space, entry) = programs[index];
             Task {
                 entry,
-                frame: TrapFrame::new_user(entry, USER_STACK_TOP, index + 1, sstatus),
+                frame: TrapFrame::new_user(entry, address_space.stack.top(), index + 1, sstatus),
                 address_space,
                 fs: if index == SHELL_TASK_INDEX {
                     TaskFs::at_root()
@@ -204,7 +204,7 @@ impl Scheduler {
         let next_handle = handle.checked_add(1)?;
         let mut frame = TrapFrame::new_user(
             self.tasks[index].entry,
-            USER_STACK_TOP,
+            self.tasks[index].address_space.stack.top(),
             index + 1,
             self.initial_status,
         );

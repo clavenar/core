@@ -44,19 +44,22 @@ physical address of task 1's Sv39 root table.
 The build links [hello](userspace/hello/), [the shell](userspace/shell/), and
 [echo](userspace/echo/) as separate RV64 ELFs and embeds them in the kernel.
 The loader accepts static, little-endian ELF64 executables with one
-read/execute segment of at most 8 KiB at `0x00400000`. The segment's memory
-size determines whether it uses one or two pages. Boot reports each program's
-validated entry address.
-If loading fails, it prints `User ELF load failed` with the program name and
-idles.
+read/execute segment of at most 16 KiB at `0x00400000`. The loader allocates
+one to four pages based on the segment's memory size (`p_memsz`) and zero-fills
+any bytes beyond the file data. Boot reports each program's validated entry
+address. If loading fails, it prints `User ELF load failed` with the program
+name and idles.
 
 The kernel activates paging, prints `Sv39 paging enabled`, and starts hello
 as task 1 and the shell as task 2. Task 3 starts when the shell launches
 `echo`. Each receives its task ID in `a0` and runs with its own Sv39 root
-and read/execute image. Each task has a 4 KiB read/write, non-executable stack
-at `0x00402000`. The kernel and UART mappings are shared in supervisor mode.
-The kernel, 32 KiB supervisor stack, and 21-frame boot pool fit within one aligned
-2 MiB physical region.
+and read/execute image. Each task has a 4 KiB read/write, non-executable stack.
+It starts at `0x00402000` for one- and two-page images, at `0x00403000` for
+three-page images, and at `0x00404000` for four-page images. The initial stack
+pointer is at the top of that page. Nonempty syscall buffers must fit within
+the calling task's stack. The kernel and UART mappings are shared in supervisor
+mode. The kernel, 32 KiB supervisor stack, and 27-frame boot pool fit within
+one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
