@@ -4,7 +4,7 @@ use clv_abi::{
     PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
 };
 
-use super::{hex, print_handle, print_line, split_word};
+use super::{goal::GoalOptions, hex, print_handle, print_line, split_word};
 
 struct Child {
     name: &'static [u8],
@@ -67,14 +67,27 @@ impl Children {
         }
     }
 
-    pub(super) fn run_in_goal(&mut self, goal: Option<usize>, name: &[u8]) {
-        let Some(child) = self.named(name) else {
-            return print(b"usage: goal run <hello|echo>\r\n");
+    fn goal_child(
+        &mut self,
+        arguments: &[u8],
+        allow_suspended: bool,
+    ) -> Option<(&mut Child, GoalOptions)> {
+        let (options, name) = GoalOptions::parse(arguments, allow_suspended)?;
+        Some((self.named(name)?, options))
+    }
+
+    pub(super) fn run_in_goal(&mut self, goal: Option<usize>, arguments: &[u8]) {
+        let Some((child, options)) = self.goal_child(arguments, false) else {
+            return print(b"usage: goal run [--reply-bytes N] <hello|echo>\r\n");
         };
         let Some(goal) = goal else {
             return print(b"no current goal\r\n");
         };
-        if let Some(handle) = clv::goal::run(goal, child.selector) {
+        let result = match options.reply_bytes {
+            Some(bytes) => clv::goal::run_with_reply_budget(goal, child.selector, bytes),
+            None => clv::goal::run(goal, child.selector),
+        };
+        if let Some(handle) = result {
             child.handle = handle;
             print_handle(b"goal child=", handle);
         } else {
@@ -87,19 +100,13 @@ impl Children {
         goal: usize,
         arguments: &[u8],
     ) -> Option<agent::AgentLaunch> {
-        let (option, rest) = split_word(arguments);
-        let suspended = option == b"--suspended";
-        let name = if suspended { rest } else { arguments };
-        let Some(child) = self.named(name) else {
-            print(b"usage: agent run [--suspended] <hello|echo>\r\n");
+        let Some((child, options)) = self.goal_child(arguments, true) else {
+            print(b"usage: agent run [--suspended] [--reply-bytes N] <hello|echo>\r\n");
             return None;
         };
-        let run = if suspended {
-            agent::run_suspended
-        } else {
-            agent::run
-        };
-        let Some(launch) = run(goal, child.selector) else {
+        let Some(launch) =
+            agent::run_with_options(goal, child.selector, options.suspended, options.reply_bytes)
+        else {
             print(b"cannot start agent\r\n");
             return None;
         };

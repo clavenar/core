@@ -1,6 +1,9 @@
-use clv::goal::{self, CancelResult, CloseResult, GoalStatus};
+mod options;
+
+use clv::goal::{self, CancelResult, CloseResult, GoalStatus, ReplyBudget};
 use clv::{agent, print};
 use clv_abi::CompletionKind;
+pub(super) use options::GoalOptions;
 
 use super::{children::Children, hex, print_handle, print_line, split_word};
 
@@ -16,18 +19,12 @@ pub(super) fn command(
 ) {
     let handle = current.as_ref().map(|goal| goal.handle);
     match split_word(arguments) {
-        (b"create", b"") => match goal::create() {
-            Some(handle) => {
-                *current = Some(CurrentGoal {
-                    handle,
-                    agent: None,
-                });
-                print_handle(b"goal created ", handle);
-            }
-            None if current.is_some() => print(b"goal already open\r\n"),
-            None => print(b"cannot create goal\r\n"),
+        (b"create", arguments) => create(arguments, current),
+        (b"run", arguments) => children.run_in_goal(handle, arguments),
+        (b"budget", b"") => match handle.and_then(goal::budget) {
+            Some(budget) => print_budget(budget),
+            None => print(b"no current goal\r\n"),
         },
-        (b"run", name) => children.run_in_goal(handle, name),
         (b"status", b"") => match handle.and_then(goal::status) {
             Some(status) => print_status(status),
             None => print(b"no current goal\r\n"),
@@ -45,8 +42,55 @@ pub(super) fn command(
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create | run <hello|echo> | status | cancel | close\r\n"),
+        _ => print(b"usage: goal create [--reply-bytes N] | run [--reply-bytes N] <hello|echo> | budget | status | cancel | close\r\n"),
     }
+}
+
+fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
+    let Some((options, b"")) = GoalOptions::parse(arguments, false) else {
+        return print(b"usage: goal create [--reply-bytes N]\r\n");
+    };
+    let result = match options.reply_bytes {
+        Some(bytes) => goal::create_with_reply_budget(bytes),
+        None => goal::create(),
+    };
+    match result {
+        Some(handle) => {
+            *current = Some(CurrentGoal {
+                handle,
+                agent: None,
+            });
+            print_handle(b"goal created ", handle);
+        }
+        None if current.is_some() => print(b"goal already open\r\n"),
+        None => print(b"cannot create goal\r\n"),
+    }
+}
+
+fn print_budget(budget: ReplyBudget) {
+    const DIGITS: usize = usize::MAX.ilog10() as usize + 1;
+    fn amount(value: Option<usize>, buf: &mut [u8; DIGITS]) -> &[u8] {
+        let Some(mut value) = value else {
+            return b"unlimited";
+        };
+        let mut start = buf.len();
+        loop {
+            start -= 1;
+            buf[start] = b'0' + (value % 10) as u8;
+            value /= 10;
+            if value == 0 {
+                return &buf[start..];
+            }
+        }
+    }
+    print_line(&[
+        b"available=",
+        amount(budget.available, &mut [0; DIGITS]),
+        b" reserved=",
+        amount(budget.reserved, &mut [0; DIGITS]),
+        b" spent=",
+        amount(Some(budget.spent), &mut [0; DIGITS]),
+    ]);
 }
 
 pub(super) fn agent_command(
@@ -99,7 +143,7 @@ pub(super) fn agent_command(
                 None => print(b"no current agent\r\n"),
             }
         }
-        _ => print(b"usage: agent run [--suspended] <hello|echo> | status | suspend | resume\r\n"),
+        _ => print(b"usage: agent run [--suspended] [--reply-bytes N] <hello|echo> | status | suspend | resume\r\n"),
     }
 }
 

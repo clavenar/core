@@ -1,5 +1,10 @@
+pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
-use clv_abi::{SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE, SYS_GOAL_RUN, SYS_GOAL_STATUS};
+use clv_abi::{
+    SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
+    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET,
+    SYS_GOAL_STATUS,
+};
 
 use super::{ecall, syscall, syscall_result};
 
@@ -7,9 +12,27 @@ pub fn create() -> Option<usize> {
     syscall_result(syscall(SYS_GOAL_CREATE, 0, 0, 0))
 }
 
+pub fn create_with_reply_budget(bytes: usize) -> Option<usize> {
+    syscall_result(syscall(SYS_GOAL_CREATE_WITH_REPLY_BUDGET, bytes, 0, 0))
+}
+
+pub fn budget(goal: usize) -> Option<ReplyBudget> {
+    let (flags, available, reserved, spent) = ecall(SYS_GOAL_BUDGET, goal, 0, 0, 0, 0);
+    ReplyBudget::from_registers(flags, available, reserved, spent)
+}
+
 /// Starts one ordinary child and returns its launch handle.
 pub fn run(goal: usize, program: usize) -> Option<usize> {
     syscall_result(syscall(SYS_GOAL_RUN, goal, program, 0))
+}
+
+pub fn run_with_reply_budget(goal: usize, program: usize, bytes: usize) -> Option<usize> {
+    syscall_result(syscall(
+        SYS_GOAL_RUN_WITH_REPLY_BUDGET,
+        goal,
+        program,
+        bytes,
+    ))
 }
 
 pub fn status(goal: usize) -> Option<GoalStatus> {

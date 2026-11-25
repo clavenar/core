@@ -1,5 +1,9 @@
+mod budget;
+
+use self::budget::ReplyAccount;
 use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult};
+use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
 
 use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
@@ -9,6 +13,7 @@ pub(super) struct Goal {
     handle: usize,
     agent: Option<usize>,
     status: GoalStatus,
+    replies: ReplyAccount,
 }
 
 impl Goal {
@@ -17,12 +22,21 @@ impl Goal {
         handle: usize,
         child: usize,
         agent: Option<usize>,
+        reply_bytes: Option<usize>,
     ) -> Option<()> {
         if self.handle != handle || self.status != GoalStatus::Ready {
             return None;
         }
+        self.replies.reserve(reply_bytes)?;
         self.agent = agent;
         self.status = GoalStatus::Running { child };
+        Some(())
+    }
+
+    pub(super) fn charge_reply(&mut self, child: usize, bytes: usize) -> Option<()> {
+        if self.running_child() == Some(child) {
+            self.replies.charge(bytes)?;
+        }
         Some(())
     }
 
@@ -30,6 +44,7 @@ impl Goal {
         if self.running_child() != Some(child) {
             return;
         }
+        self.replies.release();
         self.status = match completion {
             TaskCompletion::Exited(0) => GoalStatus::Completed { child },
             TaskCompletion::Cancelled => GoalStatus::Cancelled { child: Some(child) },
@@ -49,7 +64,7 @@ impl Goal {
 }
 
 impl Scheduler {
-    pub(crate) fn create_goal(&mut self) -> Option<usize> {
+    pub(crate) fn create_goal(&mut self, reply_bytes: Option<usize>) -> Option<usize> {
         if self.current != SHELL_TASK_INDEX || self.goal.is_some() {
             return None;
         }
@@ -59,18 +74,24 @@ impl Scheduler {
             handle,
             agent: None,
             status: GoalStatus::Ready,
+            replies: ReplyAccount::new(reply_bytes),
         });
         Some(handle)
     }
 
-    pub(crate) fn goal_status(&self, handle: usize) -> Option<GoalStatus> {
+    fn shell_goal(&self, handle: usize) -> Option<&Goal> {
         if self.current != SHELL_TASK_INDEX {
             return None;
         }
-        self.goal
-            .as_ref()
-            .filter(|goal| goal.handle == handle)
-            .map(|goal| goal.status)
+        self.goal.as_ref().filter(|goal| goal.handle == handle)
+    }
+
+    pub(crate) fn goal_status(&self, handle: usize) -> Option<GoalStatus> {
+        Some(self.shell_goal(handle)?.status)
+    }
+
+    pub(crate) fn goal_budget(&self, handle: usize) -> Option<ReplyBudget> {
+        Some(self.shell_goal(handle)?.replies.snapshot())
     }
 
     fn goal_for_agent(&self, handle: usize) -> Option<&Goal> {

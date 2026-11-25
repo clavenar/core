@@ -1,14 +1,17 @@
+use clv_abi::agent::AgentLaunch;
 use clv_abi::{
     ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE,
     PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, ReplyKind, RequestKind, SYS_AGENT_RESUME,
-    SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_STATUS, SYS_AGENT_SUSPEND, SYS_CHDIR,
-    SYS_CLOSE, SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE,
-    SYS_GOAL_CREATE, SYS_GOAL_RUN, SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR,
-    SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ,
-    SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR,
-    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
-    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_STATUS,
+    SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE, SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_BUDGET,
+    SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE, SYS_GOAL_CREATE_WITH_REPLY_BUDGET,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
+    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
+    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
+    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_PIPE,
+    SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE,
+    SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -97,10 +100,25 @@ pub(crate) fn dispatch(
         SYS_SPAWN_WITH_FILE_PIPE => scheduler
             .spawn(fs, a0, LaunchScope::FileWithPipe(a1), None)
             .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_CREATE => scheduler.create_goal().unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_RUN => scheduler
-            .spawn(fs, a1, LaunchScope::Goal(a0), None)
+        SYS_GOAL_CREATE | SYS_GOAL_CREATE_WITH_REPLY_BUDGET => scheduler
+            .create_goal((number == SYS_GOAL_CREATE_WITH_REPLY_BUDGET).then_some(a0))
             .unwrap_or(SYSCALL_ERROR),
+        SYS_GOAL_RUN | SYS_GOAL_RUN_WITH_REPLY_BUDGET => {
+            let scope = LaunchScope::Goal {
+                handle: a0,
+                reply_bytes: (number == SYS_GOAL_RUN_WITH_REPLY_BUDGET).then_some(a2),
+            };
+            scheduler
+                .spawn(fs, a1, scope, None)
+                .unwrap_or(SYSCALL_ERROR)
+        }
+        SYS_GOAL_BUDGET => scheduler.goal_budget(a0).map_or(SYSCALL_ERROR, |budget| {
+            let (flags, available, reserved, spent) = budget.registers();
+            frame.registers[REG_A1] = available;
+            frame.registers[REG_A2] = reserved;
+            frame.registers[REG_A3] = spent;
+            flags
+        }),
         SYS_GOAL_STATUS => scheduler.goal_status(a0).map_or(SYSCALL_ERROR, |status| {
             write_status(frame, status.registers())
         }),
@@ -110,12 +128,13 @@ pub(crate) fn dispatch(
         SYS_GOAL_CANCEL => scheduler
             .cancel_goal(a0, fs)
             .map_or(SYSCALL_ERROR, |result| result as usize),
-        SYS_AGENT_RUN | SYS_AGENT_RUN_SUSPENDED => scheduler
-            .run_agent(fs, a0, a1, number == SYS_AGENT_RUN_SUSPENDED)
-            .map_or(SYSCALL_ERROR, |launch| {
-                frame.registers[REG_A1] = launch.child;
-                launch.agent
-            }),
+        SYS_AGENT_RUN | SYS_AGENT_RUN_SUSPENDED => write_agent_launch(
+            frame,
+            scheduler.run_agent(fs, a0, a1, number == SYS_AGENT_RUN_SUSPENDED, None),
+        ),
+        SYS_AGENT_RUN_WITH_REPLY_BUDGET if a3 <= 1 => {
+            write_agent_launch(frame, scheduler.run_agent(fs, a0, a1, a3 == 1, Some(a2)))
+        }
         SYS_AGENT_STATUS => scheduler.agent_status(a0).map_or(SYSCALL_ERROR, |agent| {
             frame.registers[REG_A3] = agent.goal;
             write_status(frame, agent.registers())
@@ -229,6 +248,13 @@ fn write_status(frame: &mut TrapFrame, (state, child, value): (usize, usize, usi
     frame.registers[REG_A1] = child;
     frame.registers[REG_A2] = value;
     state
+}
+
+fn write_agent_launch(frame: &mut TrapFrame, launch: Option<AgentLaunch>) -> usize {
+    launch.map_or(SYSCALL_ERROR, |launch| {
+        frame.registers[REG_A1] = launch.child;
+        launch.agent
+    })
 }
 
 fn spawn_with_request(

@@ -75,7 +75,10 @@ pub(crate) enum LaunchScope {
     Directory(usize),
     File(usize),
     FileWithPipe(usize),
-    Goal(usize),
+    Goal {
+        handle: usize,
+        reply_bytes: Option<usize>,
+    },
 }
 
 pub(crate) enum WaitResult<T> {
@@ -196,12 +199,16 @@ impl Scheduler {
         goal: usize,
         program: usize,
         suspended: bool,
+        reply_bytes: Option<usize>,
     ) -> Option<AgentLaunch> {
         let agent = self.next_handle;
         let child = self.start_child(
             fs,
             program,
-            LaunchScope::Goal(goal),
+            LaunchScope::Goal {
+                handle: goal,
+                reply_bytes,
+            },
             None,
             Some(agent),
             TaskState::for_agent(suspended),
@@ -239,7 +246,7 @@ impl Scheduler {
             self.initial_status,
         );
         let grant = match scope {
-            LaunchScope::Plain | LaunchScope::Goal(_) => None,
+            LaunchScope::Plain | LaunchScope::Goal { .. } => None,
             LaunchScope::Directory(fd) => Some((GrantKind::Directory, fd, 0)),
             LaunchScope::File(fd) => Some((GrantKind::File, fd, 0)),
             LaunchScope::FileWithPipe(fd) => Some((GrantKind::File, fd, handle)),
@@ -253,8 +260,14 @@ impl Scheduler {
             None => (TaskFs::empty(), None),
         };
 
-        if let LaunchScope::Goal(goal) = scope {
-            self.goal.as_mut()?.start(goal, handle, agent)?;
+        if let LaunchScope::Goal {
+            handle: goal,
+            reply_bytes,
+        } = scope
+        {
+            self.goal
+                .as_mut()?
+                .start(goal, handle, agent, reply_bytes)?;
         }
         let task = &mut self.tasks[index];
         // SAFETY: This slot is stopped and its private stack frame is mapped
@@ -357,6 +370,9 @@ impl Scheduler {
         )?;
         if kind.is_none() && launch.legacy_file_reply {
             reply.decode_legacy_file_reply();
+        }
+        if let Some(goal) = &mut self.goal {
+            goal.charge_reply(launch.handle, length)?;
         }
         launch.reply = Some(reply);
         let handle = launch.handle;

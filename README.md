@@ -173,6 +173,32 @@ handle. While an agent is suspended, its goal is `Running`, `goal close`
 reports `goal busy`, and `goal cancel` stops the suspended child. If the child
 finishes before you type `agent suspend`, the shell prints `agent already finished`.
 
+Use `goal create --reply-bytes N` to limit the total bytes its child can send
+in replies. Both `goal run` and `agent run` inherit the available balance.
+Pass `--reply-bytes N` to reserve any amount up to that balance. The shell
+accepts unsigned decimal counts, including zero. A plain `goal create` has
+an unlimited budget.
+
+```text
+goal create --reply-bytes 16
+agent run --reply-bytes 17 echo
+agent run --suspended --reply-bytes 12 echo
+goal budget
+agent resume
+wait echo
+recv echo
+goal budget
+goal close
+```
+
+The 17-byte request fails and leaves the goal ready. The first budget read
+prints `available=4 reserved=12 spent=0`. The message `echo ready` costs 10
+bytes when queued. On exit the two unused bytes return to the goal, so the
+second read prints `available=6 reserved=0 spent=10`. To see a send denied,
+create another 16-byte goal and run `agent run --reply-bytes 9 echo`.
+`wait echo` reports exit 1, `recv echo` prints `no message` and `goal budget`
+prints `available=16 reserved=0 spent=0`.
+
 You can cancel a ready goal directly at the shell prompt.
 
 ```text
@@ -504,14 +530,19 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 40 `agent_suspend` | `a0` agent handle | 0 when suspended, 1 if the agent already finished |
 | 41 `agent_resume` | `a0` agent handle | 0 when runnable, 1 if the agent already finished |
 | 42 `agent_run_suspended` | `a0` goal handle, `a1` program selector | Fresh agent handle, with its suspended child launch handle in `a1` |
+| 43 `goal_create_with_reply_budget` | `a0` total reply bytes | Fresh goal handle |
+| 44 `goal_budget` | `a0` goal handle | Limit flags, with available bytes in `a1`, reserved bytes in `a2` and spent bytes in `a3` |
+| 45 `goal_run_with_reply_budget` | `a0` goal handle, `a1` program selector, `a2` requested reply bytes | Fresh ordinary child launch handle |
+| 46 `agent_run_with_reply_budget` | Same as call 45, plus `a3` start mode (0 runnable, 1 suspended) | Fresh agent handle, with the child launch handle in `a1` |
 
 Only the shell can use these calls. A stale or invalid handle or a call
-from another task returns -1 in `a0`. All three run calls require a ready goal.
-They return -1 if the selector is unknown, the program is busy or the kernel
-cannot allocate the handles. A ready goal stays ready on failure.
+from another task returns -1 in `a0`. The run calls require a ready goal.
+They return -1 for an unknown selector or start mode, a busy program slot,
+insufficient available bytes, or exhausted handles. A failed launch leaves
+the ready goal and its balance available for retry.
 
 The kernel binds the child to the goal before its first instruction.
-Both agent run calls also create and bind the agent in that operation. The child
+The agent run calls also create and bind the agent in that operation. The child
 starts with an empty RamFS handle table and mailbox and uses the ordinary
 reply, event and wait calls. `agent_status` uses tags 1–5 below and tag 6
 for a suspended child (`a2` is zero). It always returns the original child
@@ -543,6 +574,23 @@ If the shell exits or faults, the kernel cancels the goal's live child by its
 original launch handle, even when suspended. It releases the goal and its agent
 before scheduling another task. Children launched outside the goal can still
 run to completion, including a newer launch in the same program slot.
+
+The kernel reserves the child's reply allowance when it binds the launch.
+Calls 34, 38 and 42 reserve all available bytes. Calls 45 and 46 can also
+delegate a finite allowance from an unlimited goal. With a finite goal,
+`available + reserved + spent` always equals the original limit. Call 44
+returns 0 for finite balances, 1 for unlimited available bytes with a finite
+reservation, and 3 while both are unlimited. An unlimited field has register
+value 0 and prints as `unlimited`. Finite counts span the full RV64 unsigned
+range. For an unlimited goal the spent counter saturates at that maximum.
+
+Each successful `message_send` or `reply_send` moves the byte count returned
+by the call from reserved to spent. A valid zero-byte reply costs zero. A
+failed send, including one that exceeds the reservation, leaves the mailbox
+and budget intact. Reading a reply or suspending and resuming the child
+preserves the counters. Exit, fault and cancellation release only the unused
+reservation. The shell can inspect the final counters until it closes the goal.
+Children launched outside the goal use their own mailbox independently.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

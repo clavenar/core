@@ -1,22 +1,41 @@
 pub use clv_abi::agent::{AgentLaunch, AgentStatus, ControlResult};
 use clv_abi::{
-    SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_STATUS, SYS_AGENT_SUSPEND,
+    SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET,
+    SYS_AGENT_STATUS, SYS_AGENT_SUSPEND,
 };
 
 use super::{ecall, syscall, syscall_result};
 
 /// Creates an agent in a ready goal and starts its child in one call.
 pub fn run(goal: usize, program: usize) -> Option<AgentLaunch> {
-    start(SYS_AGENT_RUN, goal, program)
+    run_with_options(goal, program, false, None)
 }
 
 /// Creates the same launch with its child paused at the program entry point.
 pub fn run_suspended(goal: usize, program: usize) -> Option<AgentLaunch> {
-    start(SYS_AGENT_RUN_SUSPENDED, goal, program)
+    run_with_options(goal, program, true, None)
 }
 
-fn start(call: usize, goal: usize, program: usize) -> Option<AgentLaunch> {
-    let (agent, child, ..) = ecall(call, goal, program, 0, 0, 0);
+/// Reserves the requested bytes, or inherits the goal's available allowance.
+pub fn run_with_options(
+    goal: usize,
+    program: usize,
+    suspended: bool,
+    reply_bytes: Option<usize>,
+) -> Option<AgentLaunch> {
+    let call = match reply_bytes {
+        Some(_) => SYS_AGENT_RUN_WITH_REPLY_BUDGET,
+        None if suspended => SYS_AGENT_RUN_SUSPENDED,
+        None => SYS_AGENT_RUN,
+    };
+    let (agent, child, ..) = ecall(
+        call,
+        goal,
+        program,
+        reply_bytes.unwrap_or(0),
+        usize::from(suspended),
+        0,
+    );
     Some(AgentLaunch {
         agent: syscall_result(agent)?,
         child,
