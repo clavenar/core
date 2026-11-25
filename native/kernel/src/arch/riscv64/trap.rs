@@ -41,6 +41,11 @@ impl TrapFrame {
             sstatus: sstatus & !USER_STATUS_CLEAR,
         }
     }
+
+    pub(crate) fn set_startup_args(&mut self, a1: usize, a2: usize) {
+        self.registers[11] = a1;
+        self.registers[12] = a2;
+    }
 }
 
 struct KernelState {

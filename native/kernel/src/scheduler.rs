@@ -94,17 +94,27 @@ impl Scheduler {
         fs.rmdir(&self.tasks[self.current].fs, path, live_task_fs)
     }
 
-    pub(crate) fn spawn_hello(&mut self) -> Option<usize> {
-        let task = &mut self.tasks[HELLO_TASK_INDEX];
-        if task.state != TaskState::Stopped {
+    pub(crate) fn spawn_hello(&mut self, directory_fd: Option<usize>) -> Option<usize> {
+        if self.tasks[HELLO_TASK_INDEX].state != TaskState::Stopped {
             return None;
         }
+        let (fs, grant) = match directory_fd {
+            Some(fd) => {
+                let (fs, child_fd) = self.tasks[self.current].fs.grant_directory(fd)?;
+                (fs, Some(child_fd))
+            }
+            None => (TaskFs::new(), None),
+        };
 
+        let task = &mut self.tasks[HELLO_TASK_INDEX];
         // SAFETY: This slot is stopped and its private stack frame is mapped
         // writable in the shared supervisor identity map.
         unsafe { task.address_space.clear_user_stack() };
         task.frame = self.hello_start;
-        task.fs = TaskFs::new();
+        if let Some(fd) = grant {
+            task.frame.set_startup_args(fd, 1);
+        }
+        task.fs = fs;
         task.timer_fired = false;
         task.state = TaskState::Runnable;
         self.hello_run = HelloRun::Running;

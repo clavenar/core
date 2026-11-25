@@ -1,8 +1,8 @@
 use clv_abi::{
     OPEN_READ, OPEN_WRITE_TRUNCATE, PROBE_VALUE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT,
     SYS_GETCWD, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE,
-    SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -69,7 +69,10 @@ pub(crate) fn dispatch(
         SYS_RMDIR => {
             with_user_path(a0, a1, |path| scheduler.rmdir(fs, path)).unwrap_or(SYSCALL_ERROR)
         }
-        SYS_SPAWN if a0 == PROGRAM_HELLO => scheduler.spawn_hello().unwrap_or(SYSCALL_ERROR),
+        SYS_SPAWN if a0 == PROGRAM_HELLO => scheduler.spawn_hello(None).unwrap_or(SYSCALL_ERROR),
+        SYS_SPAWN_AT if a0 == PROGRAM_HELLO => {
+            scheduler.spawn_hello(Some(a1)).unwrap_or(SYSCALL_ERROR)
+        }
         SYS_WAIT if a0 == PROGRAM_HELLO => match scheduler.wait_hello(frame) {
             WaitResult::NoLaunch => SYSCALL_ERROR,
             WaitResult::Blocked => return Outcome::Wait,

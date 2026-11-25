@@ -5,6 +5,8 @@
 _start:
     addi sp, sp, -16
     mv s1, a0
+    mv s2, a1
+    mv s3, a2
     sd s1, 8(sp)
     li s0, 0x123
     li t1, 0x456
@@ -33,6 +35,12 @@ _start:
     ld t1, 8(sp)
     bne t1, s1, .Luser_failed
 
+    beqz s3, .Lprint_message
+    mv a0, s2
+    call {print_granted_hello}
+    j .Luser_exit
+
+.Lprint_message:
     # Copy the message into the user stack for the console syscall.
     addi sp, sp, -32
     lla t0, .Luser_message

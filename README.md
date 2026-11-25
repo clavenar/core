@@ -59,10 +59,22 @@ shows which task was interrupted and which task will run next. The kernel
 starts a fresh quantum when the timer fires or a stopped task is replaced.
 
 At the shell prompt, `run hello` starts the embedded `hello` program in its
-boot task slot. The shell stays interactive while the program runs. Each
-launch starts with a cleared stack, fresh registers and timer state, an
-empty handle table, and working directory `/`. Exit or fault frees the slot
-for another launch.
+boot task slot with an empty handle table and working directory `/`. The shell
+stays interactive while the program runs. Every launch starts with a cleared
+stack and fresh registers and timer state. Exit or fault frees the slot.
+
+`run hello <directory>` grants the child a read-only directory handle. The
+child starts with that single handle and resolves paths through `open_at`.
+Ordinary path calls (`open`, `mkdir`, `unlink`, `rmdir`, `chdir`, and `getcwd`)
+return -1 for a scoped launch. The program prints `hello.txt` from the
+granted directory.
+
+```text
+mkdir /notes
+write /notes/hello.txt Hello from notes
+run hello /notes
+wait hello
+```
 
 `wait hello` collects the exit status or fault cause of the latest `run hello`.
 The shell waits for a running program and returns immediately if the result is
@@ -154,6 +166,11 @@ Call 16 (`wait`) takes program selector 0 in `a0`. On success, `a0` contains
 the result type and `a1` contains the full exit status or fault cause. Result
 type 0 means exit and 1 means fault. The call returns -1 in `a0` for an
 invalid selector, a caller other than the shell, or no pending launch.
+
+Call 18 (`spawn_at`) takes program selector 0 in `a0` and a directory handle
+from the caller in `a1`. It returns 0 on success and -1 on error. The child
+receives its own directory handle in `a1` and a grant flag of 1 in `a2`.
+Ordinary launches start with `a2` set to 0.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

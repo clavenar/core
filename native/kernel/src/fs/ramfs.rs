@@ -169,7 +169,7 @@ impl RamFs {
         mut live_task_fs: impl Iterator<Item = &'a TaskFs>,
     ) -> Option<usize> {
         let ResolvedPath::Entry(parent, name) =
-            self.resolve_path(PathBase::WorkingDirectory(current.cwd), path)?
+            self.resolve_path(PathBase::WorkingDirectory(current.cwd?), path)?
         else {
             return None;
         };
@@ -325,20 +325,33 @@ struct Handle {
 }
 
 pub(crate) struct TaskFs {
-    cwd: DirectoryId,
+    // A scoped task resolves paths through its directory handles.
+    cwd: Option<DirectoryId>,
     slots: [Option<Handle>; HANDLE_COUNT],
 }
 
 impl TaskFs {
     pub(crate) const fn new() -> Self {
         Self {
-            cwd: DirectoryId::Root,
+            cwd: Some(DirectoryId::Root),
             slots: [const { None }; HANDLE_COUNT],
         }
     }
 
+    pub(crate) fn grant_directory(&self, fd: usize) -> Option<(Self, usize)> {
+        let directory = self.directory_for_handle(fd)?;
+        let child_fd = 0;
+        let mut slots = [const { None }; HANDLE_COUNT];
+        slots[child_fd] = Some(Handle {
+            node: Node::Directory(directory),
+            cursor: 0,
+            writable: false,
+        });
+        Some((Self { cwd: None, slots }, child_fd))
+    }
+
     pub(crate) fn open(&mut self, fs: &mut RamFs, path: &[u8], writable: bool) -> Option<usize> {
-        self.open_path(fs, PathBase::WorkingDirectory(self.cwd), path, writable)
+        self.open_path(fs, PathBase::WorkingDirectory(self.cwd?), path, writable)
     }
 
     pub(crate) fn open_at(
@@ -347,10 +360,15 @@ impl TaskFs {
         directory_fd: usize,
         path: &[u8],
     ) -> Option<usize> {
-        let Node::Directory(directory) = self.slots.get(directory_fd)?.as_ref()?.node else {
+        let directory = self.directory_for_handle(directory_fd)?;
+        self.open_path(fs, PathBase::Confined(directory), path, false)
+    }
+
+    fn directory_for_handle(&self, fd: usize) -> Option<DirectoryId> {
+        let Node::Directory(directory) = self.slots.get(fd)?.as_ref()?.node else {
             return None;
         };
-        self.open_path(fs, PathBase::Confined(directory), path, false)
+        Some(directory)
     }
 
     fn open_path(
@@ -371,15 +389,15 @@ impl TaskFs {
     }
 
     pub(crate) fn mkdir(&self, fs: &mut RamFs, path: &[u8]) -> Option<usize> {
-        fs.mkdir(self.cwd, path)
+        fs.mkdir(self.cwd?, path)
     }
 
     pub(crate) fn unlink(&self, fs: &mut RamFs, path: &[u8]) -> Option<usize> {
-        fs.unlink(self.cwd, path)
+        fs.unlink(self.cwd?, path)
     }
 
     fn uses_directory(&self, directory: DirectoryId) -> bool {
-        self.cwd == directory
+        self.cwd == Some(directory)
             || self
                 .slots
                 .iter()
@@ -388,7 +406,7 @@ impl TaskFs {
     }
 
     pub(crate) fn chdir(&mut self, fs: &RamFs, path: &[u8]) -> Option<usize> {
-        self.cwd = match fs.resolve_path(PathBase::WorkingDirectory(self.cwd), path)? {
+        let directory = match fs.resolve_path(PathBase::WorkingDirectory(self.cwd?), path)? {
             ResolvedPath::Directory(directory) => directory,
             ResolvedPath::Entry(parent, name) => {
                 let Node::Directory(directory) = fs.lookup(parent, name)? else {
@@ -397,13 +415,14 @@ impl TaskFs {
                 directory
             }
         };
+        self.cwd = Some(directory);
         Some(0)
     }
 
     pub(crate) fn getcwd(&self, fs: &RamFs, deliver: impl FnOnce(&[u8]) -> bool) -> Option<usize> {
+        let mut directory = self.cwd?;
         let mut buffer = [0; CWD_PATH_CAPACITY];
         let mut start = buffer.len();
-        let mut directory = self.cwd;
         while let DirectoryId::Child(index) = directory {
             let entry = fs.directories[index].as_ref()?;
             let name = entry.name.as_bytes();
