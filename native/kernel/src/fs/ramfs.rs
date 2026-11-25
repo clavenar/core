@@ -28,6 +28,11 @@ enum DirectoryId {
     Child(usize),
 }
 
+enum PathBase {
+    WorkingDirectory(DirectoryId),
+    Confined(DirectoryId),
+}
+
 #[derive(Clone, Copy)]
 enum Node {
     Directory(DirectoryId),
@@ -107,8 +112,8 @@ impl RamFs {
         }
     }
 
-    fn open(&mut self, cwd: DirectoryId, path: &[u8], writable: bool) -> Option<Node> {
-        let (parent, name) = match self.resolve_path(cwd, path)? {
+    fn open(&mut self, base: PathBase, path: &[u8], writable: bool) -> Option<Node> {
+        let (parent, name) = match self.resolve_path(base, path)? {
             ResolvedPath::Directory(directory) => {
                 return (!writable).then_some(Node::Directory(directory));
             }
@@ -141,7 +146,9 @@ impl RamFs {
     }
 
     fn mkdir(&mut self, cwd: DirectoryId, path: &[u8]) -> Option<usize> {
-        let ResolvedPath::Entry(parent, name) = self.resolve_path(cwd, path)? else {
+        let ResolvedPath::Entry(parent, name) =
+            self.resolve_path(PathBase::WorkingDirectory(cwd), path)?
+        else {
             return None;
         };
         if self.lookup(parent, name).is_some() {
@@ -161,7 +168,9 @@ impl RamFs {
         path: &[u8],
         mut live_task_fs: impl Iterator<Item = &'a TaskFs>,
     ) -> Option<usize> {
-        let ResolvedPath::Entry(parent, name) = self.resolve_path(current.cwd, path)? else {
+        let ResolvedPath::Entry(parent, name) =
+            self.resolve_path(PathBase::WorkingDirectory(current.cwd), path)?
+        else {
             return None;
         };
         let Node::Directory(directory @ DirectoryId::Child(index)) = self.lookup(parent, name)?
@@ -181,7 +190,9 @@ impl RamFs {
         if path.ends_with(b"/") {
             return None;
         }
-        let ResolvedPath::Entry(parent, name) = self.resolve_path(cwd, path)? else {
+        let ResolvedPath::Entry(parent, name) =
+            self.resolve_path(PathBase::WorkingDirectory(cwd), path)?
+        else {
             return None;
         };
         let Node::WritableFile(index) = self.lookup(parent, name)? else {
@@ -197,23 +208,28 @@ impl RamFs {
         Some(0)
     }
 
-    fn resolve_path<'a>(&self, cwd: DirectoryId, path: &'a [u8]) -> Option<ResolvedPath<'a>> {
+    fn resolve_path<'a>(&self, base: PathBase, path: &'a [u8]) -> Option<ResolvedPath<'a>> {
         if path.is_empty() {
             return None;
         }
+        let absolute = path.starts_with(b"/");
+        let (mut directory, boundary) = match base {
+            PathBase::WorkingDirectory(_) if absolute => (DirectoryId::Root, None),
+            PathBase::WorkingDirectory(directory) => (directory, None),
+            PathBase::Confined(directory) if !absolute => (directory, Some(directory)),
+            PathBase::Confined(_) => return None,
+        };
         let mut components = path
             .split(|&byte| byte == b'/')
             .filter(|part| !part.is_empty())
             .peekable();
-        let mut directory = if path.starts_with(b"/") {
-            DirectoryId::Root
-        } else {
-            cwd
-        };
         while let Some(component) = components.next() {
             match component {
                 b"." => {}
                 b".." => {
+                    if boundary == Some(directory) {
+                        return None;
+                    }
                     if let DirectoryId::Child(index) = directory {
                         directory = self.directories[index].as_ref()?.parent;
                     }
@@ -322,8 +338,30 @@ impl TaskFs {
     }
 
     pub(crate) fn open(&mut self, fs: &mut RamFs, path: &[u8], writable: bool) -> Option<usize> {
+        self.open_path(fs, PathBase::WorkingDirectory(self.cwd), path, writable)
+    }
+
+    pub(crate) fn open_at(
+        &mut self,
+        fs: &mut RamFs,
+        directory_fd: usize,
+        path: &[u8],
+    ) -> Option<usize> {
+        let Node::Directory(directory) = self.slots.get(directory_fd)?.as_ref()?.node else {
+            return None;
+        };
+        self.open_path(fs, PathBase::Confined(directory), path, false)
+    }
+
+    fn open_path(
+        &mut self,
+        fs: &mut RamFs,
+        base: PathBase,
+        path: &[u8],
+        writable: bool,
+    ) -> Option<usize> {
         let fd = self.slots.iter().position(Option::is_none)?;
-        let node = fs.open(self.cwd, path, writable)?;
+        let node = fs.open(base, path, writable)?;
         self.slots[fd] = Some(Handle {
             node,
             cursor: 0,
@@ -350,7 +388,7 @@ impl TaskFs {
     }
 
     pub(crate) fn chdir(&mut self, fs: &RamFs, path: &[u8]) -> Option<usize> {
-        self.cwd = match fs.resolve_path(self.cwd, path)? {
+        self.cwd = match fs.resolve_path(PathBase::WorkingDirectory(self.cwd), path)? {
             ResolvedPath::Directory(directory) => directory,
             ResolvedPath::Entry(parent, name) => {
                 let Node::Directory(directory) = fs.lookup(parent, name)? else {

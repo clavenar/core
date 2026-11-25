@@ -1,8 +1,8 @@
 use clv_abi::{
     OPEN_READ, OPEN_WRITE_TRUNCATE, PROBE_VALUE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT,
-    SYS_GETCWD, SYS_MKDIR, SYS_OPEN, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR,
-    SYS_SPAWN, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
-    WAIT_EXITED, WAIT_FAULTED,
+    SYS_GETCWD, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE,
+    SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE,
+    SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -44,6 +44,8 @@ pub(crate) fn dispatch(
         SYS_TIMER_FIRED => usize::from(scheduler.timer_fired()),
         SYS_READ_CONSOLE => uart::read_byte().map_or(SYSCALL_ERROR, usize::from),
         SYS_OPEN => open_file(scheduler.task_fs(), fs, a0, a1, a2).unwrap_or(SYSCALL_ERROR),
+        SYS_OPEN_AT => with_user_path(a1, a2, |path| scheduler.task_fs().open_at(fs, a0, path))
+            .unwrap_or(SYSCALL_ERROR),
         SYS_READ => scheduler
             .task_fs()
             .read(fs, a0, a2, |bytes| copy_to_user_stack(bytes, a1, a2))

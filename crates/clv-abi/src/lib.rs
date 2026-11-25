@@ -19,6 +19,7 @@ pub const SYS_GETCWD: usize = 13;
 pub const SYS_RMDIR: usize = 14;
 pub const SYS_SPAWN: usize = 15;
 pub const SYS_WAIT: usize = 16;
+pub const SYS_OPEN_AT: usize = 17;
 
 pub const PROGRAM_HELLO: usize = 0;
 pub const WAIT_EXITED: usize = 0;

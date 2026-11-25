@@ -94,12 +94,12 @@ to remove the empty directory. Use `exit` to stop the shell.
 
 RamFS starts with read-only `/hello.txt` and `/about.txt` and holds up to four
 directories besides the root and four writable files of 256 bytes each.
-Directories and writable files live in RAM until reboot. Each task starts
-in `/` and resolves relative paths from its own current directory. Absolute
-paths start at `/`. Within a path, `.` keeps the directory reached so far
-and `..` moves to its parent, staying at `/` when already there. Creating a
-file or directory requires an existing parent. Each task has four handles,
-and each open handle has an independent cursor.
+Directories and writable files live in RAM until reboot. For ordinary path
+lookups, absolute paths start at `/` and relative paths start at the task's
+current directory, initially `/`. Within a path, `.` keeps the directory
+reached so far and `..` moves to its parent, staying at `/` when already
+there. Creating a file or directory requires an existing parent. Each task
+has four handles, and each open handle has an independent cursor.
 
 | Call | Arguments | Result in `a0` |
 | --- | --- | --- |
@@ -113,6 +113,7 @@ and each open handle has an independent cursor.
 | 12 `chdir` | `a0` path address, `a1` path length up to 64 bytes | 0 |
 | 13 `getcwd` | `a0` destination address, `a1` capacity | Absolute path's byte count |
 | 14 `rmdir` | `a0` path address, `a1` path length up to 64 bytes | 0 |
+| 17 `open_at` | `a0` directory handle, `a1` path address, `a2` path length up to 64 bytes | Read-only handle |
 
 Open mode 0 opens a path for reading. Mode 1 opens a writable file for reading
 and writing, creating it if absent and truncating it to zero length otherwise.
@@ -121,6 +122,10 @@ calling task's stack. Writes validate and copy the entire input before
 changing bytes or the cursor. Reads and directory listings advance their
 cursor only after a successful copy. Directory entries contain the name bytes
 without a trailing newline or NUL.
+
+`open_at` starts from a directory handle in the calling task's handle table
+and opens an existing file or directory for reading. It rejects absolute
+paths and any `..` step above the starting directory.
 
 `chdir` leaves the current directory unchanged on error. `getcwd` writes the
 full absolute path, up to 260 bytes, without a trailing NUL. If the destination
