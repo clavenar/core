@@ -2,8 +2,8 @@ pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
 use clv_abi::{
     SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
-    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET,
-    SYS_GOAL_STATUS,
+    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, syscall, syscall_result};
@@ -14,6 +14,11 @@ pub fn create() -> Option<usize> {
 
 pub fn create_with_reply_budget(bytes: usize) -> Option<usize> {
     syscall_result(syscall(SYS_GOAL_CREATE_WITH_REPLY_BUDGET, bytes, 0, 0))
+}
+
+/// Attaches one file from the caller's handle table to a ready goal.
+pub fn grant_file(goal: usize, fd: usize) -> bool {
+    syscall(SYS_GOAL_GRANT_FILE, goal, fd, 0) == 0
 }
 
 pub fn budget(goal: usize) -> Option<ReplyBudget> {

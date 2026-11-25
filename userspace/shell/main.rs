@@ -79,7 +79,7 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<g
               askfile [--stream] hello <path>\r\n\
               recv <hello|echo>  wait <hello|echo>  event\r\n\
               goal create [--reply-bytes N]  goal run [--reply-bytes N] <hello|echo>\r\n\
-              goal status  goal budget  goal cancel  goal close\r\n\
+              goal grant-file <path>  goal status  goal budget  goal cancel  goal close\r\n\
               agent run [--suspended] [--reply-bytes N] <hello|echo>\r\n\
               agent status  agent suspend  agent resume\r\n",
         ),

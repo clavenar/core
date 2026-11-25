@@ -26,15 +26,17 @@ impl ReplyAccount {
         }
     }
 
-    pub(super) fn reserve(&mut self, requested: Option<usize>) -> Option<()> {
+    pub(super) fn with_reservation(&self, requested: Option<usize>) -> Option<Self> {
         let available = self.snapshot().available;
         if let (Some(bytes), Some(available)) = (requested, available)
             && bytes > available
         {
             return None;
         }
-        self.reserved = requested.or(available);
-        Some(())
+        Some(Self {
+            reserved: requested.or(available),
+            ..*self
+        })
     }
 
     pub(super) fn charge(&mut self, bytes: usize) -> Option<()> {

@@ -199,6 +199,29 @@ create another 16-byte goal and run `agent run --reply-bytes 9 echo`.
 `wait echo` reports exit 1, `recv echo` prints `no message` and `goal budget`
 prints `available=16 reserved=0 spent=0`.
 
+`goal grant-file <path>` attaches one read-only file to a ready goal. Both
+`goal run` and `agent run` pass that file to their child. Try this in QEMU.
+
+```text
+write /note old
+goal create --reply-bytes 8
+goal grant-file /note
+rm /note
+write /note new
+agent run hello
+wait hello
+recv hello
+goal budget
+cat /note
+goal close
+```
+
+`wait hello` reports exit 0. The reply contains `old` and the two-byte line
+ending stored by `write`, so the budget prints `available=3 reserved=0 spent=5`.
+`cat /note` prints `new` because the shell recreated the path after the grant.
+If you try to grant a directory or attach a second file, the shell prints
+`cannot grant file`. The goal keeps its existing grant and balance.
+
 You can cancel a ready goal directly at the shell prompt.
 
 ```text
@@ -534,20 +557,30 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 44 `goal_budget` | `a0` goal handle | Limit flags, with available bytes in `a1`, reserved bytes in `a2` and spent bytes in `a3` |
 | 45 `goal_run_with_reply_budget` | `a0` goal handle, `a1` program selector, `a2` requested reply bytes | Fresh ordinary child launch handle |
 | 46 `agent_run_with_reply_budget` | Same as call 45, plus `a3` start mode (0 runnable, 1 suspended) | Fresh agent handle, with the child launch handle in `a1` |
+| 47 `goal_grant_file` | `a0` goal handle, `a1` open RamFS file handle owned by the shell | 0 when attached, -1 on rejection |
 
 Only the shell can use these calls. A stale or invalid handle or a call
 from another task returns -1 in `a0`. The run calls require a ready goal.
 They return -1 for an unknown selector or start mode, a busy program slot,
 insufficient available bytes, or exhausted handles. A failed launch leaves
-the ready goal and its balance available for retry.
+the ready goal, its file grant and its balance available for retry.
 
 The kernel binds the child to the goal before its first instruction.
-The agent run calls also create and bind the agent in that operation. The child
-starts with an empty RamFS handle table and mailbox and uses the ordinary
-reply, event and wait calls. `agent_status` uses tags 1–5 below and tag 6
-for a suspended child (`a2` is zero). It always returns the original child
-handle on success. `goal_status` reports tag 1 throughout a live child's
-suspension.
+The agent run calls also create and bind the agent in that operation. Every
+goal child starts with an empty mailbox and uses the ordinary reply, event
+and wait calls. Its RamFS table starts empty unless the goal granted a file.
+
+Call 47 accepts one regular file while the goal is ready. The kernel retains
+the file independently of the shell's descriptor, cursor and pathname. Closing
+or cancelling a ready goal, or stopping its owner, releases this reference.
+On a successful launch the child receives a fresh read-only handle at offset
+zero in `a1`, file kind 2 in `a2` and 0 in `a3`. The kernel releases the
+goal's reference as it transfers access. The child can close its handle, and
+exit, fault or cancellation closes any handle it still holds.
+
+`agent_status` uses tags 1–5 below and tag 6 for a suspended child (`a2` is
+zero). It always returns the original child handle on success. `goal_status`
+reports tag 1 throughout a live child's suspension.
 
 | `goal_status` tag | State | `a1` | `a2` |
 | --- | --- | --- | --- |

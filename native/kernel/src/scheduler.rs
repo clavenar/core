@@ -245,29 +245,29 @@ impl Scheduler {
             index + 1,
             self.initial_status,
         );
-        let grant = match scope {
-            LaunchScope::Plain | LaunchScope::Goal { .. } => None,
-            LaunchScope::Directory(fd) => Some((GrantKind::Directory, fd, 0)),
-            LaunchScope::File(fd) => Some((GrantKind::File, fd, 0)),
-            LaunchScope::FileWithPipe(fd) => Some((GrantKind::File, fd, handle)),
-        };
-        let (task_fs, pipe) = match grant {
-            Some((kind, fd, writer)) => {
-                let (task_fs, child_fd) = self.tasks[self.current].fs.grant(fs, fd, kind)?;
-                frame.set_startup_args(child_fd, kind as usize, writer);
-                (task_fs, (writer != 0).then(Pipe::new))
-            }
-            None => (TaskFs::empty(), None),
-        };
-
-        if let LaunchScope::Goal {
-            handle: goal,
-            reply_bytes,
-        } = scope
-        {
-            self.goal
+        let task_fs = match scope {
+            LaunchScope::Plain => TaskFs::empty(),
+            LaunchScope::Goal {
+                handle: goal,
+                reply_bytes,
+            } => self
+                .goal
                 .as_mut()?
-                .start(goal, handle, agent, reply_bytes)?;
+                .start(goal, handle, agent, reply_bytes, fs)?,
+            LaunchScope::Directory(fd) => {
+                self.tasks[self.current]
+                    .fs
+                    .grant(fs, fd, GrantKind::Directory)?
+            }
+            LaunchScope::File(fd) | LaunchScope::FileWithPipe(fd) => {
+                self.tasks[self.current].fs.grant(fs, fd, GrantKind::File)?
+            }
+        };
+        let grant = task_fs.startup_grant();
+        let pipe = matches!(scope, LaunchScope::FileWithPipe(_)).then(Pipe::new);
+        if let Some((fd, kind)) = grant {
+            let writer = if pipe.is_some() { handle } else { 0 };
+            frame.set_startup_args(fd, kind as usize, writer);
         }
         let task = &mut self.tasks[index];
         // SAFETY: This slot is stopped and its private stack frame is mapped
@@ -277,11 +277,10 @@ impl Scheduler {
         task.fs = task_fs;
         task.timer_fired = false;
         // Older children use an in-band status byte to answer a file read.
-        let legacy_file_reply =
-            matches!(scope, LaunchScope::File(_) | LaunchScope::FileWithPipe(_))
-                || request.as_ref().is_some_and(|message| {
-                    message.kind == MessageKind::Request(RequestKind::ReadFile)
-                });
+        let legacy_file_reply = matches!(grant, Some((_, GrantKind::File)))
+            || request
+                .as_ref()
+                .is_some_and(|message| message.kind == MessageKind::Request(RequestKind::ReadFile));
         task.launch = Some(ChildLaunch {
             handle,
             request,

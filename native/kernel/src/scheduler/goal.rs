@@ -7,13 +7,14 @@ use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
 
 use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
-use crate::fs::ramfs::RamFs;
+use crate::fs::ramfs::{FileGrant, RamFs, TaskFs};
 
 pub(super) struct Goal {
     handle: usize,
     agent: Option<usize>,
     status: GoalStatus,
     replies: ReplyAccount,
+    file: Option<FileGrant>,
 }
 
 impl Goal {
@@ -23,14 +24,28 @@ impl Goal {
         child: usize,
         agent: Option<usize>,
         reply_bytes: Option<usize>,
-    ) -> Option<()> {
+        fs: &mut RamFs,
+    ) -> Option<TaskFs> {
         if self.handle != handle || self.status != GoalStatus::Ready {
             return None;
         }
-        self.replies.reserve(reply_bytes)?;
+        let replies = self.replies.with_reservation(reply_bytes)?;
+        let child_fs = match &self.file {
+            Some(file) => file.open_for_child(fs)?,
+            None => TaskFs::empty(),
+        };
+        // The child now owns its handle. All fallible launch checks have passed.
+        self.release_file(fs);
+        self.replies = replies;
         self.agent = agent;
         self.status = GoalStatus::Running { child };
-        Some(())
+        Some(child_fs)
+    }
+
+    fn release_file(&mut self, fs: &mut RamFs) {
+        if let Some(file) = self.file.take() {
+            file.release(fs);
+        }
     }
 
     pub(super) fn charge_reply(&mut self, child: usize, bytes: usize) -> Option<()> {
@@ -75,6 +90,7 @@ impl Scheduler {
             agent: None,
             status: GoalStatus::Ready,
             replies: ReplyAccount::new(reply_bytes),
+            file: None,
         });
         Some(handle)
     }
@@ -92,6 +108,23 @@ impl Scheduler {
 
     pub(crate) fn goal_budget(&self, handle: usize) -> Option<ReplyBudget> {
         Some(self.shell_goal(handle)?.replies.snapshot())
+    }
+
+    pub(crate) fn grant_goal_file(
+        &mut self,
+        handle: usize,
+        fd: usize,
+        fs: &mut RamFs,
+    ) -> Option<()> {
+        if self.goal_status(handle)? != GoalStatus::Ready {
+            return None;
+        }
+        let goal = self.goal.as_mut()?;
+        if goal.file.is_some() {
+            return None;
+        }
+        goal.file = Some(self.tasks[self.current].fs.retain_file(fs, fd)?);
+        Some(())
     }
 
     fn goal_for_agent(&self, handle: usize) -> Option<&Goal> {
@@ -129,17 +162,21 @@ impl Scheduler {
         Some(ControlResult::Applied)
     }
 
-    pub(crate) fn close_goal(&mut self, handle: usize) -> Option<CloseResult> {
+    pub(crate) fn close_goal(&mut self, handle: usize, fs: &mut RamFs) -> Option<CloseResult> {
         if matches!(self.goal_status(handle)?, GoalStatus::Running { .. }) {
             return Some(CloseResult::Busy);
         }
-        self.goal = None;
+        self.drop_goal(fs);
         Some(CloseResult::Closed)
     }
 
     pub(crate) fn cancel_goal(&mut self, handle: usize, fs: &mut RamFs) -> Option<CancelResult> {
         match self.goal_status(handle)? {
-            GoalStatus::Ready => self.goal.as_mut()?.status = GoalStatus::Cancelled { child: None },
+            GoalStatus::Ready => {
+                let goal = self.goal.as_mut()?;
+                goal.release_file(fs);
+                goal.status = GoalStatus::Cancelled { child: None };
+            }
             GoalStatus::Running { child } => self.cancel_child_launch(child, fs)?,
             GoalStatus::Cancelled { .. } => {}
             GoalStatus::Completed { .. } | GoalStatus::Failed { .. } => {
@@ -153,7 +190,13 @@ impl Scheduler {
         if let Some(child) = self.goal.as_ref().and_then(Goal::running_child) {
             self.cancel_child_launch(child, fs);
         }
-        self.goal = None;
+        self.drop_goal(fs);
+    }
+
+    fn drop_goal(&mut self, fs: &mut RamFs) {
+        if let Some(mut goal) = self.goal.take() {
+            goal.release_file(fs);
+        }
     }
 
     fn cancel_child_launch(&mut self, child: usize, fs: &mut RamFs) -> Option<()> {

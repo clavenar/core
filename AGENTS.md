@@ -29,4 +29,8 @@ When introducing a test framework, document where tests live, how test files are
 
 ## Commits and Pull Requests
 
+For every commit in `core`, increment the patch version of `clavenar-kernel` in
+`native/kernel/Cargo.toml` and include the matching `native/kernel/Cargo.lock`
+update in the same commit. The kernel boot banner reads this package version.
+
 Start every commit subject with a lowercase letter and keep it short and descriptive. In each pull request, summarize the change and include the checks you ran. Link a relevant issue when one exists and attach screenshots for visible UI changes. Update this section when the project establishes its own commit or review conventions.

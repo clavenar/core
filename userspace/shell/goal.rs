@@ -1,8 +1,8 @@
 mod options;
 
 use clv::goal::{self, CancelResult, CloseResult, GoalStatus, ReplyBudget};
-use clv::{agent, print};
-use clv_abi::CompletionKind;
+use clv::{agent, fs, print};
+use clv_abi::{CompletionKind, OPEN_READ};
 pub(super) use options::GoalOptions;
 
 use super::{children::Children, hex, print_handle, print_line, split_word};
@@ -20,6 +20,7 @@ pub(super) fn command(
     let handle = current.as_ref().map(|goal| goal.handle);
     match split_word(arguments) {
         (b"create", arguments) => create(arguments, current),
+        (b"grant-file", path) => grant_file(handle, path),
         (b"run", arguments) => children.run_in_goal(handle, arguments),
         (b"budget", b"") => match handle.and_then(goal::budget) {
             Some(budget) => print_budget(budget),
@@ -42,7 +43,26 @@ pub(super) fn command(
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create [--reply-bytes N] | run [--reply-bytes N] <hello|echo> | budget | status | cancel | close\r\n"),
+        _ => print(b"usage: goal create [--reply-bytes N] | grant-file <path> | run [--reply-bytes N] <hello|echo> | budget | status | cancel | close\r\n"),
+    }
+}
+
+fn grant_file(goal: Option<usize>, path: &[u8]) {
+    if path.is_empty() {
+        return print(b"usage: goal grant-file <path>\r\n");
+    }
+    let Some(goal) = goal else {
+        return print(b"no current goal\r\n");
+    };
+    let Some(fd) = fs::open(path, OPEN_READ) else {
+        return print(b"cannot open path\r\n");
+    };
+    let granted = goal::grant_file(goal, fd);
+    fs::close(fd);
+    if granted {
+        print(b"file granted\r\n");
+    } else {
+        print(b"cannot grant file\r\n");
     }
 }
 

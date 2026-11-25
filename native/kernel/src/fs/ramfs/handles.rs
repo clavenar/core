@@ -4,6 +4,15 @@ use super::{DirectoryId, Node, PathBase, RamFs};
 
 const HANDLE_COUNT: usize = 4;
 
+impl Node {
+    fn grant_kind(self) -> GrantKind {
+        match self {
+            Self::Directory(_) => GrantKind::Directory,
+            Self::BootFile(_) | Self::WritableFile(_) => GrantKind::File,
+        }
+    }
+}
+
 struct Handle {
     id: usize,
     node: Node,
@@ -33,6 +42,19 @@ impl Handle {
     }
 }
 
+/// Pins the shell-authorized file while its goal is ready.
+pub(crate) struct FileGrant(Node);
+
+impl FileGrant {
+    pub(crate) fn open_for_child(&self, fs: &mut RamFs) -> Option<TaskFs> {
+        TaskFs::from_grant(fs, self.0)
+    }
+
+    pub(crate) fn release(self, fs: &mut RamFs) {
+        fs.release(self.0);
+    }
+}
+
 pub(crate) struct TaskFs {
     // Ordinary path lookups require a working directory.
     cwd: Option<DirectoryId>,
@@ -54,25 +76,32 @@ impl TaskFs {
         }
     }
 
-    pub(crate) fn grant(
-        &self,
-        fs: &mut RamFs,
-        fd: usize,
-        kind: GrantKind,
-    ) -> Option<(Self, usize)> {
+    pub(crate) fn grant(&self, fs: &mut RamFs, fd: usize, kind: GrantKind) -> Option<Self> {
+        Self::from_grant(fs, self.grant_node(fd, kind)?)
+    }
+
+    pub(crate) fn retain_file(&self, fs: &mut RamFs, fd: usize) -> Option<FileGrant> {
+        let node = self.grant_node(fd, GrantKind::File)?;
+        fs.retain(node);
+        Some(FileGrant(node))
+    }
+
+    fn grant_node(&self, fd: usize, kind: GrantKind) -> Option<Node> {
         let node = self.node_for_handle(fd)?;
-        let node_kind = match node {
-            Node::Directory(_) => GrantKind::Directory,
-            Node::BootFile(_) | Node::WritableFile(_) => GrantKind::File,
-        };
-        if node_kind != kind {
-            return None;
-        }
+        (node.grant_kind() == kind).then_some(node)
+    }
+
+    fn from_grant(fs: &mut RamFs, node: Node) -> Option<Self> {
         let handle = Handle::allocate(fs, false, |_| Some(node))?;
-        let child_fd = handle.id;
         let mut child = Self::empty();
         child.slots[0] = Some(handle);
-        Some((child, child_fd))
+        Some(child)
+    }
+
+    /// A newly created child's only handle, if granted, is in slot zero.
+    pub(crate) fn startup_grant(&self) -> Option<(usize, GrantKind)> {
+        let handle = self.slots[0].as_ref()?;
+        Some((handle.id, handle.node.grant_kind()))
     }
 
     pub(crate) fn open(&mut self, fs: &mut RamFs, path: &[u8], writable: bool) -> Option<usize> {
