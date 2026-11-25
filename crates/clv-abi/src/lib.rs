@@ -12,6 +12,7 @@ pub const SYS_READ: usize = 6;
 pub const SYS_READDIR: usize = 7;
 pub const SYS_CLOSE: usize = 8;
 pub const SYS_WRITE: usize = 9;
+pub const SYS_UNLINK: usize = 10;
 
 pub const OPEN_READ: usize = 0;
 pub const OPEN_WRITE_TRUNCATE: usize = 1;

@@ -1,7 +1,7 @@
 use clv_abi::{
     OPEN_READ, OPEN_WRITE_TRUNCATE, PROBE_VALUE, SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_PROBE,
-    SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED, SYS_WRITE, SYS_WRITE_CONSOLE,
-    SYSCALL_ERROR,
+    SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE,
+    SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -50,8 +50,12 @@ pub(crate) fn dispatch(
             .file_handles()
             .readdir(fs, a0, |name| copy_to_user_stack(name, a1, a2))
             .unwrap_or(SYSCALL_ERROR),
-        SYS_CLOSE => scheduler.file_handles().close(a0).unwrap_or(SYSCALL_ERROR),
+        SYS_CLOSE => scheduler
+            .file_handles()
+            .close(fs, a0)
+            .unwrap_or(SYSCALL_ERROR),
         SYS_WRITE => write_file(scheduler.file_handles(), fs, a0, a1, a2).unwrap_or(SYSCALL_ERROR),
+        SYS_UNLINK => with_user_path(a0, a1, |path| fs.unlink(path)).unwrap_or(SYSCALL_ERROR),
         _ => SYSCALL_ERROR,
     };
     // ECALL is a 32-bit instruction, including on cores with compressed code.
@@ -71,12 +75,20 @@ fn open_file(
         OPEN_WRITE_TRUNCATE => true,
         _ => return None,
     };
+    with_user_path(address, length, |path| files.open(fs, path, writable))
+}
+
+fn with_user_path(
+    address: usize,
+    length: usize,
+    operation: impl FnOnce(&[u8]) -> Option<usize>,
+) -> Option<usize> {
     let mut buffer = [0; PATH_LIMIT];
     let path = buffer.get_mut(..length)?;
     if !copy_from_user_stack(address, path) {
         return None;
     }
-    files.open(fs, path, writable)
+    operation(path)
 }
 
 fn write_file(

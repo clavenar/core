@@ -88,6 +88,7 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         .as_mut()
         .expect("kernel state is initialized before user entry");
     let scheduler = &mut state.scheduler;
+    let fs = &mut state.ramfs;
     let current = scheduler.current_id();
     if scause == timer::INTERRUPT_CAUSE {
         if scheduler.preempt(frame) {
@@ -104,22 +105,22 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         write_task(current);
         uart::write(b" fault");
         write_trap_registers(scause, frame.sepc, stval);
-        finish_task(scheduler, frame, b"fault switch ");
+        finish_task(scheduler, fs, frame, b"fault switch ");
         return;
     }
 
-    if let syscall::Outcome::Exit(status) = syscall::dispatch(scheduler, &mut state.ramfs, frame) {
+    if let syscall::Outcome::Exit(status) = syscall::dispatch(scheduler, fs, frame) {
         write_task(current);
         uart::write(b" user exit status=");
         write_hex(status);
         uart::write(b"\r\n");
-        finish_task(scheduler, frame, b"exit switch ");
+        finish_task(scheduler, fs, frame, b"exit switch ");
     }
 }
 
-fn finish_task(scheduler: &mut Scheduler, frame: &mut TrapFrame, reason: &[u8]) {
+fn finish_task(scheduler: &mut Scheduler, fs: &mut RamFs, frame: &mut TrapFrame, reason: &[u8]) {
     let previous = scheduler.current_id();
-    if !scheduler.stop_current(frame) {
+    if !scheduler.stop_current(fs, frame) {
         uart::write(b"all tasks exited\r\n");
         idle();
     }

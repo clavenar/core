@@ -75,6 +75,7 @@ and -1 otherwise. At the `clv> ` prompt, type `help` to see the available
 commands. Use `ls` to list the RamFS root, `cat /hello.txt` or
 `cat /about.txt` to read a file, and `exit` to stop the shell. The command
 `write /note.txt hello` creates or replaces a file with one line of text.
+Use `rm /note.txt` to remove a writable file.
 
 RamFS starts with read-only `/hello.txt` and `/about.txt` and holds up to four
 writable files of 256 bytes each. Writable files live in RAM until reboot.
@@ -88,6 +89,7 @@ handles, and each open handle has an independent cursor.
 | 7 `readdir` | `a0` root directory handle, `a1` destination address, `a2` capacity | One entry name's byte count, or 0 at end |
 | 8 `close` | `a0` handle | 0 |
 | 9 `write` | `a0` writable handle, `a1` source address, `a2` byte count | Bytes written |
+| 10 `unlink` | `a0` path address, `a1` path length up to 64 bytes | 0 |
 
 Open mode 0 opens a path for reading. Mode 1 opens a writable file for reading
 and writing, creating it if absent and truncating it to zero length otherwise.
@@ -96,6 +98,11 @@ calling task's stack. Writes validate and copy the entire input before
 changing bytes or the cursor. Reads and directory listings advance their
 cursor only after a successful copy. Directory entries contain the name bytes
 without a trailing newline or NUL.
+
+Unlink removes a writable file's name immediately. Open handles retain access
+to that file, and its slot becomes reusable once the last handle closes.
+Recreating the path while an old handle is open uses a separate slot.
+Task exit and user faults close the task's handles.
 
 Call 1 takes an exit status in `a0` and removes the calling task from the
 schedule. In a successful run, both tasks report

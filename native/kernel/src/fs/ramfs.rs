@@ -32,6 +32,8 @@ struct WritableFile {
     name_length: usize,
     contents: [u8; WRITABLE_FILE_CAPACITY],
     length: usize,
+    linked: bool,
+    open_handles: usize,
 }
 
 impl WritableFile {
@@ -50,6 +52,8 @@ impl WritableFile {
             name_length: name.len(),
             contents: [0; WRITABLE_FILE_CAPACITY],
             length: 0,
+            linked: true,
+            open_handles: 1,
         })
     }
 
@@ -77,16 +81,13 @@ impl RamFs {
         if let Some(index) = BOOT_FILES.iter().position(|file| file.name == name) {
             return (!writable).then_some(Node::BootFile(index));
         }
-        if let Some(index) = self
-            .writable
-            .iter()
-            .position(|slot| slot.as_ref().is_some_and(|file| file.name() == name))
-        {
+        if let Some(index) = self.find_writable(name) {
+            let file = self.writable[index].as_mut()?;
             if writable {
-                let file = self.writable[index].as_mut()?;
                 file.contents.fill(0);
                 file.length = 0;
             }
+            file.open_handles += 1;
             return Some(Node::WritableFile(index));
         }
         if !writable {
@@ -96,6 +97,39 @@ impl RamFs {
         let index = self.writable.iter().position(Option::is_none)?;
         self.writable[index] = Some(WritableFile::new(name)?);
         Some(Node::WritableFile(index))
+    }
+
+    pub(crate) fn unlink(&mut self, path: &[u8]) -> Option<usize> {
+        let name = path.strip_prefix(b"/").unwrap_or(path);
+        let index = self.find_writable(name)?;
+        let slot = &mut self.writable[index];
+        let file = slot.as_mut()?;
+        if file.open_handles == 0 {
+            *slot = None;
+        } else {
+            file.linked = false;
+        }
+        Some(0)
+    }
+
+    fn find_writable(&self, name: &[u8]) -> Option<usize> {
+        self.writable.iter().position(|slot| {
+            slot.as_ref()
+                .is_some_and(|file| file.linked && file.name() == name)
+        })
+    }
+
+    fn release(&mut self, node: Node) {
+        if let Node::WritableFile(index) = node {
+            let slot = &mut self.writable[index];
+            let file = slot
+                .as_mut()
+                .expect("open handle refers to a writable file");
+            file.open_handles -= 1;
+            if file.open_handles == 0 && !file.linked {
+                *slot = None;
+            }
+        }
     }
 
     fn contents(&self, node: Node) -> Option<&[u8]> {
@@ -109,19 +143,22 @@ impl RamFs {
         }
     }
 
-    fn entry_name(&self, index: usize) -> Option<&[u8]> {
+    fn next_entry(&self, index: usize) -> Option<(usize, &[u8])> {
         if let Some(file) = BOOT_FILES.get(index) {
-            return Some(file.name);
+            return Some((index + 1, file.name));
         }
+        // Use slot indices so unlinking an earlier entry cannot shift the cursor.
         self.writable
             .iter()
-            .flatten()
-            .nth(index - BOOT_FILES.len())
-            .map(WritableFile::name)
+            .enumerate()
+            .skip(index - BOOT_FILES.len())
+            .find_map(|(slot_index, slot)| {
+                let file = slot.as_ref().filter(|file| file.linked)?;
+                Some((BOOT_FILES.len() + slot_index + 1, file.name()))
+            })
     }
 }
 
-#[derive(Clone, Copy)]
 struct Handle {
     node: Node,
     cursor: usize,
@@ -135,7 +172,7 @@ pub(crate) struct FileHandles {
 impl FileHandles {
     pub(crate) const fn new() -> Self {
         Self {
-            slots: [None; HANDLE_COUNT],
+            slots: [const { None }; HANDLE_COUNT],
         }
     }
 
@@ -202,18 +239,23 @@ impl FileHandles {
         if !matches!(handle.node, Node::Root) {
             return None;
         }
-        let name = fs.entry_name(handle.cursor).unwrap_or(&[]);
+        let (next, name) = fs.next_entry(handle.cursor).unwrap_or((handle.cursor, &[]));
         if !deliver(name) {
             return None;
         }
-        if !name.is_empty() {
-            handle.cursor += 1;
-        }
+        handle.cursor = next;
         Some(name.len())
     }
 
-    pub(crate) fn close(&mut self, fd: usize) -> Option<usize> {
-        self.slots.get_mut(fd)?.take()?;
+    pub(crate) fn close(&mut self, fs: &mut RamFs, fd: usize) -> Option<usize> {
+        let handle = self.slots.get_mut(fd)?.take()?;
+        fs.release(handle.node);
         Some(0)
+    }
+
+    pub(crate) fn close_all(&mut self, fs: &mut RamFs) {
+        for handle in self.slots.iter_mut().filter_map(Option::take) {
+            fs.release(handle.node);
+        }
     }
 }

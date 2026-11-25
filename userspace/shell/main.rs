@@ -3,7 +3,7 @@
 
 use clv_abi::{
     OPEN_READ, OPEN_WRITE_TRUNCATE, SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_TIMER_FIRED, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_READDIR, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -69,10 +69,11 @@ extern "C" fn _start() -> ! {
 
 fn run_command(line: &[u8]) {
     match line.trim_ascii() {
-        b"help" => write(b"help  ls  cat <path>  write <path> <text>  exit\r\n"),
+        b"help" => write(b"help  ls  cat <path>  write <path> <text>  rm <path>  exit\r\n"),
         b"ls" => show(&[b'/'], SYS_READDIR),
         b"cat" => write(b"usage: cat <path>\r\n"),
         b"write" => write(WRITE_USAGE),
+        b"rm" => write(b"usage: rm <path>\r\n"),
         b"exit" => exit(0),
         b"" => {}
         command => {
@@ -80,6 +81,10 @@ fn run_command(line: &[u8]) {
                 show(path.trim_ascii(), SYS_READ);
             } else if let Some(arguments) = command.strip_prefix(b"write ") {
                 write_file(arguments.trim_ascii_start());
+            } else if let Some(path) = command.strip_prefix(b"rm ") {
+                if call_path(SYS_UNLINK, path.trim_ascii(), 0) == SYSCALL_ERROR {
+                    write(b"cannot remove path\r\n");
+                }
             } else {
                 write(b"unknown command\r\n");
             }
@@ -88,7 +93,7 @@ fn run_command(line: &[u8]) {
 }
 
 fn show(path: &[u8], operation: usize) {
-    let handle = open(path, OPEN_READ);
+    let handle = call_path(SYS_OPEN, path, OPEN_READ);
     if handle == SYSCALL_ERROR {
         write(b"cannot open path\r\n");
         return;
@@ -129,7 +134,7 @@ fn write_file(arguments: &[u8]) {
     let length = text.len() + 2;
     buffer[text.len()..length].copy_from_slice(b"\r\n");
 
-    let handle = open(path, OPEN_WRITE_TRUNCATE);
+    let handle = call_path(SYS_OPEN, path, OPEN_WRITE_TRUNCATE);
     if handle == SYSCALL_ERROR {
         write(b"cannot open path\r\n");
         return;
@@ -146,11 +151,11 @@ fn write_file(arguments: &[u8]) {
     }
 }
 
-fn open(path: &[u8], mode: usize) -> usize {
+fn call_path(number: usize, path: &[u8], mode: usize) -> usize {
     let mut buffer = [0; LINE_LIMIT];
     buffer[..path.len()].copy_from_slice(path);
     syscall(
-        SYS_OPEN,
+        number,
         buffer.as_mut_ptr().expose_provenance(),
         path.len(),
         mode,

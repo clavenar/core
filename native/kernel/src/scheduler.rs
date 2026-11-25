@@ -1,5 +1,5 @@
 use crate::arch::riscv64::trap::TrapFrame;
-use crate::fs::ramfs::FileHandles;
+use crate::fs::ramfs::{FileHandles, RamFs};
 use crate::memory::sv39::{AddressSpace, USER_STACK_TOP};
 
 struct Task {
@@ -59,10 +59,10 @@ impl Scheduler {
         self.switch(frame)
     }
 
-    pub(crate) fn stop_current(&mut self, frame: &mut TrapFrame) -> bool {
+    pub(crate) fn stop_current(&mut self, fs: &mut RamFs, frame: &mut TrapFrame) -> bool {
         let task = &mut self.tasks[self.current];
         task.runnable = false;
-        task.files = FileHandles::new();
+        task.files.close_all(fs);
         self.switch(frame)
     }
 
