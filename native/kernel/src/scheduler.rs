@@ -21,9 +21,10 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
-    pub(crate) fn new(spaces: [AddressSpace; 2], entry: usize, sstatus: usize) -> Self {
+    pub(crate) fn new(programs: [(AddressSpace, usize); 2], sstatus: usize) -> Self {
         Self {
             tasks: core::array::from_fn(|index| {
+                let (address_space, entry) = programs[index];
                 let mut registers = [0; 32];
                 registers[2] = USER_STACK_TOP;
                 registers[10] = index + 1;
@@ -33,7 +34,7 @@ impl Scheduler {
                         sepc: entry,
                         sstatus,
                     },
-                    address_space: spaces[index],
+                    address_space,
                     runnable: true,
                     timer_fired: false,
                 }

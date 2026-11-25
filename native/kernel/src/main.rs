@@ -9,7 +9,7 @@ mod timer;
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::ptr::{without_provenance, without_provenance_mut};
-use memory::frame::FrameAllocator;
+use memory::frame::{Frame, FrameAllocator};
 use memory::sv39;
 use memory::user_image;
 use memory::usercopy::{SSTATUS_SUM, copy_from_user_stack};
@@ -29,6 +29,7 @@ const _: &str = include_str!("../../linker/riscv64.ld");
 
 const UART_BASE: usize = 0x1000_0000;
 const UART_LINE_STATUS: usize = 5;
+const UART_RX_READY: u8 = 1 << 0;
 const UART_TX_READY: u8 = 1 << 5;
 const USER_ECALL: usize = 8;
 const INTERRUPT_FLAG: usize = 1 << (usize::BITS - 1);
@@ -36,13 +37,23 @@ const SYS_PROBE: usize = 0;
 const SYS_EXIT: usize = 1;
 const SYS_WRITE_CONSOLE: usize = 2;
 const SYS_TIMER_FIRED: usize = 3;
+const SYS_READ_CONSOLE: usize = 4;
 const SYSCALL_ERROR: usize = usize::MAX;
 const CONSOLE_WRITE_LIMIT: usize = 128;
 const PROBE_VALUE: usize = 42;
 const REG_A0: usize = 10;
 const REG_A1: usize = 11;
 const REG_A7: usize = 17;
-const USER_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"));
+const BOOT_PROGRAMS: [(&[u8], &[u8]); 2] = [
+    (
+        b"hello",
+        include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf")),
+    ),
+    (
+        b"shell",
+        include_bytes!(concat!(env!("OUT_DIR"), "/shell.elf")),
+    ),
+];
 // Clear SUM, FS, VS, SPP, SPIE and SIE for a new user context.
 const USER_STATUS_CLEAR: usize =
     SSTATUS_SUM | (3 << 13) | (3 << 9) | (1 << 8) | (1 << 5) | (1 << 1);
@@ -65,32 +76,32 @@ extern "C" fn kernel_main() -> ! {
 
     // SAFETY: The single boot hart claims the frame pool here once.
     let mut frames = unsafe { FrameAllocator::from_boot_pool() };
-    let user_code = frames.allocate_zeroed().expect("boot frame pool is empty");
-    let Some(entry) = user_image::load(USER_ELF, user_code.bytes_mut()) else {
-        uart_write(b"User ELF load failed\r\n");
-        idle();
-    };
-    let mappings = sv39::BootMappings::new(&mut frames, user_code, UART_BASE)
+    let [(hello_code, hello_entry), (shell_code, shell_entry)] =
+        BOOT_PROGRAMS.map(|(name, image)| load_user_program(&mut frames, name, image));
+    let mappings = sv39::BootMappings::new(&mut frames, [hello_code, shell_code], UART_BASE)
         .expect("boot frame pool cannot hold supervisor mappings");
-    let spaces = [
-        mappings
-            .task_address_space(&mut frames)
-            .expect("no frames for task 1"),
-        mappings
-            .task_address_space(&mut frames)
-            .expect("no frames for task 2"),
+    let programs = [
+        (
+            mappings
+                .task_address_space(&mut frames, 0)
+                .expect("no frames for task 1"),
+            hello_entry,
+        ),
+        (
+            mappings
+                .task_address_space(&mut frames, 1)
+                .expect("no frames for task 2"),
+            shell_entry,
+        ),
     ];
     let sstatus: usize;
     // SAFETY: The boot hart is in supervisor mode.
     unsafe { asm!("csrr {status}, sstatus", status = out(reg) sstatus, options(nomem, nostack)) };
-    let scheduler = Scheduler::new(spaces, entry, sstatus & !USER_STATUS_CLEAR);
+    let scheduler = Scheduler::new(programs, sstatus & !USER_STATUS_CLEAR);
     let first_frame = *scheduler.current_frame();
 
     uart_write(b"boot frame=");
     uart_write_hex(scheduler.address_space().root_address());
-    uart_write(b"\r\n");
-    uart_write(b"User ELF loaded entry=");
-    uart_write_hex(entry);
     uart_write(b"\r\n");
     if !scheduler.address_space().activate() {
         uart_write(b"Sv39 paging setup failed\r\n");
@@ -103,6 +114,26 @@ extern "C" fn kernel_main() -> ! {
     // SAFETY: The frame names the first task's mapped code and stack, and the
     // trap vector is installed.
     unsafe { enter_user(&first_frame) }
+}
+
+fn load_user_program<'a>(
+    frames: &mut FrameAllocator<'a>,
+    name: &[u8],
+    image: &[u8],
+) -> (&'a Frame, usize) {
+    let code = frames.allocate_zeroed().expect("boot frame pool is empty");
+    let Some(entry) = user_image::load(image, code.bytes_mut()) else {
+        uart_write(b"User ELF load failed for ");
+        uart_write(name);
+        uart_write(b"\r\n");
+        idle();
+    };
+    uart_write(b"User ELF loaded entry=");
+    uart_write_hex(entry);
+    uart_write(b" program=");
+    uart_write(name);
+    uart_write(b"\r\n");
+    (code, entry)
 }
 
 // SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.
@@ -152,6 +183,9 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
                 write_console(frame.registers[REG_A0], frame.registers[REG_A1]);
         }
         SYS_TIMER_FIRED => frame.registers[REG_A0] = usize::from(scheduler.timer_fired()),
+        SYS_READ_CONSOLE => {
+            frame.registers[REG_A0] = uart_read_byte().map_or(SYSCALL_ERROR, usize::from);
+        }
         _ => frame.registers[REG_A0] = SYSCALL_ERROR,
     }
     // ECALL is a 32-bit instruction, including on cores with compressed code.
@@ -248,6 +282,20 @@ fn uart_write_byte(byte: u8) {
             core::hint::spin_loop();
         }
         transmit.write_volatile(byte);
+    }
+}
+
+fn uart_read_byte() -> Option<u8> {
+    let line_status = without_provenance::<u8>(UART_BASE + UART_LINE_STATUS);
+    let receive = without_provenance::<u8>(UART_BASE);
+
+    // SAFETY: These byte-wide UART registers are mapped on QEMU virt.
+    // Reading the receive register consumes one byte when data is ready.
+    unsafe {
+        if line_status.read_volatile() & UART_RX_READY == 0 {
+            return None;
+        }
+        Some(receive.read_volatile())
     }
 }
 

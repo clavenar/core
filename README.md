@@ -39,18 +39,19 @@ After the OpenSBI banner, the kernel prints `Clavenar kernel booted` with the
 version from `native/kernel/Cargo.toml`. It prints `boot frame=0x...` with the
 physical address of task 1's Sv39 root table.
 
-The build links [the hello program](userspace/hello/) as a separate RV64 ELF and
-embeds it in the kernel. The loader accepts a static, little-endian ELF64
-executable with one read/execute segment of at most 4 KiB at `0x00400000`. Boot
-reports the validated entry address as `User ELF loaded entry=0x...`, or prints
-`User ELF load failed` and idles if loading fails.
+The build links [hello](userspace/hello/) and [the shell](userspace/shell/) as
+separate RV64 ELFs and embeds both in the kernel. The loader accepts static,
+little-endian ELF64 executables with one read/execute segment of at most
+4 KiB at `0x00400000`. Boot reports each program's validated entry address.
+If loading fails, it prints `User ELF load failed` with the program name and
+idles.
 
-The kernel activates paging, prints `Sv39 paging enabled`, and starts two
-tasks at the ELF entry point. Each receives its task ID in `a0`. Both tasks
-share the read/execute code page and supervisor-only kernel and UART mappings.
-Each task has its own Sv39 root and read/write, non-executable stack mapped
-at virtual address `0x00401000`. The kernel, supervisor stack, and 16-frame
-boot pool fit within one aligned 2 MiB physical region.
+The kernel activates paging, prints `Sv39 paging enabled`, and starts hello
+as task 1 and the shell as task 2. Each receives its task ID in `a0` and runs
+with its own Sv39 root, read/execute code page, and read/write, non-executable
+stack mapped at `0x00401000`. The kernel and UART mappings are shared in
+supervisor mode. The kernel, supervisor stack, and 16-frame boot pool fit
+within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
@@ -67,6 +68,10 @@ count in `a1`. The kernel accepts up to 128 bytes, copies the full range before
 writing, and returns the byte count in `a0`. An empty write returns 0. An
 oversized write or a range outside the user stack returns -1 without output.
 The hello program uses this call to print `Hello from user mode`.
+
+Call 4 polls the console. It returns one UART byte in `a0` when input is ready
+and -1 otherwise. At the `clv> ` prompt, type `help` and press Enter to see the
+available commands. Type `exit` and press Enter to stop the shell.
 
 Call 1 takes an exit status in `a0` and removes the calling task from the
 schedule. In a successful run, both tasks report
@@ -86,5 +91,5 @@ Check Rust formatting with `rustfmt` from the stable toolchain.
 
 ```sh
 cargo +stable fmt --manifest-path native/kernel/Cargo.toml --check
-rustfmt +stable --edition 2024 --check userspace/hello/main.rs
+rustfmt +stable --edition 2024 --check userspace/hello/main.rs userspace/shell/main.rs
 ```

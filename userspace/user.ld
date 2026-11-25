@@ -16,5 +16,5 @@ SECTIONS
         *(.text .text.*)
     } :image
 
-    ASSERT(SIZEOF(.text) <= 0x1000, "boot user program must fit in one page")
+    ASSERT(SIZEOF(.text) <= 0x1000, "user program must fit in one page")
 }

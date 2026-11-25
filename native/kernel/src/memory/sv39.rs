@@ -29,7 +29,7 @@ unsafe extern "C" {
 pub(crate) struct BootMappings {
     text: usize,
     uart: usize,
-    user_code: usize,
+    user_code: [usize; 2],
     kernel_middle: usize,
     uart_leaves: usize,
 }
@@ -37,7 +37,7 @@ pub(crate) struct BootMappings {
 impl BootMappings {
     pub(crate) fn new(
         frames: &mut FrameAllocator<'_>,
-        user_code: &Frame,
+        user_code: [&Frame; 2],
         uart: usize,
     ) -> Option<Self> {
         let kernel_middle = frames.allocate_zeroed()?;
@@ -49,18 +49,19 @@ impl BootMappings {
         let rodata = (&raw const __rodata_start).addr();
         let writable = (&raw const __writable_start).addr();
         let end = (&raw const __kernel_end).addr();
-        let user_code = user_code.physical_address();
+        let user_code = user_code.map(Frame::physical_address);
 
         map_range(kernel_leaves, text, rodata, READ | EXECUTE);
         map_range(kernel_leaves, rodata, writable, READ);
-        // The loaded code gets only the user RX mapping, with no writable alias.
-        map_range(kernel_leaves, writable, user_code, READ | WRITE | DIRTY);
-        map_range(
-            kernel_leaves,
-            user_code + FRAME_SIZE,
-            end,
-            READ | WRITE | DIRTY,
-        );
+        // Exclude both code frames from the writable identity map.
+        let mut code_pages = user_code;
+        code_pages.sort_unstable();
+        let mut start = writable;
+        for code in code_pages {
+            map_range(kernel_leaves, start, code, READ | WRITE | DIRTY);
+            start = code + FRAME_SIZE;
+        }
+        map_range(kernel_leaves, start, end, READ | WRITE | DIRTY);
         map_range(uart_leaves, uart, uart + FRAME_SIZE, READ | WRITE | DIRTY);
         kernel_middle.words_mut()[vpn_index(text, 1)] =
             pte(kernel_leaves.physical_address(), VALID);
@@ -77,7 +78,9 @@ impl BootMappings {
     pub(crate) fn task_address_space(
         &self,
         frames: &mut FrameAllocator<'_>,
+        program: usize,
     ) -> Option<AddressSpace> {
+        let user_code = *self.user_code.get(program)?;
         let root = frames.allocate_zeroed()?;
         let low_middle = frames.allocate_zeroed()?;
         let user_leaves = frames.allocate_zeroed()?;
@@ -87,7 +90,7 @@ impl BootMappings {
         // leaf table under the same low root entry on QEMU virt.
         let entries = user_leaves.words_mut();
         entries[vpn_index(USER_TEXT_BASE, 0)] =
-            pte(self.user_code, VALID | ACCESSED | READ | EXECUTE | USER);
+            pte(user_code, VALID | ACCESSED | READ | EXECUTE | USER);
         entries[vpn_index(USER_STACK_BASE, 0)] = pte(
             user_stack.physical_address(),
             VALID | ACCESSED | READ | WRITE | DIRTY | USER,
