@@ -64,6 +64,11 @@ launch starts with a cleared stack, fresh registers and timer state, an
 empty handle table, and working directory `/`. Exit or fault frees the slot
 for another launch.
 
+`wait hello` collects the exit status or fault cause of the latest `run hello`.
+The shell waits for a running program and returns immediately if the result is
+already available. A successful wait consumes the result, and a successful
+launch replaces any uncollected result.
+
 The user program passes the call number in `a7` and executes `ecall`. Call 0
 prints `task N user probe` and returns 42 in `a0`. Call 3 returns 1 in `a0` once
 the calling task has received a timer interrupt and 0 until then. The hello
@@ -139,6 +144,11 @@ and idles. Unknown call numbers return -1 in `a0`.
 Call 15 (`spawn`) takes a program selector in `a0`. Selector 0 chooses `hello`.
 It returns 0 when the task is ready to run and -1 if the selector is unknown
 or the task is already running.
+
+Call 16 (`wait`) takes program selector 0 in `a0`. On success, `a0` contains
+the result type and `a1` contains the full exit status or fault cause. Result
+type 0 means exit and 1 means fault. The call returns -1 in `a0` for an
+invalid selector, a caller other than the shell, or no pending launch.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

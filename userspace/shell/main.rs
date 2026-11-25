@@ -4,7 +4,8 @@
 use clv_abi::{
     OPEN_READ, OPEN_WRITE_TRUNCATE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD,
     SYS_MKDIR, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN,
-    SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    WAIT_EXITED, WAIT_FAULTED,
 };
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -72,7 +73,7 @@ fn run_command(line: &[u8]) {
     let (command, arguments) = split_word(line.trim_ascii());
     match command {
         b"help" if arguments.is_empty() => write(
-            b"help  pwd  cd <path>  ls [path]  mkdir <path>  rmdir <path>  cat <path>  write <path> <text>  rm <path>  run hello  exit\r\n",
+            b"help  pwd  cd <path>  ls [path]  mkdir <path>  rmdir <path>  cat <path>  write <path> <text>  rm <path>  run hello  wait hello  exit\r\n",
         ),
         b"pwd" if arguments.is_empty() => pwd(),
         b"cd" => run_path_command(
@@ -110,6 +111,8 @@ fn run_command(line: &[u8]) {
             }
         }
         b"run" => write(b"usage: run hello\r\n"),
+        b"wait" if arguments == b"hello" => wait_hello(),
+        b"wait" => write(b"usage: wait hello\r\n"),
         b"exit" if arguments.is_empty() => exit(0),
         b"" => {}
         _ => write(b"unknown command\r\n"),
@@ -148,6 +151,25 @@ fn pwd() {
     };
     write(path);
     write(b"\r\n");
+}
+
+fn wait_hello() {
+    let (kind, mut value) = ecall(SYS_WAIT, PROGRAM_HELLO, 0, 0);
+    match kind {
+        WAIT_EXITED => write(b"hello exited 0x"),
+        WAIT_FAULTED => write(b"hello fault scause=0x"),
+        _ => {
+            write(b"no pending launch\r\n");
+            return;
+        }
+    }
+
+    let mut line = *b"0000000000000000\r\n";
+    for digit in line[..16].iter_mut().rev() {
+        *digit = b"0123456789abcdef"[value & 0xf];
+        value >>= 4;
+    }
+    write_stack(&line);
 }
 
 fn show(path: &[u8], operation: usize) {
@@ -244,20 +266,24 @@ fn exit(status: usize) -> ! {
     }
 }
 
+fn syscall(number: usize, a0: usize, a1: usize, a2: usize) -> usize {
+    ecall(number, a0, a1, a2).0
+}
+
 #[inline(never)]
-fn syscall(number: usize, mut a0: usize, a1: usize, a2: usize) -> usize {
-    // SAFETY: Clavenar preserves registers other than the result in a0.
+fn ecall(number: usize, mut a0: usize, mut a1: usize, a2: usize) -> (usize, usize) {
+    // SAFETY: Clavenar returns results in a0 and a1 and preserves other registers.
     unsafe {
         asm!(
             "ecall",
             inlateout("a0") a0,
-            in("a1") a1,
+            inlateout("a1") a1,
             in("a2") a2,
             in("a7") number,
             options(nostack),
         );
     }
-    a0
+    (a0, a1)
 }
 
 #[panic_handler]

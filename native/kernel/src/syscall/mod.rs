@@ -1,7 +1,8 @@
 use clv_abi::{
     OPEN_READ, OPEN_WRITE_TRUNCATE, PROBE_VALUE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT,
     SYS_GETCWD, SYS_MKDIR, SYS_OPEN, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR,
-    SYS_SPAWN, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_SPAWN, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    WAIT_EXITED, WAIT_FAULTED,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -9,7 +10,7 @@ use crate::console::write_task;
 use crate::drivers::uart;
 use crate::fs::ramfs::{RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
 use crate::memory::usercopy::{copy_from_user_stack, copy_to_user_stack};
-use crate::scheduler::Scheduler;
+use crate::scheduler::{Scheduler, TaskCompletion, WaitResult};
 
 const CONSOLE_WRITE_LIMIT: usize = 128;
 const PATH_LIMIT: usize = 64;
@@ -21,6 +22,7 @@ const REG_A7: usize = 17;
 pub(crate) enum Outcome {
     Resume,
     Exit(usize),
+    Wait,
 }
 
 pub(crate) fn dispatch(
@@ -66,6 +68,18 @@ pub(crate) fn dispatch(
             with_user_path(a0, a1, |path| scheduler.rmdir(fs, path)).unwrap_or(SYSCALL_ERROR)
         }
         SYS_SPAWN if a0 == PROGRAM_HELLO => scheduler.spawn_hello().unwrap_or(SYSCALL_ERROR),
+        SYS_WAIT if a0 == PROGRAM_HELLO => match scheduler.wait_hello(frame) {
+            WaitResult::NoLaunch => SYSCALL_ERROR,
+            WaitResult::Blocked => return Outcome::Wait,
+            WaitResult::Completed(completion) => {
+                let (kind, value) = match completion {
+                    TaskCompletion::Exited(status) => (WAIT_EXITED, status),
+                    TaskCompletion::Faulted(cause) => (WAIT_FAULTED, cause),
+                };
+                frame.registers[REG_A1] = value;
+                kind
+            }
+        },
         _ => SYSCALL_ERROR,
     };
     // ECALL is a 32-bit instruction, including on cores with compressed code.

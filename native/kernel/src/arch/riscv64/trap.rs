@@ -5,7 +5,7 @@ use crate::console::{write_hex, write_task};
 use crate::drivers::uart;
 use crate::fs::ramfs::RamFs;
 use crate::memory::usercopy::SSTATUS_SUM;
-use crate::scheduler::Scheduler;
+use crate::scheduler::{Scheduler, TaskCompletion};
 use crate::syscall;
 
 global_asm!(
@@ -105,25 +105,41 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         write_task(current);
         uart::write(b" fault");
         write_trap_registers(scause, frame.sepc, stval);
-        finish_task(scheduler, fs, frame, b"fault switch ");
+        finish_task(scheduler, fs, frame, TaskCompletion::Faulted(scause));
         return;
     }
 
-    if let syscall::Outcome::Exit(status) = syscall::dispatch(scheduler, fs, frame) {
-        write_task(current);
-        uart::write(b" user exit status=");
-        write_hex(status);
-        uart::write(b"\r\n");
-        finish_task(scheduler, fs, frame, b"exit switch ");
+    match syscall::dispatch(scheduler, fs, frame) {
+        syscall::Outcome::Resume => {}
+        syscall::Outcome::Exit(status) => {
+            write_task(current);
+            uart::write(b" user exit status=");
+            write_hex(status);
+            uart::write(b"\r\n");
+            finish_task(scheduler, fs, frame, TaskCompletion::Exited(status));
+        }
+        syscall::Outcome::Wait => {
+            switch_task(scheduler, current, b"wait switch ");
+            arm_timer();
+        }
     }
 }
 
-fn finish_task(scheduler: &mut Scheduler, fs: &mut RamFs, frame: &mut TrapFrame, reason: &[u8]) {
+fn finish_task(
+    scheduler: &mut Scheduler,
+    fs: &mut RamFs,
+    frame: &mut TrapFrame,
+    completion: TaskCompletion,
+) {
     let previous = scheduler.current_id();
-    if !scheduler.stop_current(fs, frame) {
+    if !scheduler.stop_current(fs, frame, completion) {
         uart::write(b"all tasks exited\r\n");
         idle();
     }
+    let reason: &[u8] = match completion {
+        TaskCompletion::Exited(_) => b"exit switch ",
+        TaskCompletion::Faulted(_) => b"fault switch ",
+    };
     switch_task(scheduler, previous, reason);
     arm_timer();
 }

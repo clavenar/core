@@ -16,5 +16,10 @@ SECTIONS
         *(.text .text.*)
     } :image
 
+    /* Boot user programs use panic=abort. */
+    /DISCARD/ : {
+        *(.eh_frame .eh_frame.*)
+    }
+
     ASSERT(SIZEOF(.text) <= 0x1000, "user program must fit in one page")
 }
