@@ -28,6 +28,8 @@ pub const SYS_SPAWN_AT_WITH_MESSAGE: usize = 22;
 pub const SYS_SPAWN_WITH_FILE: usize = 23;
 pub const SYS_SPAWN_REQUEST: usize = 24;
 pub const SYS_REQUEST_RECV: usize = 25;
+pub const SYS_REPLY_SEND: usize = 26;
+pub const SYS_REPLY_RECV: usize = 27;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
@@ -44,6 +46,28 @@ impl RequestKind {
         match value {
             value if value == Self::Echo as usize => Some(Self::Echo),
             value if value == Self::ReadFile as usize => Some(Self::ReadFile),
+            _ => None,
+        }
+    }
+}
+
+/// Zero is reserved for an empty reply mailbox.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum ReplyKind {
+    Echo = 1,
+    FileData = 2,
+    Denied = 3,
+    ReadFailed = 4,
+}
+
+impl ReplyKind {
+    pub const fn from_raw(value: usize) -> Option<Self> {
+        match value {
+            value if value == Self::Echo as usize => Some(Self::Echo),
+            value if value == Self::FileData as usize => Some(Self::FileData),
+            value if value == Self::Denied as usize => Some(Self::Denied),
+            value if value == Self::ReadFailed as usize => Some(Self::ReadFailed),
             _ => None,
         }
     }

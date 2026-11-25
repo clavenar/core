@@ -100,7 +100,7 @@ echoed reply `hello from shell`. `ask echo hello from shell` sends the same
 request to `echo`. The request is available to the child when it starts.
 
 `askat hello /notes todo.txt` grants access to `/notes` and sends a `ReadFile`
-request for `todo.txt`. The shell prints up to 63 bytes of file data, reports an
+request for `todo.txt`. The shell prints up to 64 bytes of file data, reports an
 empty file, or reports a failed read.
 
 ```text
@@ -114,8 +114,9 @@ Put `--echo` or `--read` before the program name to select a request kind
 explicitly. In a fresh QEMU shell, the first two launches below grant the
 same directory and send the same bytes. The first prints `hello.txt` and
 the second prints `Hello from RamFS`. The third prints
-`cannot read requested file` because the child has no directory handle.
-The three waits report exit statuses 0, 0 and 1.
+`read denied: no directory grant` because the child has no directory handle.
+The fourth grants the root directory but asks for a missing file, so it prints
+`cannot read requested file`. The four waits report exit statuses 0, 0, 1 and 1.
 
 ```text
 askat --echo hello / hello.txt
@@ -124,11 +125,13 @@ askat hello / hello.txt
 wait hello
 ask --read hello hello.txt
 wait hello
+askat hello / missing.txt
+wait hello
 ```
 
 `askfile hello <path>` grants `hello` read access to one file. The shell opens
 the file, launches the child and closes its own handle. The child reads directly
-from its handle and replies with up to 63 bytes. A directory is rejected at launch.
+from its handle and replies with up to 64 bytes. A directory is rejected at launch.
 
 ```text
 mkdir /notes
@@ -296,14 +299,42 @@ byte count in `a0`, the sender's task ID in `a1`, and the request kind in
 `a2`. An empty mailbox returns zero in all three registers. A bad buffer,
 insufficient capacity, or a caller without a child launch returns -1 in
 `a0`. A failed copy preserves the pending request. Calls 20 and 25 consume
-the same request once. The shell collects replies with call 20.
+the same request once.
 
-`hello` echoes an `Echo` payload verbatim. For `ReadFile`, it opens the
-payload path through its directory grant using `open_at`. A successful file
-reply starts with status byte 0 followed by up to 63 bytes of file data.
-A missing directory grant or failed read produces the single status byte 1.
-`echo` accepts `Echo` and returns the file error for `ReadFile`. The child exits
-with status 0 after a successful reply and status 1 if the request or send fails.
+Call 26 (`reply_send`) takes a user stack payload address in `a0`, length in
+`a1`, and reply kind in `a2`. A shell-launched child can queue one reply for
+its live parent. The kernel records the sending task's ID. The call returns the
+payload length on success. For an empty payload it ignores the address and
+returns 0. Invalid arguments or a full mailbox return -1 and preserve any
+queued reply.
+
+| Reply kind | Payload | Meaning in the boot programs |
+| --- | --- | --- |
+| 1 `Echo` | 1–64 bytes | Literal bytes or the child's ready message |
+| 2 `FileData` | 0–64 bytes | File contents, including an empty file |
+| 3 `Denied` | Empty | `hello` received a read request without a directory grant |
+| 4 `ReadFailed` | Empty | `hello` failed to open or read the path, or `echo` received a read request it cannot serve |
+
+For `ReadFile`, `hello` opens the requested path through its directory grant
+using `open_at`. The child exits with status 0 after sending a successful reply
+and status 1 if the request or send fails.
+
+Call 27 (`reply_recv`) takes a user stack destination in `a0`, its capacity
+in `a1`, and a shell-owned child handle in `a2`. It waits for a reply or child
+completion. On delivery it returns the byte count in `a0`, the kernel-recorded
+sender in `a1`, and the child's reply kind in `a2`. A zero-capacity buffer
+can receive a zero-byte reply. After completion an empty mailbox returns
+zero in all three registers. An invalid handle, invalid buffer or insufficient
+capacity returns -1 and leaves the reply available for retry. The shell uses
+the reply kind to display the result and collects exit status separately with
+`wait`.
+
+Calls 20 and 27 consume the same reply once. Call 20 returns `Echo` bytes
+verbatim. For `FileData` it returns the legacy status byte 0 followed by up
+to 63 data bytes. Both errors return the single status byte 1. In the other
+direction, call 27 reads a legacy call 19 message as `Echo`. For a `ReadFile`
+request or single-file grant it recognizes the original file format, mapping
+status 0 to `FileData` and a lone status byte 1 to `ReadFailed`.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

@@ -1,9 +1,8 @@
-use clv_abi::{
-    GrantKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PROGRAM_ECHO, PROGRAM_HELLO, RequestKind,
-};
+use clv_abi::{GrantKind, PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind};
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::fs::ramfs::{RamFs, TaskFs};
+use crate::ipc::{Message, MessageKind};
 use crate::memory::sv39::{AddressSpace, USER_STACK_TOP};
 
 pub(crate) const TASK_COUNT: usize = 3;
@@ -29,6 +28,7 @@ struct ChildLaunch {
     handle: usize,
     request: Option<Message>,
     reply: Option<Message>,
+    legacy_file_reply: bool,
     completion: Option<TaskCompletion>,
 }
 
@@ -38,44 +38,19 @@ pub(crate) enum WaitResult {
     Completed(TaskCompletion),
 }
 
+pub(crate) enum Mailbox {
+    LaunchRequest,
+    ChildReply(usize),
+}
+
 pub(crate) enum ReceiveResult {
     Error,
     Blocked,
     Ready {
         length: usize,
         sender: usize,
-        request_kind: Option<RequestKind>,
+        tag: usize,
     },
-}
-
-pub(crate) struct Message {
-    bytes: [u8; MESSAGE_MAX_BYTES],
-    length: usize,
-    sender: usize,
-    request_kind: Option<RequestKind>,
-}
-
-impl Message {
-    pub(crate) fn new(
-        sender: usize,
-        request_kind: Option<RequestKind>,
-        length: usize,
-        copy: impl FnOnce(&mut [u8]) -> bool,
-    ) -> Option<Self> {
-        if length == 0 {
-            return None;
-        }
-        let mut bytes = [0; MESSAGE_MAX_BYTES];
-        if !copy(bytes.get_mut(..length)?) {
-            return None;
-        }
-        Some(Self {
-            bytes,
-            length,
-            sender,
-            request_kind,
-        })
-    }
 }
 
 struct Task {
@@ -194,10 +169,16 @@ impl Scheduler {
         task.frame = frame;
         task.fs = task_fs;
         task.timer_fired = false;
+        // Older children use an in-band status byte to answer a file read.
+        let legacy_file_reply = matches!(grant, Some((GrantKind::File, _)))
+            || request
+                .as_ref()
+                .is_some_and(|message| message.kind == MessageKind::Request(RequestKind::ReadFile));
         task.launch = Some(ChildLaunch {
             handle,
             request,
             reply: None,
+            legacy_file_reply,
             completion: None,
         });
         task.state = TaskState::Runnable;
@@ -223,6 +204,7 @@ impl Scheduler {
 
     pub(crate) fn send_reply(
         &mut self,
+        kind: Option<ReplyKind>,
         length: usize,
         copy: impl FnOnce(&mut [u8]) -> bool,
     ) -> Option<usize> {
@@ -235,7 +217,16 @@ impl Scheduler {
         if launch.reply.is_some() {
             return None;
         }
-        launch.reply = Some(Message::new(sender, None, length, copy)?);
+        let mut reply = Message::new(
+            sender,
+            MessageKind::Reply(kind.unwrap_or(ReplyKind::Echo)),
+            length,
+            copy,
+        )?;
+        if kind.is_none() && launch.legacy_file_reply {
+            reply.decode_legacy_file_reply();
+        }
+        launch.reply = Some(reply);
         let handle = launch.handle;
         let shell = &mut self.tasks[SHELL_TASK_INDEX];
         if shell.state == TaskState::WaitingForMessage(handle) {
@@ -246,42 +237,48 @@ impl Scheduler {
 
     pub(crate) fn receive_message(
         &mut self,
-        handle: usize,
+        mailbox: Mailbox,
+        legacy: bool,
         frame: &mut TrapFrame,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> ReceiveResult {
-        let mailbox = match self.current {
-            SHELL_TASK_INDEX => self
-                .launch_for_shell(handle)
-                .map(|(launch, state)| (&mut launch.reply, state == TaskState::Runnable)),
-            index if handle == NO_CHILD_HANDLE => self.tasks[index]
+        let pending = match mailbox {
+            Mailbox::LaunchRequest => self.tasks[self.current]
                 .launch
                 .as_mut()
-                .map(|launch| (&mut launch.request, false)),
-            _ => None,
+                .map(|launch| (&mut launch.request, None)),
+            Mailbox::ChildReply(handle) => self.launch_for_shell(handle).map(|(launch, state)| {
+                (
+                    &mut launch.reply,
+                    (state == TaskState::Runnable).then_some(handle),
+                )
+            }),
         };
-        let Some((pending, child_running)) = mailbox else {
+        let Some((pending, wait_for)) = pending else {
             return ReceiveResult::Error;
         };
         if let Some(message) = pending.as_ref() {
-            if !copy(&message.bytes[..message.length]) {
+            let bytes = message.bytes(legacy);
+            if !copy(bytes) {
                 return ReceiveResult::Error;
             }
             let result = ReceiveResult::Ready {
-                length: message.length,
+                length: bytes.len(),
                 sender: message.sender,
-                request_kind: message.request_kind,
+                tag: message.kind.tag(),
             };
             *pending = None;
             return result;
         }
-        if child_running && self.block_shell(frame, TaskState::WaitingForMessage(handle)) {
+        if let Some(handle) = wait_for
+            && self.block_shell(frame, TaskState::WaitingForMessage(handle))
+        {
             ReceiveResult::Blocked
         } else {
             ReceiveResult::Ready {
                 length: 0,
                 sender: 0,
-                request_kind: None,
+                tag: 0,
             }
         }
     }

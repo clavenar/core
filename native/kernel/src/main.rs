@@ -5,6 +5,7 @@ mod arch;
 mod console;
 mod drivers;
 mod fs;
+mod ipc;
 mod memory;
 mod scheduler;
 mod syscall;

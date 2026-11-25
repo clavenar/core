@@ -1,7 +1,7 @@
-use clv::{ChildStatus, fs, print};
+use clv::{ChildReply, ChildStatus, fs, print};
 use clv_abi::{
-    FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PROGRAM_ECHO,
-    PROGRAM_HELLO, RequestKind,
+    MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind,
+    RequestKind,
 };
 
 use super::split_word;
@@ -13,24 +13,9 @@ struct Child {
 }
 
 impl Child {
-    fn collect_reply(&mut self, handle: usize, kind: RequestKind) {
+    fn collect_reply(&mut self, handle: usize) {
         self.handle = handle;
-        if kind == RequestKind::Echo {
-            return print_reply(handle);
-        }
-        let mut buffer = [0; MESSAGE_MAX_BYTES];
-        match clv::receive_message(handle, &mut buffer) {
-            Some(([FILE_REPLY_OK], _)) => print(b"empty file\r\n"),
-            Some(([FILE_REPLY_OK, contents @ ..], _)) => {
-                clv::write_console(contents);
-                if !contents.ends_with(b"\n") {
-                    print(b"\r\n");
-                }
-            }
-            Some(([FILE_REPLY_ERROR], _)) => print(b"cannot read requested file\r\n"),
-            Some(([], _)) => print(b"no message\r\n"),
-            _ => print(b"recv failed\r\n"),
-        }
+        print_reply(handle);
     }
 }
 
@@ -95,7 +80,7 @@ impl Children {
             print(b"\r\n");
             return;
         };
-        child.collect_reply(handle, kind);
+        child.collect_reply(handle);
     }
 
     pub(super) fn ask_at(&mut self, arguments: &[u8]) {
@@ -109,7 +94,7 @@ impl Children {
         if let Some(handle) = spawn_scoped_hello(directory, |fd| {
             clv::spawn_request(PROGRAM_HELLO, Some(fd), kind, payload)
         }) {
-            child.collect_reply(handle, kind);
+            child.collect_reply(handle);
         }
     }
 
@@ -121,7 +106,7 @@ impl Children {
         };
         if let Some(handle) = spawn_scoped_hello(path, |fd| clv::spawn_with_file(PROGRAM_HELLO, fd))
         {
-            child.collect_reply(handle, RequestKind::ReadFile);
+            child.collect_reply(handle);
         }
     }
 
@@ -178,12 +163,19 @@ fn print_reply(handle: usize) {
         return print(b"no message\r\n");
     }
     let mut buffer = [0; MESSAGE_MAX_BYTES];
-    match clv::receive_message(handle, &mut buffer) {
-        Some(([], _)) => print(b"no message\r\n"),
-        Some((message, _)) => {
-            clv::write_console(message);
-            print(b"\r\n");
-        }
+    match clv::receive_reply(handle, &mut buffer) {
+        Some(ChildReply::Empty) => print(b"no message\r\n"),
+        Some(ChildReply::Received { kind, bytes, .. }) => match kind {
+            ReplyKind::FileData if bytes.is_empty() => print(b"empty file\r\n"),
+            ReplyKind::Echo | ReplyKind::FileData => {
+                clv::write_console(bytes);
+                if kind == ReplyKind::Echo || !bytes.ends_with(b"\n") {
+                    print(b"\r\n");
+                }
+            }
+            ReplyKind::Denied => print(b"read denied: no directory grant\r\n"),
+            ReplyKind::ReadFailed => print(b"cannot read requested file\r\n"),
+        },
         None => print(b"recv failed\r\n"),
     }
 }

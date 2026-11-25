@@ -6,10 +6,11 @@
 pub mod fs;
 
 use clv_abi::{
-    MESSAGE_MAX_BYTES, NO_DIRECTORY_GRANT, RequestKind, SYS_EXIT, SYS_MESSAGE_RECV,
-    SYS_MESSAGE_SEND, SYS_READ_CONSOLE, SYS_REQUEST_RECV, SYS_SPAWN, SYS_SPAWN_AT,
-    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_MESSAGE,
-    SYS_TIMER_FIRED, SYS_WAIT, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    MESSAGE_MAX_BYTES, NO_DIRECTORY_GRANT, ReplyKind, RequestKind, SYS_EXIT, SYS_MESSAGE_RECV,
+    SYS_MESSAGE_SEND, SYS_READ_CONSOLE, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV,
+    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
+    SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_WAIT, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    WAIT_EXITED, WAIT_FAULTED,
 };
 use core::arch::asm;
 
@@ -151,17 +152,29 @@ pub fn send_message(bytes: &[u8]) -> bool {
     }) == Some(bytes.len())
 }
 
-/// Returns the received bytes and the sender's task ID.
-pub fn receive_message(handle: usize, buffer: &mut [u8]) -> Option<(&[u8], usize)> {
-    let (count, sender, _) = ecall(
-        SYS_MESSAGE_RECV,
+/// Queues a typed reply for the calling child's parent.
+pub fn send_reply(kind: ReplyKind, bytes: &[u8]) -> bool {
+    with_stack_bytes::<MESSAGE_MAX_BYTES>(bytes, |address, length| {
+        syscall(SYS_REPLY_SEND, address, length, kind as usize)
+    }) == Some(bytes.len())
+}
+
+fn receive(number: usize, handle: usize, buffer: &mut [u8]) -> Option<(&[u8], usize, usize)> {
+    let (count, sender, tag) = ecall(
+        number,
         buffer.as_mut_ptr().expose_provenance(),
         buffer.len(),
         handle,
         0,
         0,
     );
-    Some((buffer.get(..count)?, sender))
+    Some((buffer.get(..count)?, sender, tag))
+}
+
+/// Returns the received bytes and the sender's task ID.
+pub fn receive_message(handle: usize, buffer: &mut [u8]) -> Option<(&[u8], usize)> {
+    let (bytes, sender, _) = receive(SYS_MESSAGE_RECV, handle, buffer)?;
+    Some((bytes, sender))
 }
 
 pub enum LaunchRequest<'a> {
@@ -175,20 +188,34 @@ pub enum LaunchRequest<'a> {
 
 /// Reads the calling child's launch request. The kernel supplies the sender's task ID.
 pub fn receive_request(buffer: &mut [u8]) -> Option<LaunchRequest<'_>> {
-    let (count, sender, kind) = ecall(
-        SYS_REQUEST_RECV,
-        buffer.as_mut_ptr().expose_provenance(),
-        buffer.len(),
-        0,
-        0,
-        0,
-    );
-    let bytes = buffer.get(..count)?;
-    if bytes.is_empty() {
+    let (bytes, sender, kind) = receive(SYS_REQUEST_RECV, 0, buffer)?;
+    if kind == 0 {
         return Some(LaunchRequest::Empty);
     }
     Some(LaunchRequest::Received {
         kind: RequestKind::from_raw(kind)?,
+        bytes,
+        sender,
+    })
+}
+
+pub enum ChildReply<'a> {
+    Empty,
+    Received {
+        kind: ReplyKind,
+        bytes: &'a [u8],
+        sender: usize,
+    },
+}
+
+/// A received reply has a kind and a sender even when its payload is empty.
+pub fn receive_reply(handle: usize, buffer: &mut [u8]) -> Option<ChildReply<'_>> {
+    let (bytes, sender, kind) = receive(SYS_REPLY_RECV, handle, buffer)?;
+    if kind == 0 {
+        return Some(ChildReply::Empty);
+    }
+    Some(ChildReply::Received {
+        kind: ReplyKind::from_raw(kind)?,
         bytes,
         sender,
     })

@@ -3,8 +3,8 @@
 
 use clv::{LaunchRequest, fs};
 use clv_abi::{
-    FILE_REPLY_ERROR, FILE_REPLY_OK, GrantKind, MESSAGE_MAX_BYTES, PROBE_VALUE, RequestKind,
-    SYS_EXIT, SYS_PROBE, SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    GrantKind, MESSAGE_MAX_BYTES, PROBE_VALUE, ReplyKind, RequestKind, SYS_EXIT, SYS_PROBE,
+    SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -27,36 +27,36 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize) -> usize {
     }
     if let Some(LaunchRequest::Received { kind, bytes, .. }) = clv::receive_request(&mut buffer) {
         return match kind {
-            RequestKind::Echo => usize::from(!clv::send_message(bytes)),
+            RequestKind::Echo => usize::from(!clv::send_reply(ReplyKind::Echo, bytes)),
+            RequestKind::ReadFile if grant_kind != GrantKind::Directory as usize => {
+                clv::send_reply(ReplyKind::Denied, &[]);
+                1
+            }
             RequestKind::ReadFile => {
-                let file = if grant_kind == GrantKind::Directory as usize {
-                    fs::open_at(handle, bytes)
-                } else {
-                    None
-                };
+                let file = fs::open_at(handle, bytes);
                 reply_with_file(file, &mut buffer)
             }
         };
     }
 
-    clv::send_message(b"hello ready");
+    clv::send_reply(ReplyKind::Echo, b"hello ready");
     // The assembly entry continues with the ordinary greeting or granted file.
     SYSCALL_ERROR
 }
 
 fn reply_with_file(file: Option<usize>, buffer: &mut [u8; MESSAGE_MAX_BYTES]) -> usize {
-    let count = file.and_then(|handle| {
-        let count = fs::read(handle, &mut buffer[1..]).map(<[u8]>::len);
+    let contents = file.and_then(|handle| {
+        let contents = fs::read(handle, buffer);
         fs::close(handle);
-        count
+        contents
     });
-    let (status, length) = match count {
-        Some(count) => (FILE_REPLY_OK, count + 1),
-        None => (FILE_REPLY_ERROR, 1),
-    };
-    buffer[0] = status;
-    let sent = clv::send_message(&buffer[..length]);
-    usize::from(status == FILE_REPLY_ERROR || !sent)
+    match contents {
+        Some(bytes) => usize::from(!clv::send_reply(ReplyKind::FileData, bytes)),
+        None => {
+            clv::send_reply(ReplyKind::ReadFailed, &[]);
+            1
+        }
+    }
 }
 
 extern "C" fn print_granted_hello(directory: usize) -> usize {

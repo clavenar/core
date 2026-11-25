@@ -2,7 +2,7 @@
 #![no_main]
 
 use clv::LaunchRequest;
-use clv_abi::{FILE_REPLY_ERROR, MESSAGE_MAX_BYTES, RequestKind};
+use clv_abi::{MESSAGE_MAX_BYTES, ReplyKind, RequestKind};
 use core::panic::PanicInfo;
 
 // SAFETY: The kernel enters this unique symbol with an aligned user stack.
@@ -21,12 +21,12 @@ extern "C" fn _start() -> ! {
             kind: RequestKind::ReadFile,
             ..
         }) => {
-            clv::send_message(&[FILE_REPLY_ERROR]);
+            clv::send_reply(ReplyKind::ReadFailed, &[]);
             clv::exit(1)
         }
         None => clv::exit(1),
     };
-    let sent = clv::send_message(reply);
+    let sent = clv::send_reply(ReplyKind::Echo, reply);
     clv::exit(usize::from(!sent));
 }
 
