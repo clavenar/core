@@ -21,5 +21,5 @@ SECTIONS
         *(.eh_frame .eh_frame.*)
     }
 
-    ASSERT(SIZEOF(.text) <= 0x1000, "user program must fit in one page")
+    ASSERT(SIZEOF(.text) <= 0x2000, "user program must fit in two pages")
 }

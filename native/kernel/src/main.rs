@@ -13,7 +13,7 @@ use arch::riscv64::{idle, trap};
 use console::write_hex;
 use core::panic::PanicInfo;
 use drivers::uart;
-use memory::frame::{Frame, FrameAllocator};
+use memory::frame::FrameAllocator;
 use memory::sv39;
 use memory::user_image;
 use scheduler::Scheduler;
@@ -44,22 +44,22 @@ extern "C" fn kernel_main() -> ! {
 
     // SAFETY: The single boot hart claims the frame pool here once.
     let mut frames = unsafe { FrameAllocator::from_boot_pool() };
-    let [(hello_code, hello_entry), (shell_code, shell_entry)] =
+    let [hello, shell] =
         BOOT_PROGRAMS.map(|(name, image)| load_user_program(&mut frames, name, image));
-    let mappings = sv39::BootMappings::new(&mut frames, [hello_code, shell_code], uart::BASE)
+    let mappings = sv39::BootMappings::new(&mut frames, [hello.pages, shell.pages], uart::BASE)
         .expect("boot frame pool cannot hold supervisor mappings");
     let programs = [
         (
             mappings
                 .task_address_space(&mut frames, 0)
                 .expect("no frames for task 1"),
-            hello_entry,
+            hello.entry,
         ),
         (
             mappings
                 .task_address_space(&mut frames, 1)
                 .expect("no frames for task 2"),
-            shell_entry,
+            shell.entry,
         ),
     ];
     let scheduler = Scheduler::new(programs, trap::supervisor_status());
@@ -80,20 +80,19 @@ fn load_user_program<'a>(
     frames: &mut FrameAllocator<'a>,
     name: &[u8],
     image: &[u8],
-) -> (&'a Frame, usize) {
-    let code = frames.allocate_zeroed().expect("boot frame pool is empty");
-    let Some(entry) = user_image::load(image, code.bytes_mut()) else {
+) -> user_image::LoadedImage<'a> {
+    let Some(loaded) = user_image::load(image, frames) else {
         uart::write(b"User ELF load failed for ");
         uart::write(name);
         uart::write(b"\r\n");
         idle();
     };
     uart::write(b"User ELF loaded entry=");
-    write_hex(entry);
+    write_hex(loaded.entry);
     uart::write(b" program=");
     uart::write(name);
     uart::write(b"\r\n");
-    (code, entry)
+    loaded
 }
 
 #[panic_handler]

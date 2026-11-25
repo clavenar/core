@@ -2,9 +2,9 @@ use core::arch::asm;
 use core::ptr::NonNull;
 
 use super::frame::{FRAME_SIZE, Frame, FrameAllocator};
-use super::user_image::USER_TEXT_BASE;
+use super::user_image::{USER_IMAGE_PAGES, USER_IMAGE_SIZE, USER_TEXT_BASE};
 
-pub(crate) const USER_STACK_BASE: usize = USER_TEXT_BASE + FRAME_SIZE;
+pub(crate) const USER_STACK_BASE: usize = USER_TEXT_BASE + USER_IMAGE_SIZE;
 pub(crate) const USER_STACK_TOP: usize = USER_STACK_BASE + FRAME_SIZE;
 
 const PAGE_SHIFT: usize = 12;
@@ -30,7 +30,7 @@ unsafe extern "C" {
 pub(crate) struct BootMappings {
     text: usize,
     uart: usize,
-    user_code: [usize; 2],
+    user_code: [[Option<usize>; USER_IMAGE_PAGES]; 2],
     kernel_middle: usize,
     uart_leaves: usize,
 }
@@ -38,7 +38,7 @@ pub(crate) struct BootMappings {
 impl BootMappings {
     pub(crate) fn new(
         frames: &mut FrameAllocator<'_>,
-        user_code: [&Frame; 2],
+        user_code: [[Option<&Frame>; USER_IMAGE_PAGES]; 2],
         uart: usize,
     ) -> Option<Self> {
         let kernel_middle = frames.allocate_zeroed()?;
@@ -50,19 +50,16 @@ impl BootMappings {
         let rodata = (&raw const __rodata_start).addr();
         let writable = (&raw const __writable_start).addr();
         let end = (&raw const __kernel_end).addr();
-        let user_code = user_code.map(Frame::physical_address);
+        let user_code =
+            user_code.map(|pages| pages.map(|frame| frame.map(Frame::physical_address)));
 
         map_range(kernel_leaves, text, rodata, READ | EXECUTE);
         map_range(kernel_leaves, rodata, writable, READ);
-        // Exclude both code frames from the writable identity map.
-        let mut code_pages = user_code;
-        code_pages.sort_unstable();
-        let mut start = writable;
-        for code in code_pages {
-            map_range(kernel_leaves, start, code, READ | WRITE | DIRTY);
-            start = code + FRAME_SIZE;
+        map_range(kernel_leaves, writable, end, READ | WRITE | DIRTY);
+        // Remove user image frames from the writable identity map before activation.
+        for &code in user_code.iter().flatten().flatten() {
+            kernel_leaves.words_mut()[vpn_index(code, 0)] = 0;
         }
-        map_range(kernel_leaves, start, end, READ | WRITE | DIRTY);
         map_range(uart_leaves, uart, uart + FRAME_SIZE, READ | WRITE | DIRTY);
         kernel_middle.words_mut()[vpn_index(text, 1)] =
             pte(kernel_leaves.physical_address(), VALID);
@@ -87,11 +84,16 @@ impl BootMappings {
         let user_leaves = frames.allocate_zeroed()?;
         let user_stack = frames.allocate_zeroed()?;
 
-        // The two user pages share a leaf table. The UART uses a separate
+        // The user image and stack share a leaf table. The UART uses a separate
         // leaf table under the same low root entry on QEMU virt.
         let entries = user_leaves.words_mut();
-        entries[vpn_index(USER_TEXT_BASE, 0)] =
-            pte(user_code, VALID | ACCESSED | READ | EXECUTE | USER);
+        for (index, page) in user_code.into_iter().enumerate() {
+            if let Some(address) = page {
+                let virtual_address = USER_TEXT_BASE + index * FRAME_SIZE;
+                entries[vpn_index(virtual_address, 0)] =
+                    pte(address, VALID | ACCESSED | READ | EXECUTE | USER);
+            }
+        }
         entries[vpn_index(USER_STACK_BASE, 0)] = pte(
             user_stack.physical_address(),
             VALID | ACCESSED | READ | WRITE | DIRTY | USER,

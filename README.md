@@ -43,15 +43,16 @@ physical address of task 1's Sv39 root table.
 The build links [hello](userspace/hello/) and [the shell](userspace/shell/) as
 separate RV64 ELFs and embeds both in the kernel. The loader accepts static,
 little-endian ELF64 executables with one read/execute segment of at most
-4 KiB at `0x00400000`. Boot reports each program's validated entry address.
+8 KiB at `0x00400000`. The segment's memory size determines whether it uses
+one or two pages. Boot reports each program's validated entry address.
 If loading fails, it prints `User ELF load failed` with the program name and
 idles.
 
 The kernel activates paging, prints `Sv39 paging enabled`, and starts hello
 as task 1 and the shell as task 2. Each receives its task ID in `a0` and runs
-with its own Sv39 root, read/execute code page, and read/write, non-executable
-stack mapped at `0x00401000`. The kernel and UART mappings are shared in
-supervisor mode. The kernel, supervisor stack, and 16-frame boot pool fit
+with its own Sv39 root and read/execute image. Each task has a 4 KiB read/write,
+non-executable stack at `0x00402000`. The kernel and UART mappings are shared
+in supervisor mode. The kernel, supervisor stack, and 16-frame boot pool fit
 within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line

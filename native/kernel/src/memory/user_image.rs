@@ -1,6 +1,8 @@
-use super::frame::FRAME_SIZE;
+use super::frame::{FRAME_SIZE, Frame, FrameAllocator};
 
 pub(crate) const USER_TEXT_BASE: usize = 0x0040_0000;
+pub(crate) const USER_IMAGE_PAGES: usize = 2;
+pub(crate) const USER_IMAGE_SIZE: usize = USER_IMAGE_PAGES * FRAME_SIZE;
 
 const ELF_HEADER_SIZE: usize = 64;
 const PROGRAM_HEADER_SIZE: usize = 56;
@@ -11,8 +13,13 @@ const PT_LOAD: u32 = 1;
 const PT_RISCV_ATTRIBUTES: u32 = 0x7000_0003;
 const PF_READ_EXECUTE: u32 = 5;
 
-/// Loads one static RV64 executable into a page and returns its entry address.
-pub(crate) fn load(image: &[u8], page: &mut [u8; FRAME_SIZE]) -> Option<usize> {
+pub(crate) struct LoadedImage<'a> {
+    pub(crate) entry: usize,
+    pub(crate) pages: [Option<&'a Frame>; USER_IMAGE_PAGES],
+}
+
+/// Loads a static RV64 executable into one or two zeroed frames.
+pub(crate) fn load<'a>(image: &[u8], frames: &mut FrameAllocator<'a>) -> Option<LoadedImage<'a>> {
     let header = image.get(..ELF_HEADER_SIZE)?;
     // Magic, ELF64 class, little-endian data, and the identification version.
     if !header.starts_with(b"\x7fELF\x02\x01\x01")
@@ -42,17 +49,24 @@ pub(crate) fn load(image: &[u8], page: &mut [u8; FRAME_SIZE]) -> Option<usize> {
         }
     }
 
-    let bytes = segment?;
+    let (bytes, memory_size) = segment?;
     let entry_offset = entry.checked_sub(USER_TEXT_BASE)?;
     if entry % 2 != 0 || entry_offset.checked_add(2)? > bytes.len() {
         return None;
     }
-    page.fill(0);
-    page[..bytes.len()].copy_from_slice(bytes);
-    Some(entry)
+    let mut pages = [None; USER_IMAGE_PAGES];
+    let mut chunks = bytes.chunks(FRAME_SIZE);
+    for page in pages.iter_mut().take(memory_size.div_ceil(FRAME_SIZE)) {
+        let frame = frames.allocate_zeroed()?;
+        if let Some(chunk) = chunks.next() {
+            frame.bytes_mut()[..chunk.len()].copy_from_slice(chunk);
+        }
+        *page = Some(&*frame);
+    }
+    Some(LoadedImage { entry, pages })
 }
 
-fn load_segment<'a>(image: &'a [u8], header: &[u8]) -> Option<&'a [u8]> {
+fn load_segment<'a>(image: &'a [u8], header: &[u8]) -> Option<(&'a [u8], usize)> {
     let offset = usize_at(header, 8);
     let file_size = usize_at(header, 32);
     let memory_size = usize_at(header, 40);
@@ -62,11 +76,12 @@ fn load_segment<'a>(image: &'a [u8], header: &[u8]) -> Option<&'a [u8]> {
         || offset % FRAME_SIZE != 0
         || file_size == 0
         || file_size > memory_size
-        || memory_size > FRAME_SIZE
+        || memory_size > USER_IMAGE_SIZE
     {
         return None;
     }
-    image.get(offset..offset.checked_add(file_size)?)
+    let bytes = image.get(offset..offset.checked_add(file_size)?)?;
+    Some((bytes, memory_size))
 }
 
 // These helpers only read fixed offsets in a size-checked ELF or program header.
