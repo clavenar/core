@@ -104,6 +104,29 @@ The first two events report both children in completion order. The echo reply
 is still available, both waits report status 0, and the last `event` prints
 `no child event`.
 
+The shell can own one goal and run one ordinary child in it. `goal create`
+prints the new goal handle. `goal run hello` or `goal run echo` prints the
+child's launch handle. `goal status` reports `Ready`, `Running`, `Completed`
+or `Failed`. The kernel keeps the original child handle and outcome until
+the shell closes the goal.
+
+```text
+goal create
+goal run echo
+event
+wait echo
+ask --read echo hello.txt
+wait echo
+goal status
+goal close
+```
+
+The first `wait echo` reports exit status 0. The second launch reuses the
+same program slot and exits with status 1 because `echo` rejects file-read
+requests. `goal status` still prints `Completed`, the handle from `goal run`
+and exit status 0. A running goal returns `goal busy` on close. Closing a
+ready or finished goal makes the slot available for a fresh goal.
+
 `ask hello hello from shell` launches `hello` with an `Echo` request and prints the
 echoed reply `hello from shell`. `ask echo hello from shell` sends the same
 request to `echo`. The request is available to the child when it starts.
@@ -259,9 +282,8 @@ Call 15 (`spawn`) takes a program selector in `a0`. Selector 0 chooses
 `hello` and selector 1 chooses `echo`. The child starts with no RamFS
 handles or working directory. The call returns a fresh, nonzero child handle
 in `a0` when the task is ready to run and -1 if the selector is unknown or
-the task is already running. All spawn calls use the same child handle sequence
-for the current boot. Child handles belong to the shell and have their own
-namespace.
+the task is already running. Child launches and goals draw distinct handles
+from one boot-wide sequence. RamFS allocates its handles independently.
 
 Call 16 (`wait`) takes the child handle in `a0`. On success, `a0` contains
 the result type and `a1` contains the full exit status or fault cause. Result
@@ -403,6 +425,32 @@ drain or close a pipe and retry. Reading an event preserves the child's
 reply, buffered pipe data and full exit status or fault cause. Collecting
 any of those first also leaves the event available. A successful relaunch
 discards the previous handle's unread event. A failed launch preserves it.
+
+| Call | Arguments | Result in `a0` |
+| --- | --- | --- |
+| 33 `goal_create` | None | Fresh goal handle, or -1 if the slot is occupied or handles are exhausted |
+| 34 `goal_run` | `a0` goal handle, `a1` program selector | Fresh child launch handle, or -1 on failure |
+| 35 `goal_status` | `a0` goal handle | State tag, with the original child handle in `a1` and detail in `a2` |
+| 36 `goal_close` | `a0` goal handle | 0 on release, 1 while running |
+
+Only the shell can use these calls. A stale or invalid goal handle or a call
+from another task returns -1 in `a0`. A new goal starts ready. A successful
+run binds the launch before making the child runnable. It starts with the
+same empty RamFS handle table, empty mailbox and ordinary reply, event and
+wait behavior as a plain `run`. A failed run preserves the goal's state.
+
+| `goal_status` tag | State | `a1` | `a2` |
+| --- | --- | --- | --- |
+| 0 | Ready | 0 | 0 |
+| 1 | Running | Child handle | 0 |
+| 2 | Completed | Child handle | Exit status 0 |
+| 3 | Failed | Child handle | Nonzero exit status |
+| 4 | Failed | Child handle | Fault cause |
+
+Status reads are repeatable. Closing a finished goal leaves the child's
+pending reply, event and wait status available under the usual launch rules.
+If the shell exits or faults, the kernel reclaims its goal once any attached
+child stops.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

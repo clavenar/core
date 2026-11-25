@@ -1,5 +1,7 @@
+mod goal;
 mod pipe;
 
+use self::goal::Goal;
 use clv_abi::{
     ChildEvent, CompletionKind, GrantKind, PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
 };
@@ -72,10 +74,12 @@ struct ChildLaunch {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum LaunchGrant {
+pub(crate) enum LaunchScope {
+    Plain,
     Directory(usize),
     File(usize),
     FileWithPipe(usize),
+    Goal(usize),
 }
 
 pub(crate) enum WaitResult<T> {
@@ -112,7 +116,9 @@ struct Task {
 pub(crate) struct Scheduler {
     tasks: [Task; TASK_COUNT],
     initial_status: usize,
-    next_child_handle: usize,
+    goal: Option<Goal>,
+    // Child launches and goals share a boot-unique handle sequence.
+    next_handle: usize,
     next_event_sequence: usize,
     current: usize,
 }
@@ -142,7 +148,8 @@ impl Scheduler {
         Self {
             tasks,
             initial_status: sstatus,
-            next_child_handle: 1,
+            goal: None,
+            next_handle: 1,
             next_event_sequence: 0,
             current: HELLO_TASK_INDEX,
         }
@@ -181,7 +188,7 @@ impl Scheduler {
         &mut self,
         fs: &mut RamFs,
         program: usize,
-        grant: Option<LaunchGrant>,
+        scope: LaunchScope,
         request: Option<Message>,
     ) -> Option<usize> {
         let index = match program {
@@ -193,7 +200,7 @@ impl Scheduler {
             return None;
         }
         // The maximum value is reserved for syscall errors.
-        let handle = self.next_child_handle;
+        let handle = self.next_handle;
         let next_handle = handle.checked_add(1)?;
         let mut frame = TrapFrame::new_user(
             self.tasks[index].entry,
@@ -201,13 +208,14 @@ impl Scheduler {
             index + 1,
             self.initial_status,
         );
+        let grant = match scope {
+            LaunchScope::Plain | LaunchScope::Goal(_) => None,
+            LaunchScope::Directory(fd) => Some((GrantKind::Directory, fd, 0)),
+            LaunchScope::File(fd) => Some((GrantKind::File, fd, 0)),
+            LaunchScope::FileWithPipe(fd) => Some((GrantKind::File, fd, handle)),
+        };
         let (task_fs, pipe) = match grant {
-            Some(grant) => {
-                let (kind, fd, writer) = match grant {
-                    LaunchGrant::Directory(fd) => (GrantKind::Directory, fd, 0),
-                    LaunchGrant::File(fd) => (GrantKind::File, fd, 0),
-                    LaunchGrant::FileWithPipe(fd) => (GrantKind::File, fd, handle),
-                };
+            Some((kind, fd, writer)) => {
                 let (task_fs, child_fd) = self.tasks[self.current].fs.grant(fs, fd, kind)?;
                 frame.set_startup_args(child_fd, kind as usize, writer);
                 (task_fs, (writer != 0).then(Pipe::new))
@@ -215,6 +223,9 @@ impl Scheduler {
             None => (TaskFs::empty(), None),
         };
 
+        if let LaunchScope::Goal(goal_handle) = scope {
+            self.goal.as_mut()?.start(goal_handle, handle)?;
+        }
         let task = &mut self.tasks[index];
         // SAFETY: This slot is stopped and its private stack frame is mapped
         // writable in the shared supervisor identity map.
@@ -223,12 +234,11 @@ impl Scheduler {
         task.fs = task_fs;
         task.timer_fired = false;
         // Older children use an in-band status byte to answer a file read.
-        let legacy_file_reply = matches!(
-            grant,
-            Some(LaunchGrant::File(_) | LaunchGrant::FileWithPipe(_))
-        ) || request
-            .as_ref()
-            .is_some_and(|message| message.kind == MessageKind::Request(RequestKind::ReadFile));
+        let legacy_file_reply =
+            matches!(scope, LaunchScope::File(_) | LaunchScope::FileWithPipe(_))
+                || request.as_ref().is_some_and(|message| {
+                    message.kind == MessageKind::Request(RequestKind::ReadFile)
+                });
         task.launch = Some(ChildLaunch {
             handle,
             request,
@@ -239,7 +249,7 @@ impl Scheduler {
             event: None,
         });
         task.state = TaskState::Runnable;
-        self.next_child_handle = next_handle;
+        self.next_handle = next_handle;
         Some(handle)
     }
 
@@ -393,6 +403,9 @@ impl Scheduler {
         if let Some(launch) = &mut task.launch {
             launch.request = None;
             launch.completion = Some(completion);
+            if let Some(goal) = &mut self.goal {
+                goal.finish_child(launch.handle, completion);
+            }
             if shell_live {
                 launch.event = Some(PendingEvent {
                     sequence: self.next_event_sequence,
@@ -419,6 +432,9 @@ impl Scheduler {
                     launch.close_pipe_reader(&mut task.state);
                 }
             }
+        }
+        if self.tasks[SHELL_TASK_INDEX].state == TaskState::Stopped {
+            self.goal.take_if(|goal| !goal.is_running());
         }
         self.switch(frame)
     }

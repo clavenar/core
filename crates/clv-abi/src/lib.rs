@@ -2,6 +2,8 @@
 
 //! Syscall numbers and register values for the Clavenar boot user ABI.
 
+pub mod goal;
+
 pub const SYS_PROBE: usize = 0;
 pub const SYS_EXIT: usize = 1;
 pub const SYS_WRITE_CONSOLE: usize = 2;
@@ -35,6 +37,10 @@ pub const SYS_PIPE_READ: usize = 29;
 pub const SYS_PIPE_WRITE: usize = 30;
 pub const SYS_PIPE_CLOSE: usize = 31;
 pub const SYS_EVENT_WAIT: usize = 32;
+pub const SYS_GOAL_CREATE: usize = 33;
+pub const SYS_GOAL_RUN: usize = 34;
+pub const SYS_GOAL_STATUS: usize = 35;
+pub const SYS_GOAL_CLOSE: usize = 36;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;

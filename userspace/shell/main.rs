@@ -3,6 +3,7 @@
 
 mod children;
 mod files;
+mod goal;
 
 use children::Children;
 use clv::print;
@@ -19,6 +20,7 @@ extern "C" fn _start() -> ! {
     let mut overflow = false;
     let mut previous_was_cr = false;
     let mut children = Children::new();
+    let mut current_goal = None;
 
     // Let the boot greeting run before drawing the prompt.
     while !clv::timer_fired() {
@@ -43,7 +45,7 @@ extern "C" fn _start() -> ! {
                 if overflow {
                     print(b"line too long\r\n");
                 } else {
-                    run_command(&line[..length], &mut children);
+                    run_command(&line[..length], &mut children, &mut current_goal);
                 }
                 length = 0;
                 overflow = false;
@@ -67,7 +69,7 @@ extern "C" fn _start() -> ! {
     }
 }
 
-fn run_command(line: &[u8], children: &mut Children) {
+fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<usize>) {
     let (command, arguments) = split_word(line.trim_ascii());
     match command {
         b"help" if arguments.is_empty() => print(
@@ -75,7 +77,8 @@ fn run_command(line: &[u8], children: &mut Children) {
               run hello [dir]  run echo\r\n\
               ask [--read] <hello|echo> <text>  askat [--echo] hello <dir> <payload>\r\n\
               askfile [--stream] hello <path>\r\n\
-              recv <hello|echo>  wait <hello|echo>  event\r\n",
+              recv <hello|echo>  wait <hello|echo>  event\r\n\
+              goal create  goal run <hello|echo>  goal status  goal close\r\n",
         ),
         b"pwd" if arguments.is_empty() => files::pwd(),
         b"cd" => files::cd(arguments),
@@ -93,6 +96,7 @@ fn run_command(line: &[u8], children: &mut Children) {
         b"wait" => children.wait(arguments),
         b"event" if arguments.is_empty() => children.event(),
         b"event" => print(b"usage: event\r\n"),
+        b"goal" => goal::command(arguments, current_goal, children),
         b"exit" if arguments.is_empty() => clv::exit(0),
         b"" => {}
         _ => print(b"unknown command\r\n"),
@@ -106,6 +110,32 @@ fn split_word(line: &[u8]) -> (&[u8], &[u8]) {
         .unwrap_or(line.len());
     let (word, rest) = line.split_at(end);
     (word, rest.trim_ascii_start())
+}
+
+fn hex(mut value: usize) -> [u8; 18] {
+    let mut bytes = *b"0x0000000000000000";
+    for digit in bytes[2..].iter_mut().rev() {
+        *digit = b"0123456789abcdef"[value & 0xf];
+        value >>= 4;
+    }
+    bytes
+}
+
+fn print_handle(label: &[u8], handle: usize) {
+    print_line(&[label, &hex(handle)]);
+}
+
+// Emit a complete status line in one console call so task switches cannot split it.
+fn print_line(parts: &[&[u8]]) {
+    let mut line = [0; 128];
+    let mut len = 0;
+    for part in parts {
+        let end = len + part.len();
+        line[len..end].copy_from_slice(part);
+        len = end;
+    }
+    line[len..len + 2].copy_from_slice(b"\r\n");
+    clv::write_console(&line[..len + 2]);
 }
 
 #[panic_handler]

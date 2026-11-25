@@ -4,7 +4,7 @@ use clv_abi::{
     PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
 };
 
-use super::split_word;
+use super::{hex, print_handle, print_line, split_word};
 
 struct Child {
     name: &'static [u8],
@@ -64,6 +64,21 @@ impl Children {
                 }
             }
             _ => print(b"usage: run hello [dir] or run echo\r\n"),
+        }
+    }
+
+    pub(super) fn run_in_goal(&mut self, goal: Option<usize>, name: &[u8]) {
+        let Some(child) = self.named(name) else {
+            return print(b"usage: goal run <hello|echo>\r\n");
+        };
+        let Some(goal) = goal else {
+            return print(b"no current goal\r\n");
+        };
+        if let Some(handle) = clv::goal::run(goal, child.selector) {
+            child.handle = handle;
+            print_handle(b"goal child=", handle);
+        } else {
+            print(b"cannot start goal child\r\n");
         }
     }
 
@@ -152,19 +167,12 @@ impl Children {
         let Some(child) = self.named(name) else {
             return print(b"usage: wait <hello|echo>\r\n");
         };
-        let (status, mut value): (&[u8], usize) = match clv::wait(child.handle) {
-            Some(ChildStatus::Exited(code)) => (b" exited 0x", code),
-            Some(ChildStatus::Faulted(cause)) => (b" fault scause=0x", cause),
+        let (status, value): (&[u8], usize) = match clv::wait(child.handle) {
+            Some(ChildStatus::Exited(code)) => (b" exited ", code),
+            Some(ChildStatus::Faulted(cause)) => (b" fault scause=", cause),
             None => return print(b"no pending launch\r\n"),
         };
-        print(child.name);
-        print(status);
-        let mut line = *b"0000000000000000\r\n";
-        for digit in line[..16].iter_mut().rev() {
-            *digit = b"0123456789abcdef"[value & 0xf];
-            value >>= 4;
-        }
-        clv::write_console(&line);
+        print_line(&[child.name, status, &hex(value)]);
     }
 }
 
