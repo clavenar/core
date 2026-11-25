@@ -1,10 +1,3 @@
-    # Boot syscall numbers from the Clavenar user ABI.
-    .equ SYS_PROBE, 0
-    .equ SYS_EXIT, 1
-    .equ SYS_WRITE_CONSOLE, 2
-    .equ SYS_TIMER_FIRED, 3
-    .equ PROBE_VALUE, 42
-
     .section .text.entry, "ax", @progbits
     .balign 4
     .globl _start
@@ -16,9 +9,9 @@ _start:
     li s0, 0x123
     li t1, 0x456
     sd s0, 0(sp)
-    li a7, SYS_PROBE
+    li a7, {probe_call}
     ecall
-    li t0, PROBE_VALUE
+    li t0, {probe_value}
     bne a0, t0, .Luser_failed
 
     # Keep running in user mode until the kernel observes the interrupt.
@@ -27,7 +20,7 @@ _start:
 .Ltimer_delay:
     addi t2, t2, -1
     bnez t2, .Ltimer_delay
-    li a7, SYS_TIMER_FIRED
+    li a7, {timer_call}
     ecall
     beqz a0, .Lwait_for_timer
 
@@ -53,7 +46,7 @@ _start:
     addi t2, t2, 1
     bne t0, t1, .Lcopy_message
     mv a0, sp
-    li a7, SYS_WRITE_CONSOLE
+    li a7, {console_call}
     ecall
     bne a0, a1, .Luser_failed
     li a0, 0
@@ -61,7 +54,7 @@ _start:
 .Luser_failed:
     li a0, 1
 .Luser_exit:
-    li a7, SYS_EXIT
+    li a7, {exit_call}
     ecall
 1:
     j 1b

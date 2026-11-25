@@ -1,7 +1,4 @@
-use crate::memory::usercopy::{copy_from_user_stack, copy_to_user_stack};
-
 const HANDLE_COUNT: usize = 4;
-const PATH_LIMIT: usize = 64;
 
 struct File {
     name: &'static [u8],
@@ -43,13 +40,7 @@ impl FileHandles {
         }
     }
 
-    pub(crate) fn open(&mut self, address: usize, length: usize) -> Option<usize> {
-        let mut buffer = [0; PATH_LIMIT];
-        let path = buffer.get_mut(..length)?;
-        if !copy_from_user_stack(address, path) {
-            return None;
-        }
-
+    pub(crate) fn open(&mut self, path: &[u8]) -> Option<usize> {
         let node = if path == b"/" {
             Node::Root
         } else {
@@ -61,27 +52,36 @@ impl FileHandles {
         Some(fd)
     }
 
-    pub(crate) fn read(&mut self, fd: usize, address: usize, length: usize) -> Option<usize> {
+    pub(crate) fn read(
+        &mut self,
+        fd: usize,
+        length: usize,
+        deliver: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<usize> {
         let handle = self.slots.get_mut(fd)?.as_mut()?;
         let Node::File(index) = handle.node else {
             return None;
         };
         let remaining = &FILES[index].contents[handle.cursor..];
         let bytes = &remaining[..remaining.len().min(length)];
-        if !copy_to_user_stack(bytes, address, length) {
+        if !deliver(bytes) {
             return None;
         }
         handle.cursor += bytes.len();
         Some(bytes.len())
     }
 
-    pub(crate) fn readdir(&mut self, fd: usize, address: usize, length: usize) -> Option<usize> {
+    pub(crate) fn readdir(
+        &mut self,
+        fd: usize,
+        deliver: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<usize> {
         let handle = self.slots.get_mut(fd)?.as_mut()?;
         if !matches!(handle.node, Node::Root) {
             return None;
         }
         let name = FILES.get(handle.cursor).map_or(&[][..], |file| file.name);
-        if !copy_to_user_stack(name, address, length) {
+        if !deliver(name) {
             return None;
         }
         if !name.is_empty() {

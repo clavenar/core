@@ -1,18 +1,12 @@
 #![no_std]
 #![no_main]
 
+use clv_abi::{
+    SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED,
+    SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+};
 use core::arch::asm;
 use core::panic::PanicInfo;
-
-const SYS_EXIT: usize = 1;
-const SYS_WRITE_CONSOLE: usize = 2;
-const SYS_TIMER_FIRED: usize = 3;
-const SYS_READ_CONSOLE: usize = 4;
-const SYS_OPEN: usize = 5;
-const SYS_READ: usize = 6;
-const SYS_READDIR: usize = 7;
-const SYS_CLOSE: usize = 8;
-const SYSCALL_ERROR: usize = usize::MAX;
 
 // SAFETY: The kernel enters this unique symbol with an aligned user stack.
 #[unsafe(no_mangle)]

@@ -1,40 +1,26 @@
 #![no_std]
 #![no_main]
 
+mod arch;
+mod console;
+mod drivers;
 mod fs;
 mod memory;
 mod scheduler;
 mod syscall;
-#[path = "arch/riscv64/timer.rs"]
-mod timer;
 
-use core::arch::{asm, global_asm};
+use arch::riscv64::{idle, trap};
+use console::write_hex;
 use core::panic::PanicInfo;
-use core::ptr::{without_provenance, without_provenance_mut};
+use drivers::uart;
 use memory::frame::{Frame, FrameAllocator};
 use memory::sv39;
 use memory::user_image;
-use memory::usercopy::SSTATUS_SUM;
-use scheduler::{Scheduler, TrapFrame};
-
-global_asm!(include_str!("arch/riscv64/boot.S"));
-global_asm!(
-    include_str!("arch/riscv64/trap.S"),
-    frame_size = const size_of::<TrapFrame>(),
-    sepc_offset = const core::mem::offset_of!(TrapFrame, sepc),
-    sstatus_offset = const core::mem::offset_of!(TrapFrame, sstatus),
-    sum_mask = const SSTATUS_SUM,
-);
+use scheduler::Scheduler;
 
 // Make Cargo rebuild the kernel when the linker script changes.
 const _: &str = include_str!("../../linker/riscv64.ld");
 
-const UART_BASE: usize = 0x1000_0000;
-const UART_LINE_STATUS: usize = 5;
-const UART_RX_READY: u8 = 1 << 0;
-const UART_TX_READY: u8 = 1 << 5;
-const USER_ECALL: usize = 8;
-const INTERRUPT_FLAG: usize = 1 << (usize::BITS - 1);
 const BOOT_PROGRAMS: [(&[u8], &[u8]); 2] = [
     (
         b"hello",
@@ -45,15 +31,6 @@ const BOOT_PROGRAMS: [(&[u8], &[u8]); 2] = [
         include_bytes!(concat!(env!("OUT_DIR"), "/shell.elf")),
     ),
 ];
-// Clear SUM, FS, VS, SPP, SPIE and SIE for a new user context.
-const USER_STATUS_CLEAR: usize =
-    SSTATUS_SUM | (3 << 13) | (3 << 9) | (1 << 8) | (1 << 5) | (1 << 1);
-
-static mut SCHEDULER: Option<Scheduler> = None;
-
-unsafe extern "C" {
-    fn enter_user(frame: &TrapFrame) -> !;
-}
 
 // SAFETY: The boot stub calls this symbol with a RISC-V ABI-aligned stack.
 #[unsafe(no_mangle)]
@@ -63,13 +40,13 @@ extern "C" fn kernel_main() -> ! {
         env!("CARGO_PKG_VERSION"),
         ")\r\n"
     );
-    uart_write(banner.as_bytes());
+    uart::write(banner.as_bytes());
 
     // SAFETY: The single boot hart claims the frame pool here once.
     let mut frames = unsafe { FrameAllocator::from_boot_pool() };
     let [(hello_code, hello_entry), (shell_code, shell_entry)] =
         BOOT_PROGRAMS.map(|(name, image)| load_user_program(&mut frames, name, image));
-    let mappings = sv39::BootMappings::new(&mut frames, [hello_code, shell_code], UART_BASE)
+    let mappings = sv39::BootMappings::new(&mut frames, [hello_code, shell_code], uart::BASE)
         .expect("boot frame pool cannot hold supervisor mappings");
     let programs = [
         (
@@ -85,26 +62,18 @@ extern "C" fn kernel_main() -> ! {
             shell_entry,
         ),
     ];
-    let sstatus: usize;
-    // SAFETY: The boot hart is in supervisor mode.
-    unsafe { asm!("csrr {status}, sstatus", status = out(reg) sstatus, options(nomem, nostack)) };
-    let scheduler = Scheduler::new(programs, sstatus & !USER_STATUS_CLEAR);
-    let first_frame = *scheduler.current_frame();
+    let scheduler = Scheduler::new(programs, trap::supervisor_status());
 
-    uart_write(b"boot frame=");
-    uart_write_hex(scheduler.address_space().root_address());
-    uart_write(b"\r\n");
+    uart::write(b"boot frame=");
+    write_hex(scheduler.address_space().root_address());
+    uart::write(b"\r\n");
     if !scheduler.address_space().activate() {
-        uart_write(b"Sv39 paging setup failed\r\n");
+        uart::write(b"Sv39 paging setup failed\r\n");
         idle();
     }
-    uart_write(b"Sv39 paging enabled\r\n");
-    // SAFETY: Only the boot hart can enter the scheduler. No user task has run.
-    unsafe { SCHEDULER = Some(scheduler) };
-    arm_timer();
-    // SAFETY: The frame names the first task's mapped code and stack, and the
-    // trap vector is installed.
-    unsafe { enter_user(&first_frame) }
+    uart::write(b"Sv39 paging enabled\r\n");
+    // SAFETY: The boot hart has installed the first address space and trap vector.
+    unsafe { trap::start(scheduler) }
 }
 
 fn load_user_program<'a>(
@@ -114,160 +83,20 @@ fn load_user_program<'a>(
 ) -> (&'a Frame, usize) {
     let code = frames.allocate_zeroed().expect("boot frame pool is empty");
     let Some(entry) = user_image::load(image, code.bytes_mut()) else {
-        uart_write(b"User ELF load failed for ");
-        uart_write(name);
-        uart_write(b"\r\n");
+        uart::write(b"User ELF load failed for ");
+        uart::write(name);
+        uart::write(b"\r\n");
         idle();
     };
-    uart_write(b"User ELF loaded entry=");
-    uart_write_hex(entry);
-    uart_write(b" program=");
-    uart_write(name);
-    uart_write(b"\r\n");
+    uart::write(b"User ELF loaded entry=");
+    write_hex(entry);
+    uart::write(b" program=");
+    uart::write(name);
+    uart::write(b"\r\n");
     (code, entry)
-}
-
-// SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.
-#[unsafe(no_mangle)]
-extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: usize) {
-    // SAFETY: On the single boot hart this handler runs with supervisor
-    // interrupts disabled. Supervisor traps take the fatal path instead.
-    let scheduler = unsafe { &mut *(&raw mut SCHEDULER) }
-        .as_mut()
-        .expect("scheduler is initialized before user entry");
-    let current = scheduler.current_id();
-    if scause == timer::INTERRUPT_CAUSE {
-        if scheduler.preempt(frame) {
-            switch_task(scheduler, current, b"timer switch ");
-        }
-        arm_timer();
-        // The frame now contains the selected task's interrupted instruction.
-        return;
-    }
-    if scause != USER_ECALL {
-        if scause & INTERRUPT_FLAG != 0 {
-            supervisor_trap_fatal(scause, frame.sepc, stval);
-        }
-        write_task(current);
-        uart_write(b" fault");
-        write_trap_registers(scause, frame.sepc, stval);
-        finish_task(scheduler, frame, b"fault switch ");
-        return;
-    }
-
-    if let syscall::Outcome::Exit(status) = syscall::dispatch(scheduler, frame) {
-        write_task(current);
-        uart_write(b" user exit status=");
-        uart_write_hex(status);
-        uart_write(b"\r\n");
-        finish_task(scheduler, frame, b"exit switch ");
-    }
-}
-
-fn finish_task(scheduler: &mut Scheduler, frame: &mut TrapFrame, reason: &[u8]) {
-    let previous = scheduler.current_id();
-    if !scheduler.stop_current(frame) {
-        uart_write(b"all tasks exited\r\n");
-        idle();
-    }
-    switch_task(scheduler, previous, reason);
-    arm_timer();
-}
-
-fn switch_task(scheduler: &Scheduler, previous: usize, reason: &[u8]) {
-    if !scheduler.address_space().activate() {
-        uart_write(b"Sv39 task switch failed\r\n");
-        idle();
-    }
-    uart_write(reason);
-    write_task(previous);
-    uart_write(b" -> ");
-    write_task(scheduler.current_id());
-    uart_write(b"\r\n");
-}
-
-fn arm_timer() {
-    if !timer::arm() {
-        uart_write(b"SBI timer setup failed\r\n");
-        idle();
-    }
-}
-
-fn write_task(id: usize) {
-    uart_write(b"task ");
-    uart_write_byte(b'0' + id as u8);
-}
-
-// SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.
-#[unsafe(no_mangle)]
-extern "C" fn supervisor_trap_fatal(scause: usize, sepc: usize, stval: usize) -> ! {
-    uart_write(b"fatal trap");
-    write_trap_registers(scause, sepc, stval);
-    idle();
-}
-
-fn write_trap_registers(scause: usize, sepc: usize, stval: usize) {
-    uart_write(b" scause=");
-    uart_write_hex(scause);
-    uart_write(b" sepc=");
-    uart_write_hex(sepc);
-    uart_write(b" stval=");
-    uart_write_hex(stval);
-    uart_write(b"\r\n");
-}
-
-fn uart_write(bytes: &[u8]) {
-    for &byte in bytes {
-        uart_write_byte(byte);
-    }
-}
-
-fn uart_write_hex(value: usize) {
-    uart_write(b"0x");
-    for shift in (0..usize::BITS).step_by(4).rev() {
-        let digit = (value >> shift) & 0xf;
-        uart_write_byte(b"0123456789abcdef"[digit]);
-    }
-}
-
-fn uart_write_byte(byte: u8) {
-    let line_status = without_provenance::<u8>(UART_BASE + UART_LINE_STATUS);
-    let transmit = without_provenance_mut::<u8>(UART_BASE);
-
-    // SAFETY: QEMU virt maps byte-wide UART registers here. OpenSBI has
-    // configured the UART for console output before handing off to us.
-    unsafe {
-        while line_status.read_volatile() & UART_TX_READY == 0 {
-            core::hint::spin_loop();
-        }
-        transmit.write_volatile(byte);
-    }
-}
-
-fn uart_read_byte() -> Option<u8> {
-    let line_status = without_provenance::<u8>(UART_BASE + UART_LINE_STATUS);
-    let receive = without_provenance::<u8>(UART_BASE);
-
-    // SAFETY: These byte-wide UART registers are mapped on QEMU virt.
-    // Reading the receive register consumes one byte when data is ready.
-    unsafe {
-        if line_status.read_volatile() & UART_RX_READY == 0 {
-            return None;
-        }
-        Some(receive.read_volatile())
-    }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo<'_>) -> ! {
     idle();
-}
-
-fn idle() -> ! {
-    timer::cancel();
-    loop {
-        // SAFETY: WFI is available in supervisor mode on this target and
-        // does not access memory or modify the stack.
-        unsafe { asm!("wfi", options(nomem, nostack)) };
-    }
 }

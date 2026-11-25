@@ -3,6 +3,9 @@ name = "clavenar-kernel"
 version = "0.0.1"
 edition = "2024"
 
+[dependencies]
+clv-abi = { path = "../../crates/clv-abi" }
+
 [[bin]]
 name = "clavenar-kernel"
 path = "src/main.rs"

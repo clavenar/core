@@ -1,13 +1,6 @@
+use crate::arch::riscv64::trap::TrapFrame;
 use crate::fs::ramfs::FileHandles;
 use crate::memory::sv39::{AddressSpace, USER_STACK_TOP};
-
-#[derive(Clone, Copy)]
-#[repr(C, align(16))]
-pub(crate) struct TrapFrame {
-    pub(crate) registers: [usize; 32],
-    pub(crate) sepc: usize,
-    pub(crate) sstatus: usize,
-}
 
 struct Task {
     frame: TrapFrame,
@@ -27,15 +20,8 @@ impl Scheduler {
         Self {
             tasks: core::array::from_fn(|index| {
                 let (address_space, entry) = programs[index];
-                let mut registers = [0; 32];
-                registers[2] = USER_STACK_TOP;
-                registers[10] = index + 1;
                 Task {
-                    frame: TrapFrame {
-                        registers,
-                        sepc: entry,
-                        sstatus,
-                    },
+                    frame: TrapFrame::new_user(entry, USER_STACK_TOP, index + 1, sstatus),
                     address_space,
                     files: FileHandles::new(),
                     runnable: true,

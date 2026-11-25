@@ -1,20 +1,17 @@
-use crate::memory::usercopy::copy_from_user_stack;
-use crate::scheduler::{Scheduler, TrapFrame};
-use crate::{uart_read_byte, uart_write, write_task};
+use clv_abi::{
+    PROBE_VALUE, SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR,
+    SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+};
 
-const SYS_PROBE: usize = 0;
-const SYS_EXIT: usize = 1;
-const SYS_WRITE_CONSOLE: usize = 2;
-const SYS_TIMER_FIRED: usize = 3;
-const SYS_READ_CONSOLE: usize = 4;
-const SYS_OPEN: usize = 5;
-const SYS_READ: usize = 6;
-const SYS_READDIR: usize = 7;
-const SYS_CLOSE: usize = 8;
+use crate::arch::riscv64::trap::TrapFrame;
+use crate::console::write_task;
+use crate::drivers::uart;
+use crate::fs::ramfs::FileHandles;
+use crate::memory::usercopy::{copy_from_user_stack, copy_to_user_stack};
+use crate::scheduler::Scheduler;
 
-const SYSCALL_ERROR: usize = usize::MAX;
 const CONSOLE_WRITE_LIMIT: usize = 128;
-const PROBE_VALUE: usize = 42;
+const PATH_LIMIT: usize = 64;
 const REG_A0: usize = 10;
 const REG_A1: usize = 11;
 const REG_A2: usize = 12;
@@ -32,24 +29,21 @@ pub(crate) fn dispatch(scheduler: &mut Scheduler, frame: &mut TrapFrame) -> Outc
     frame.registers[REG_A0] = match frame.registers[REG_A7] {
         SYS_PROBE => {
             write_task(scheduler.current_id());
-            uart_write(b" user probe\r\n");
+            uart::write(b" user probe\r\n");
             PROBE_VALUE
         }
         SYS_EXIT => return Outcome::Exit(a0),
         SYS_WRITE_CONSOLE => write_console(a0, a1),
         SYS_TIMER_FIRED => usize::from(scheduler.timer_fired()),
-        SYS_READ_CONSOLE => uart_read_byte().map_or(SYSCALL_ERROR, usize::from),
-        SYS_OPEN => scheduler
-            .file_handles()
-            .open(a0, a1)
-            .unwrap_or(SYSCALL_ERROR),
+        SYS_READ_CONSOLE => uart::read_byte().map_or(SYSCALL_ERROR, usize::from),
+        SYS_OPEN => open_file(scheduler.file_handles(), a0, a1).unwrap_or(SYSCALL_ERROR),
         SYS_READ => scheduler
             .file_handles()
-            .read(a0, a1, a2)
+            .read(a0, a2, |bytes| copy_to_user_stack(bytes, a1, a2))
             .unwrap_or(SYSCALL_ERROR),
         SYS_READDIR => scheduler
             .file_handles()
-            .readdir(a0, a1, a2)
+            .readdir(a0, |name| copy_to_user_stack(name, a1, a2))
             .unwrap_or(SYSCALL_ERROR),
         SYS_CLOSE => scheduler.file_handles().close(a0).unwrap_or(SYSCALL_ERROR),
         _ => SYSCALL_ERROR,
@@ -57,6 +51,15 @@ pub(crate) fn dispatch(scheduler: &mut Scheduler, frame: &mut TrapFrame) -> Outc
     // ECALL is a 32-bit instruction, including on cores with compressed code.
     frame.sepc += 4;
     Outcome::Resume
+}
+
+fn open_file(files: &mut FileHandles, address: usize, length: usize) -> Option<usize> {
+    let mut buffer = [0; PATH_LIMIT];
+    let path = buffer.get_mut(..length)?;
+    if !copy_from_user_stack(address, path) {
+        return None;
+    }
+    files.open(path)
 }
 
 fn write_console(address: usize, length: usize) -> usize {
@@ -68,6 +71,6 @@ fn write_console(address: usize, length: usize) -> usize {
         return SYSCALL_ERROR;
     }
 
-    uart_write(bytes);
+    uart::write(bytes);
     length
 }

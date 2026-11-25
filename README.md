@@ -5,7 +5,8 @@ Linux-hosted runtime, and virtual machine integration. The first implementation
 targets RV64 on QEMU `virt`.
 
 - `native/kernel/` and `native/linker/` hold kernel source and linker scripts.
-- `crates/` holds shared Rust types and ABI definitions.
+- `crates/` holds shared Rust types and ABI definitions. [`clv-abi`](crates/clv-abi/)
+  defines the syscall numbers used by the kernel and both user programs.
 - `userspace/` holds native programs and libraries.
 - `platforms/qemu-riscv64-virt/` holds the reference platform definition.
 - `tests/` holds cross-component tests and fixtures.
@@ -108,5 +109,6 @@ Check Rust formatting with `rustfmt` from the stable toolchain.
 
 ```sh
 cargo +stable fmt --manifest-path native/kernel/Cargo.toml --check
+cargo +stable fmt --manifest-path crates/clv-abi/Cargo.toml --check
 rustfmt +stable --edition 2024 --check userspace/hello/main.rs userspace/shell/main.rs
 ```
