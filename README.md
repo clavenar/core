@@ -37,22 +37,29 @@ qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
 
 After the OpenSBI banner, the kernel prints `Clavenar kernel booted` with the
 version from `native/kernel/Cargo.toml`. It prints `boot frame=0x...` with the
-physical address of the Sv39 root table, then prints `Sv39 paging enabled`
-after activating the identity map. The kernel and UART use supervisor-only
-4 KiB pages. The embedded user program has its own read/execute code page and
-a read/write, non-executable stack page. The image, stacks, and 16-frame boot
-pool fit within one aligned 2 MiB region.
+physical address of the Sv39 root table.
 
-The kernel enters user mode and runs the embedded program. The program passes
-the call number in `a7` and executes `ecall`. Call 0 prints `user probe` and
-returns 42 in `a0`. The program checks the result, its saved registers, and
-its stack contents.
+The build links [the hello program](userspace/hello/) as a separate RV64 ELF and
+embeds it in the kernel. The loader accepts a static, little-endian ELF64
+executable with one read/execute segment of at most 4 KiB at `0x00400000`. Boot
+reports the validated entry address as `User ELF loaded entry=0x...`, or prints
+`User ELF load failed` and idles if loading fails.
+
+The kernel activates paging, prints `Sv39 paging enabled`, and enters user
+mode at the ELF entry point. The kernel and UART use supervisor-only 4 KiB
+mappings. The application has a read/execute code page and a read/write,
+non-executable stack page. The kernel, stacks, and 16-frame boot pool fit
+within one aligned 2 MiB physical region.
+
+The user program passes the call number in `a7` and executes `ecall`. Call 0
+prints `user probe` and returns 42 in `a0`. The program checks the result, its
+saved registers, and its stack contents.
 
 Call 2 writes to the console. It takes a user stack address in `a0` and a byte
 count in `a1`. The kernel accepts up to 128 bytes, copies the full range before
 writing, and returns the byte count in `a0`. An empty write returns 0. An
 oversized write or a range outside the user stack returns -1 without output.
-The embedded program uses this call to print `Hello from user mode`.
+The hello program uses this call to print `Hello from user mode`.
 
 Call 1 takes an exit status in `a0`. A successful run prints
 `user exit status=0x0000000000000000` and idles. Unknown call numbers return -1
@@ -66,4 +73,5 @@ Check Rust formatting with `rustfmt` from the stable toolchain.
 
 ```sh
 cargo +stable fmt --manifest-path native/kernel/Cargo.toml --check
+rustfmt +stable --edition 2024 --check userspace/hello/main.rs
 ```

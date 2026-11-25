@@ -17,6 +17,11 @@ impl Frame {
     pub(crate) fn words_mut(&mut self) -> &mut [u64; WORDS_PER_FRAME] {
         &mut self.0
     }
+
+    pub(crate) fn bytes_mut(&mut self) -> &mut [u8; FRAME_SIZE] {
+        // SAFETY: Both arrays occupy one frame, and every byte pattern is valid.
+        unsafe { &mut *ptr::from_mut(&mut self.0).cast() }
+    }
 }
 
 // SAFETY: The linker places this zero-initialized array in the writable LOAD

@@ -8,6 +8,7 @@ use core::panic::PanicInfo;
 use core::ptr::{without_provenance, without_provenance_mut};
 use memory::frame::FrameAllocator;
 use memory::sv39;
+use memory::user_image;
 use memory::usercopy::{SSTATUS_SUM, copy_from_user_stack};
 
 global_asm!(include_str!("arch/riscv64/boot.S"));
@@ -18,13 +19,7 @@ global_asm!(
     sstatus_offset = const core::mem::offset_of!(TrapFrame, sstatus),
     sum_mask = const SSTATUS_SUM,
 );
-global_asm!(
-    include_str!("arch/riscv64/user.S"),
-    probe_call = const SYS_PROBE,
-    probe_value = const PROBE_VALUE,
-    exit_call = const SYS_EXIT,
-    write_console_call = const SYS_WRITE_CONSOLE,
-);
+global_asm!(include_str!("arch/riscv64/user.S"));
 
 // Make Cargo rebuild the kernel when the linker script changes.
 const _: &str = include_str!("../../linker/riscv64.ld");
@@ -42,6 +37,7 @@ const PROBE_VALUE: usize = 42;
 const REG_A0: usize = 10;
 const REG_A1: usize = 11;
 const REG_A7: usize = 17;
+const USER_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"));
 
 #[repr(C, align(16))]
 struct TrapFrame {
@@ -51,7 +47,7 @@ struct TrapFrame {
 }
 
 unsafe extern "C" {
-    fn enter_user() -> !;
+    fn enter_user(entry: usize) -> !;
 }
 
 // SAFETY: The boot stub calls this symbol with a RISC-V ABI-aligned stack.
@@ -71,15 +67,26 @@ extern "C" fn kernel_main() -> ! {
     uart_write_hex(frame.physical_address());
     uart_write(b"\r\n");
 
+    let user_code = frames.allocate_zeroed().expect("boot frame pool is empty");
+    let Some(entry) = user_image::load(USER_ELF, user_code.bytes_mut()) else {
+        uart_write(b"User ELF load failed\r\n");
+        idle();
+    };
+    uart_write(b"User ELF loaded entry=");
+    uart_write_hex(entry);
+    uart_write(b"\r\n");
+
     // SAFETY: This is the first address-space switch on the boot hart.
-    if !unsafe { sv39::enable_identity_map(frame, &mut frames, UART_BASE) } {
+    if !unsafe {
+        sv39::enable_identity_map(frame, &mut frames, user_code.physical_address(), UART_BASE)
+    } {
         uart_write(b"Sv39 paging setup failed\r\n");
         idle();
     }
     uart_write(b"Sv39 paging enabled\r\n");
     // SAFETY: The user code and stack pages are mapped and the supervisor
     // trap vector is installed.
-    unsafe { enter_user() }
+    unsafe { enter_user(entry) }
 }
 
 // SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.

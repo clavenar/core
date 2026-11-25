@@ -1,6 +1,7 @@
 use core::arch::asm;
 
 use super::frame::{FRAME_SIZE, Frame, FrameAllocator};
+use super::user_image::USER_TEXT_BASE;
 
 const PAGE_SHIFT: usize = 12;
 const VPN_BITS: usize = 9;
@@ -18,7 +19,6 @@ const DIRTY: u64 = 1 << 7;
 unsafe extern "C" {
     static __text_start: u8;
     static __rodata_start: u8;
-    static __user_text_start: u8;
     static __writable_start: u8;
     static __user_stack_start: u8;
     static __kernel_end: u8;
@@ -29,36 +29,51 @@ unsafe extern "C" {
 /// # Safety
 ///
 /// Address translation must be off when called on the boot hart. The caller
-/// must supply a fresh root frame and the QEMU virt UART base. After activation
-/// the root must remain intact while this address space is active.
+/// must supply a fresh root frame, an allocated code frame within the boot
+/// pool, and the QEMU virt UART base. The root and code frame must remain
+/// reserved while this address space is active.
 pub(crate) unsafe fn enable_identity_map(
     root: &mut Frame,
     frames: &mut FrameAllocator<'_>,
+    user_code: usize,
     uart_base: usize,
 ) -> bool {
-    let (Some(kernel_middle), Some(kernel_leaves), Some(uart_middle), Some(uart_leaves)) = (
+    let (
+        Some(kernel_middle),
+        Some(kernel_leaves),
+        Some(low_middle),
+        Some(uart_leaves),
+        Some(user_leaves),
+    ) = (
         frames.allocate_zeroed(),
         frames.allocate_zeroed(),
         frames.allocate_zeroed(),
         frames.allocate_zeroed(),
-    ) else {
+        frames.allocate_zeroed(),
+    )
+    else {
         return false;
     };
 
     // The linker symbols mark page boundaries. Only their addresses are used.
     let text = (&raw const __text_start).addr();
     let rodata = (&raw const __rodata_start).addr();
-    let user_text = (&raw const __user_text_start).addr();
     let writable = (&raw const __writable_start).addr();
     let user_stack = (&raw const __user_stack_start).addr();
     let end = (&raw const __kernel_end).addr();
 
-    // The image fits in one aligned 2 MiB region. UART is in a separate
-    // root entry on QEMU virt, so each region needs one pair of child tables.
+    // The kernel fits in one aligned 2 MiB region. UART and user code share
+    // the low root entry on QEMU virt and have separate leaf tables.
     map_range(kernel_leaves, text, rodata, READ | EXECUTE);
-    map_range(kernel_leaves, rodata, user_text, READ);
-    map_range(kernel_leaves, user_text, writable, READ | EXECUTE | USER);
-    map_range(kernel_leaves, writable, user_stack, READ | WRITE | DIRTY);
+    map_range(kernel_leaves, rodata, writable, READ);
+    // The loaded code gets only the user RX mapping, with no writable alias.
+    map_range(kernel_leaves, writable, user_code, READ | WRITE | DIRTY);
+    map_range(
+        kernel_leaves,
+        user_code + FRAME_SIZE,
+        user_stack,
+        READ | WRITE | DIRTY,
+    );
     map_range(kernel_leaves, user_stack, end, READ | WRITE | DIRTY | USER);
     map_range(
         uart_leaves,
@@ -66,11 +81,15 @@ pub(crate) unsafe fn enable_identity_map(
         uart_base + FRAME_SIZE,
         READ | WRITE | DIRTY,
     );
+    user_leaves.words_mut()[vpn_index(USER_TEXT_BASE, 0)] =
+        pte(user_code, VALID | ACCESSED | READ | EXECUTE | USER);
 
     kernel_middle.words_mut()[vpn_index(text, 1)] = pte(kernel_leaves.physical_address(), VALID);
-    uart_middle.words_mut()[vpn_index(uart_base, 1)] = pte(uart_leaves.physical_address(), VALID);
+    low_middle.words_mut()[vpn_index(uart_base, 1)] = pte(uart_leaves.physical_address(), VALID);
+    low_middle.words_mut()[vpn_index(USER_TEXT_BASE, 1)] =
+        pte(user_leaves.physical_address(), VALID);
     root.words_mut()[vpn_index(text, 2)] = pte(kernel_middle.physical_address(), VALID);
-    root.words_mut()[vpn_index(uart_base, 2)] = pte(uart_middle.physical_address(), VALID);
+    root.words_mut()[vpn_index(uart_base, 2)] = pte(low_middle.physical_address(), VALID);
 
     let satp = SATP_SV39 | (root.physical_address() >> PAGE_SHIFT);
     let active: usize;
