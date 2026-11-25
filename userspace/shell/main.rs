@@ -2,9 +2,9 @@
 #![no_main]
 
 use clv_abi::{
-    OPEN_READ, OPEN_WRITE_TRUNCATE, SYS_CLOSE, SYS_EXIT, SYS_MKDIR, SYS_OPEN, SYS_READ,
-    SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE, SYS_WRITE_CONSOLE,
-    SYSCALL_ERROR,
+    OPEN_READ, OPEN_WRITE_TRUNCATE, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD, SYS_MKDIR,
+    SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE,
+    SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -69,37 +69,73 @@ extern "C" fn _start() -> ! {
 }
 
 fn run_command(line: &[u8]) {
-    match line.trim_ascii() {
-        b"help" => write(
-            b"help  ls [path]  mkdir <path>  cat <path>  write <path> <text>  rm <path>  exit\r\n",
+    let (command, arguments) = split_word(line.trim_ascii());
+    match command {
+        b"help" if arguments.is_empty() => write(
+            b"help  pwd  cd <path>  ls [path]  mkdir <path>  cat <path>  write <path> <text>  rm <path>  exit\r\n",
         ),
-        b"ls" => show(&[b'/'], SYS_READDIR),
-        b"mkdir" => write(b"usage: mkdir <path>\r\n"),
-        b"cat" => write(b"usage: cat <path>\r\n"),
-        b"write" => write(WRITE_USAGE),
-        b"rm" => write(b"usage: rm <path>\r\n"),
-        b"exit" => exit(0),
+        b"pwd" if arguments.is_empty() => pwd(),
+        b"cd" => run_path_command(
+            SYS_CHDIR,
+            arguments,
+            b"usage: cd <path>\r\n",
+            b"cannot change directory\r\n",
+        ),
+        b"ls" if arguments.is_empty() => show(b".", SYS_READDIR),
+        b"ls" => show(arguments, SYS_READDIR),
+        b"mkdir" => run_path_command(
+            SYS_MKDIR,
+            arguments,
+            b"usage: mkdir <path>\r\n",
+            b"cannot create directory\r\n",
+        ),
+        b"cat" if arguments.is_empty() => write(b"usage: cat <path>\r\n"),
+        b"cat" => show(arguments, SYS_READ),
+        b"write" => write_file(arguments),
+        b"rm" => run_path_command(
+            SYS_UNLINK,
+            arguments,
+            b"usage: rm <path>\r\n",
+            b"cannot remove path\r\n",
+        ),
+        b"exit" if arguments.is_empty() => exit(0),
         b"" => {}
-        command => {
-            if let Some(path) = command.strip_prefix(b"ls ") {
-                show(path.trim_ascii(), SYS_READDIR);
-            } else if let Some(path) = command.strip_prefix(b"mkdir ") {
-                if call_path(SYS_MKDIR, path.trim_ascii(), 0) == SYSCALL_ERROR {
-                    write(b"cannot create directory\r\n");
-                }
-            } else if let Some(path) = command.strip_prefix(b"cat ") {
-                show(path.trim_ascii(), SYS_READ);
-            } else if let Some(arguments) = command.strip_prefix(b"write ") {
-                write_file(arguments.trim_ascii_start());
-            } else if let Some(path) = command.strip_prefix(b"rm ") {
-                if call_path(SYS_UNLINK, path.trim_ascii(), 0) == SYSCALL_ERROR {
-                    write(b"cannot remove path\r\n");
-                }
-            } else {
-                write(b"unknown command\r\n");
-            }
-        }
+        _ => write(b"unknown command\r\n"),
     }
+}
+
+fn split_word(line: &[u8]) -> (&[u8], &[u8]) {
+    let end = line
+        .iter()
+        .position(|&byte| byte == b' ')
+        .unwrap_or(line.len());
+    let (word, rest) = line.split_at(end);
+    (word, rest.trim_ascii_start())
+}
+
+fn run_path_command(number: usize, path: &[u8], usage: &[u8], error: &[u8]) {
+    if path.is_empty() {
+        write(usage);
+    } else if call_path(number, path, 0) == SYSCALL_ERROR {
+        write(error);
+    }
+}
+
+fn pwd() {
+    // The absolute path can span several separately entered components.
+    let mut buffer = [0; 512];
+    let count = syscall(
+        SYS_GETCWD,
+        buffer.as_mut_ptr().expose_provenance(),
+        buffer.len(),
+        0,
+    );
+    let Some(path) = buffer.get(..count) else {
+        write(b"cannot get current directory\r\n");
+        return;
+    };
+    write(path);
+    write(b"\r\n");
 }
 
 fn show(path: &[u8], operation: usize) {
@@ -133,12 +169,11 @@ fn show(path: &[u8], operation: usize) {
 }
 
 fn write_file(arguments: &[u8]) {
-    let Some(separator) = arguments.iter().position(|&byte| byte == b' ') else {
+    let (path, text) = split_word(arguments);
+    if text.is_empty() {
         write(WRITE_USAGE);
         return;
-    };
-    let (path, text) = arguments.split_at(separator);
-    let text = text.trim_ascii_start();
+    }
     let mut buffer = [0; LINE_LIMIT + 2];
     buffer[..text.len()].copy_from_slice(text);
     let length = text.len() + 2;

@@ -1,11 +1,11 @@
 use crate::arch::riscv64::trap::TrapFrame;
-use crate::fs::ramfs::{FileHandles, RamFs};
+use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::memory::sv39::{AddressSpace, USER_STACK_TOP};
 
 struct Task {
     frame: TrapFrame,
     address_space: AddressSpace,
-    files: FileHandles,
+    fs: TaskFs,
     runnable: bool,
     timer_fired: bool,
 }
@@ -23,7 +23,7 @@ impl Scheduler {
                 Task {
                     frame: TrapFrame::new_user(entry, USER_STACK_TOP, index + 1, sstatus),
                     address_space,
-                    files: FileHandles::new(),
+                    fs: TaskFs::new(),
                     runnable: true,
                     timer_fired: false,
                 }
@@ -48,8 +48,8 @@ impl Scheduler {
         self.tasks[self.current].timer_fired
     }
 
-    pub(crate) fn file_handles(&mut self) -> &mut FileHandles {
-        &mut self.tasks[self.current].files
+    pub(crate) fn task_fs(&mut self) -> &mut TaskFs {
+        &mut self.tasks[self.current].fs
     }
 
     pub(crate) fn preempt(&mut self, frame: &mut TrapFrame) -> bool {
@@ -62,7 +62,7 @@ impl Scheduler {
     pub(crate) fn stop_current(&mut self, fs: &mut RamFs, frame: &mut TrapFrame) -> bool {
         let task = &mut self.tasks[self.current];
         task.runnable = false;
-        task.files.close_all(fs);
+        task.fs.close_all(fs);
         self.switch(frame)
     }
 

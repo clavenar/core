@@ -72,18 +72,23 @@ The hello program uses this call to print `Hello from user mode`.
 
 Call 4 polls the console. It returns one UART byte in `a0` when input is ready
 and -1 otherwise. At the `clv> ` prompt, type `help` to see the available
-commands. Use `ls` to list the RamFS root or `ls <path>` to list a directory.
-`mkdir /notes` creates a directory, and `write /notes/todo.txt hello` creates
-or replaces a file with one line of text. Use `cat /notes/todo.txt` to read
-it, `rm /notes/todo.txt` to remove it, and `exit` to stop the shell.
+commands.
+
+`mkdir /notes` creates a directory, and `cd /notes` enters it. Use `pwd` to
+print the current directory and `ls` to list it. Use `ls /` to list the root
+or `ls <path>` to list another directory. In `/notes`, `write todo.txt hello`
+creates or replaces a file with one line of text, `cat todo.txt` reads it, and
+`rm todo.txt` removes it. Use `cd ..` to go up one directory and `exit` to stop
+the shell.
 
 RamFS starts with read-only `/hello.txt` and `/about.txt` and holds up to four
 directories besides the root and four writable files of 256 bytes each.
-Directories and writable files live in RAM until reboot. Relative paths start
-at the root. During path resolution, `.` keeps the current directory and `..`
-moves to its parent, staying at the root when already there. Creating a file
-or directory requires an existing parent. Each task has four handles, and
-each open handle has an independent cursor.
+Directories and writable files live in RAM until reboot. Each task starts
+in `/` and resolves relative paths from its own current directory. Absolute
+paths start at `/`. Within a path, `.` keeps the directory reached so far
+and `..` moves to its parent, staying at `/` when already there. Creating a
+file or directory requires an existing parent. Each task has four handles,
+and each open handle has an independent cursor.
 
 | Call | Arguments | Result in `a0` |
 | --- | --- | --- |
@@ -94,6 +99,8 @@ each open handle has an independent cursor.
 | 9 `write` | `a0` writable handle, `a1` source address, `a2` byte count | Bytes written |
 | 10 `unlink` | `a0` path address, `a1` path length up to 64 bytes | 0 |
 | 11 `mkdir` | `a0` path address, `a1` path length up to 64 bytes | 0 |
+| 12 `chdir` | `a0` path address, `a1` path length up to 64 bytes | 0 |
+| 13 `getcwd` | `a0` destination address, `a1` capacity | Absolute path's byte count |
 
 Open mode 0 opens a path for reading. Mode 1 opens a writable file for reading
 and writing, creating it if absent and truncating it to zero length otherwise.
@@ -102,6 +109,10 @@ calling task's stack. Writes validate and copy the entire input before
 changing bytes or the cursor. Reads and directory listings advance their
 cursor only after a successful copy. Directory entries contain the name bytes
 without a trailing newline or NUL.
+
+`chdir` leaves the current directory unchanged on error. `getcwd` writes the
+full absolute path, up to 260 bytes, without a trailing NUL. If the destination
+buffer is too small or outside the user stack, it returns -1 and writes nothing.
 
 Unlink removes a writable file's name immediately. Open handles retain access
 to that file, and its slot becomes reusable once the last handle closes.

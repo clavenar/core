@@ -1,13 +1,13 @@
 use clv_abi::{
-    OPEN_READ, OPEN_WRITE_TRUNCATE, PROBE_VALUE, SYS_CLOSE, SYS_EXIT, SYS_MKDIR, SYS_OPEN,
-    SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE,
-    SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    OPEN_READ, OPEN_WRITE_TRUNCATE, PROBE_VALUE, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD,
+    SYS_MKDIR, SYS_OPEN, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED,
+    SYS_UNLINK, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::console::write_task;
 use crate::drivers::uart;
-use crate::fs::ramfs::{FileHandles, RamFs, WRITABLE_FILE_CAPACITY};
+use crate::fs::ramfs::{RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
 use crate::memory::usercopy::{copy_from_user_stack, copy_to_user_stack};
 use crate::scheduler::Scheduler;
 
@@ -41,22 +41,27 @@ pub(crate) fn dispatch(
         SYS_WRITE_CONSOLE => write_console(a0, a1),
         SYS_TIMER_FIRED => usize::from(scheduler.timer_fired()),
         SYS_READ_CONSOLE => uart::read_byte().map_or(SYSCALL_ERROR, usize::from),
-        SYS_OPEN => open_file(scheduler.file_handles(), fs, a0, a1, a2).unwrap_or(SYSCALL_ERROR),
+        SYS_OPEN => open_file(scheduler.task_fs(), fs, a0, a1, a2).unwrap_or(SYSCALL_ERROR),
         SYS_READ => scheduler
-            .file_handles()
+            .task_fs()
             .read(fs, a0, a2, |bytes| copy_to_user_stack(bytes, a1, a2))
             .unwrap_or(SYSCALL_ERROR),
         SYS_READDIR => scheduler
-            .file_handles()
+            .task_fs()
             .readdir(fs, a0, |name| copy_to_user_stack(name, a1, a2))
             .unwrap_or(SYSCALL_ERROR),
-        SYS_CLOSE => scheduler
-            .file_handles()
-            .close(fs, a0)
+        SYS_CLOSE => scheduler.task_fs().close(fs, a0).unwrap_or(SYSCALL_ERROR),
+        SYS_WRITE => write_file(scheduler.task_fs(), fs, a0, a1, a2).unwrap_or(SYSCALL_ERROR),
+        SYS_UNLINK => with_user_path(a0, a1, |path| scheduler.task_fs().unlink(fs, path))
             .unwrap_or(SYSCALL_ERROR),
-        SYS_WRITE => write_file(scheduler.file_handles(), fs, a0, a1, a2).unwrap_or(SYSCALL_ERROR),
-        SYS_UNLINK => with_user_path(a0, a1, |path| fs.unlink(path)).unwrap_or(SYSCALL_ERROR),
-        SYS_MKDIR => with_user_path(a0, a1, |path| fs.mkdir(path)).unwrap_or(SYSCALL_ERROR),
+        SYS_MKDIR => with_user_path(a0, a1, |path| scheduler.task_fs().mkdir(fs, path))
+            .unwrap_or(SYSCALL_ERROR),
+        SYS_CHDIR => with_user_path(a0, a1, |path| scheduler.task_fs().chdir(fs, path))
+            .unwrap_or(SYSCALL_ERROR),
+        SYS_GETCWD => scheduler
+            .task_fs()
+            .getcwd(fs, |path| copy_to_user_stack(path, a0, a1))
+            .unwrap_or(SYSCALL_ERROR),
         _ => SYSCALL_ERROR,
     };
     // ECALL is a 32-bit instruction, including on cores with compressed code.
@@ -65,7 +70,7 @@ pub(crate) fn dispatch(
 }
 
 fn open_file(
-    files: &mut FileHandles,
+    task_fs: &mut TaskFs,
     fs: &mut RamFs,
     address: usize,
     length: usize,
@@ -76,7 +81,7 @@ fn open_file(
         OPEN_WRITE_TRUNCATE => true,
         _ => return None,
     };
-    with_user_path(address, length, |path| files.open(fs, path, writable))
+    with_user_path(address, length, |path| task_fs.open(fs, path, writable))
 }
 
 fn with_user_path(
@@ -93,7 +98,7 @@ fn with_user_path(
 }
 
 fn write_file(
-    files: &mut FileHandles,
+    task_fs: &mut TaskFs,
     fs: &mut RamFs,
     fd: usize,
     address: usize,
@@ -104,7 +109,7 @@ fn write_file(
     if !copy_from_user_stack(address, bytes) {
         return None;
     }
-    files.write(fs, fd, bytes)
+    task_fs.write(fs, fd, bytes)
 }
 
 fn write_console(address: usize, length: usize) -> usize {

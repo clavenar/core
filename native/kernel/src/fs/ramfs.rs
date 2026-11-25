@@ -2,6 +2,7 @@ const HANDLE_COUNT: usize = 4;
 const WRITABLE_FILE_COUNT: usize = 4;
 const DIRECTORY_COUNT: usize = 4;
 const NAME_LIMIT: usize = 64;
+const CWD_PATH_CAPACITY: usize = DIRECTORY_COUNT * (NAME_LIMIT + 1);
 pub(crate) const WRITABLE_FILE_CAPACITY: usize = 256;
 
 struct BootFile {
@@ -106,8 +107,8 @@ impl RamFs {
         }
     }
 
-    fn open(&mut self, path: &[u8], writable: bool) -> Option<Node> {
-        let (parent, name) = match self.resolve_path(path)? {
+    fn open(&mut self, cwd: DirectoryId, path: &[u8], writable: bool) -> Option<Node> {
+        let (parent, name) = match self.resolve_path(cwd, path)? {
             ResolvedPath::Directory(directory) => {
                 return (!writable).then_some(Node::Directory(directory));
             }
@@ -139,8 +140,8 @@ impl RamFs {
         Some(Node::WritableFile(index))
     }
 
-    pub(crate) fn mkdir(&mut self, path: &[u8]) -> Option<usize> {
-        let ResolvedPath::Entry(parent, name) = self.resolve_path(path)? else {
+    fn mkdir(&mut self, cwd: DirectoryId, path: &[u8]) -> Option<usize> {
+        let ResolvedPath::Entry(parent, name) = self.resolve_path(cwd, path)? else {
             return None;
         };
         if self.lookup(parent, name).is_some() {
@@ -154,11 +155,11 @@ impl RamFs {
         Some(0)
     }
 
-    pub(crate) fn unlink(&mut self, path: &[u8]) -> Option<usize> {
+    fn unlink(&mut self, cwd: DirectoryId, path: &[u8]) -> Option<usize> {
         if path.ends_with(b"/") {
             return None;
         }
-        let ResolvedPath::Entry(parent, name) = self.resolve_path(path)? else {
+        let ResolvedPath::Entry(parent, name) = self.resolve_path(cwd, path)? else {
             return None;
         };
         let Node::WritableFile(index) = self.lookup(parent, name)? else {
@@ -174,7 +175,7 @@ impl RamFs {
         Some(0)
     }
 
-    fn resolve_path<'a>(&self, path: &'a [u8]) -> Option<ResolvedPath<'a>> {
+    fn resolve_path<'a>(&self, cwd: DirectoryId, path: &'a [u8]) -> Option<ResolvedPath<'a>> {
         if path.is_empty() {
             return None;
         }
@@ -182,7 +183,11 @@ impl RamFs {
             .split(|&byte| byte == b'/')
             .filter(|part| !part.is_empty())
             .peekable();
-        let mut directory = DirectoryId::Root;
+        let mut directory = if path.starts_with(b"/") {
+            DirectoryId::Root
+        } else {
+            cwd
+        };
         while let Some(component) = components.next() {
             match component {
                 b"." => {}
@@ -281,26 +286,70 @@ struct Handle {
     writable: bool,
 }
 
-pub(crate) struct FileHandles {
+pub(crate) struct TaskFs {
+    cwd: DirectoryId,
     slots: [Option<Handle>; HANDLE_COUNT],
 }
 
-impl FileHandles {
+impl TaskFs {
     pub(crate) const fn new() -> Self {
         Self {
+            cwd: DirectoryId::Root,
             slots: [const { None }; HANDLE_COUNT],
         }
     }
 
     pub(crate) fn open(&mut self, fs: &mut RamFs, path: &[u8], writable: bool) -> Option<usize> {
         let fd = self.slots.iter().position(Option::is_none)?;
-        let node = fs.open(path, writable)?;
+        let node = fs.open(self.cwd, path, writable)?;
         self.slots[fd] = Some(Handle {
             node,
             cursor: 0,
             writable,
         });
         Some(fd)
+    }
+
+    pub(crate) fn mkdir(&self, fs: &mut RamFs, path: &[u8]) -> Option<usize> {
+        fs.mkdir(self.cwd, path)
+    }
+
+    pub(crate) fn unlink(&self, fs: &mut RamFs, path: &[u8]) -> Option<usize> {
+        fs.unlink(self.cwd, path)
+    }
+
+    pub(crate) fn chdir(&mut self, fs: &RamFs, path: &[u8]) -> Option<usize> {
+        self.cwd = match fs.resolve_path(self.cwd, path)? {
+            ResolvedPath::Directory(directory) => directory,
+            ResolvedPath::Entry(parent, name) => {
+                let Node::Directory(directory) = fs.lookup(parent, name)? else {
+                    return None;
+                };
+                directory
+            }
+        };
+        Some(0)
+    }
+
+    pub(crate) fn getcwd(&self, fs: &RamFs, deliver: impl FnOnce(&[u8]) -> bool) -> Option<usize> {
+        let mut buffer = [0; CWD_PATH_CAPACITY];
+        let mut start = buffer.len();
+        let mut directory = self.cwd;
+        while let DirectoryId::Child(index) = directory {
+            let entry = fs.directories[index].as_ref()?;
+            let name = entry.name.as_bytes();
+            let end = start;
+            start = start.checked_sub(name.len() + 1)?;
+            buffer[start] = b'/';
+            buffer[start + 1..end].copy_from_slice(name);
+            directory = entry.parent;
+        }
+        if start == buffer.len() {
+            start -= 1;
+            buffer[start] = b'/';
+        }
+        let path = &buffer[start..];
+        deliver(path).then_some(path.len())
     }
 
     pub(crate) fn read(
