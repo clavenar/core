@@ -8,6 +8,7 @@ use core::panic::PanicInfo;
 use core::ptr::{without_provenance, without_provenance_mut};
 use memory::frame::FrameAllocator;
 use memory::sv39;
+use memory::usercopy::{SSTATUS_SUM, copy_from_user_stack};
 
 global_asm!(include_str!("arch/riscv64/boot.S"));
 global_asm!(
@@ -15,12 +16,14 @@ global_asm!(
     frame_size = const size_of::<TrapFrame>(),
     sepc_offset = const core::mem::offset_of!(TrapFrame, sepc),
     sstatus_offset = const core::mem::offset_of!(TrapFrame, sstatus),
+    sum_mask = const SSTATUS_SUM,
 );
 global_asm!(
     include_str!("arch/riscv64/user.S"),
     probe_call = const SYS_PROBE,
     probe_value = const PROBE_VALUE,
     exit_call = const SYS_EXIT,
+    write_console_call = const SYS_WRITE_CONSOLE,
 );
 
 // Make Cargo rebuild the kernel when the linker script changes.
@@ -32,8 +35,12 @@ const UART_TX_READY: u8 = 1 << 5;
 const USER_ECALL: usize = 8;
 const SYS_PROBE: usize = 0;
 const SYS_EXIT: usize = 1;
+const SYS_WRITE_CONSOLE: usize = 2;
+const SYSCALL_ERROR: usize = usize::MAX;
+const CONSOLE_WRITE_LIMIT: usize = 128;
 const PROBE_VALUE: usize = 42;
 const REG_A0: usize = 10;
+const REG_A1: usize = 11;
 const REG_A7: usize = 17;
 
 #[repr(C, align(16))]
@@ -93,10 +100,27 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
             uart_write(b"\r\n");
             idle();
         }
-        _ => frame.registers[REG_A0] = usize::MAX,
+        SYS_WRITE_CONSOLE => {
+            frame.registers[REG_A0] =
+                write_console(frame.registers[REG_A0], frame.registers[REG_A1]);
+        }
+        _ => frame.registers[REG_A0] = SYSCALL_ERROR,
     }
     // ECALL is a 32-bit instruction, including on cores with compressed code.
     frame.sepc += 4;
+}
+
+fn write_console(address: usize, length: usize) -> usize {
+    let mut buffer = [0; CONSOLE_WRITE_LIMIT];
+    let Some(bytes) = buffer.get_mut(..length) else {
+        return SYSCALL_ERROR;
+    };
+    if !copy_from_user_stack(address, bytes) {
+        return SYSCALL_ERROR;
+    }
+
+    uart_write(bytes);
+    length
 }
 
 // SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.

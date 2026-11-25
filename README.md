@@ -46,9 +46,17 @@ pool fit within one aligned 2 MiB region.
 The kernel enters user mode and runs the embedded program. The program passes
 the call number in `a7` and executes `ecall`. Call 0 prints `user probe` and
 returns 42 in `a0`. The program checks the result, its saved registers, and
-its stack contents. It then uses call 1 to pass an exit status in `a0`. A
-successful run prints `user exit status=0x0000000000000000` and idles. Unknown
-call numbers return -1 in `a0`.
+its stack contents.
+
+Call 2 writes to the console. It takes a user stack address in `a0` and a byte
+count in `a1`. The kernel accepts up to 128 bytes, copies the full range before
+writing, and returns the byte count in `a0`. An empty write returns 0. An
+oversized write or a range outside the user stack returns -1 without output.
+The embedded program uses this call to print `Hello from user mode`.
+
+Call 1 takes an exit status in `a0`. A successful run prints
+`user exit status=0x0000000000000000` and idles. Unknown call numbers return -1
+in `a0`.
 
 Unexpected traps print `fatal trap` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

@@ -39,6 +39,8 @@ supervisor_trap_entry:
 
 .Lsupervisor_trap:
     csrw sscratch, zero
+    li t0, {sum_mask}
+    csrc sstatus, t0
     lla sp, __stack_top
     csrr a0, scause
     csrr a1, sepc
