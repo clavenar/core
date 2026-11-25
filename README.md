@@ -111,7 +111,10 @@ lookups, absolute paths start at `/` and relative paths start at the task's
 current directory, initially `/`. Within a path, `.` keeps the directory
 reached so far and `..` moves to its parent, staying at `/` when already
 there. Creating a file or directory requires an existing parent. Each task
-has four handles, and each open handle has an independent cursor.
+can hold four live handles, each with an independent cursor. Every open or
+directory grant receives an opaque ID unique within the current boot. The
+kernel accepts that ID from the owning task until the handle closes or the
+task stops.
 
 | Call | Arguments | Result in `a0` |
 | --- | --- | --- |

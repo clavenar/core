@@ -69,9 +69,11 @@ pub(crate) fn dispatch(
         SYS_RMDIR => {
             with_user_path(a0, a1, |path| scheduler.rmdir(fs, path)).unwrap_or(SYSCALL_ERROR)
         }
-        SYS_SPAWN if a0 == PROGRAM_HELLO => scheduler.spawn_hello(None).unwrap_or(SYSCALL_ERROR),
+        SYS_SPAWN if a0 == PROGRAM_HELLO => {
+            scheduler.spawn_hello(fs, None).unwrap_or(SYSCALL_ERROR)
+        }
         SYS_SPAWN_AT if a0 == PROGRAM_HELLO => {
-            scheduler.spawn_hello(Some(a1)).unwrap_or(SYSCALL_ERROR)
+            scheduler.spawn_hello(fs, Some(a1)).unwrap_or(SYSCALL_ERROR)
         }
         SYS_WAIT if a0 == PROGRAM_HELLO => match scheduler.wait_hello(frame) {
             WaitResult::NoLaunch => SYSCALL_ERROR,

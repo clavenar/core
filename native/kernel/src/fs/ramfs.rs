@@ -102,6 +102,7 @@ impl WritableFile {
 pub(crate) struct RamFs {
     directories: [Option<Directory>; DIRECTORY_COUNT],
     writable: [Option<WritableFile>; WRITABLE_FILE_COUNT],
+    next_handle_id: usize,
 }
 
 impl RamFs {
@@ -109,7 +110,27 @@ impl RamFs {
         Self {
             directories: [const { None }; DIRECTORY_COUNT],
             writable: [const { None }; WRITABLE_FILE_COUNT],
+            next_handle_id: 0,
         }
+    }
+
+    fn allocate_handle(
+        &mut self,
+        writable: bool,
+        open: impl FnOnce(&mut Self) -> Option<Node>,
+    ) -> Option<Handle> {
+        // Reserve usize::MAX for syscall errors. Check before opening, since
+        // opening a writable file can truncate it.
+        let id = self.next_handle_id;
+        let next = id.checked_add(1)?;
+        let node = open(self)?;
+        self.next_handle_id = next;
+        Some(Handle {
+            id,
+            node,
+            cursor: 0,
+            writable,
+        })
     }
 
     fn open(&mut self, base: PathBase, path: &[u8], writable: bool) -> Option<Node> {
@@ -319,6 +340,7 @@ impl RamFs {
 }
 
 struct Handle {
+    id: usize,
     node: Node,
     cursor: usize,
     writable: bool,
@@ -338,15 +360,12 @@ impl TaskFs {
         }
     }
 
-    pub(crate) fn grant_directory(&self, fd: usize) -> Option<(Self, usize)> {
+    pub(crate) fn grant_directory(&self, fs: &mut RamFs, fd: usize) -> Option<(Self, usize)> {
         let directory = self.directory_for_handle(fd)?;
-        let child_fd = 0;
+        let handle = fs.allocate_handle(false, |_| Some(Node::Directory(directory)))?;
+        let child_fd = handle.id;
         let mut slots = [const { None }; HANDLE_COUNT];
-        slots[child_fd] = Some(Handle {
-            node: Node::Directory(directory),
-            cursor: 0,
-            writable: false,
-        });
+        slots[0] = Some(handle);
         Some((Self { cwd: None, slots }, child_fd))
     }
 
@@ -365,10 +384,17 @@ impl TaskFs {
     }
 
     fn directory_for_handle(&self, fd: usize) -> Option<DirectoryId> {
-        let Node::Directory(directory) = self.slots.get(fd)?.as_ref()?.node else {
+        let slot = self.handle_slot(fd)?;
+        let Node::Directory(directory) = self.slots[slot].as_ref()?.node else {
             return None;
         };
         Some(directory)
+    }
+
+    fn handle_slot(&self, fd: usize) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(|handle| handle.id == fd))
     }
 
     fn open_path(
@@ -378,14 +404,11 @@ impl TaskFs {
         path: &[u8],
         writable: bool,
     ) -> Option<usize> {
-        let fd = self.slots.iter().position(Option::is_none)?;
-        let node = fs.open(base, path, writable)?;
-        self.slots[fd] = Some(Handle {
-            node,
-            cursor: 0,
-            writable,
-        });
-        Some(fd)
+        let slot = self.slots.iter().position(Option::is_none)?;
+        let handle = fs.allocate_handle(writable, |fs| fs.open(base, path, writable))?;
+        let id = handle.id;
+        self.slots[slot] = Some(handle);
+        Some(id)
     }
 
     pub(crate) fn mkdir(&self, fs: &mut RamFs, path: &[u8]) -> Option<usize> {
@@ -447,7 +470,8 @@ impl TaskFs {
         length: usize,
         deliver: impl FnOnce(&[u8]) -> bool,
     ) -> Option<usize> {
-        let handle = self.slots.get_mut(fd)?.as_mut()?;
+        let slot = self.handle_slot(fd)?;
+        let handle = self.slots[slot].as_mut()?;
         // Another handle can truncate the file below this cursor.
         let remaining = fs
             .contents(handle.node)?
@@ -462,7 +486,8 @@ impl TaskFs {
     }
 
     pub(crate) fn write(&mut self, fs: &mut RamFs, fd: usize, bytes: &[u8]) -> Option<usize> {
-        let handle = self.slots.get_mut(fd)?.as_mut()?;
+        let slot = self.handle_slot(fd)?;
+        let handle = self.slots[slot].as_mut()?;
         if !handle.writable {
             return None;
         }
@@ -488,7 +513,8 @@ impl TaskFs {
         fd: usize,
         deliver: impl FnOnce(&[u8]) -> bool,
     ) -> Option<usize> {
-        let handle = self.slots.get_mut(fd)?.as_mut()?;
+        let slot = self.handle_slot(fd)?;
+        let handle = self.slots[slot].as_mut()?;
         let Node::Directory(directory) = handle.node else {
             return None;
         };
@@ -503,7 +529,8 @@ impl TaskFs {
     }
 
     pub(crate) fn close(&mut self, fs: &mut RamFs, fd: usize) -> Option<usize> {
-        let handle = self.slots.get_mut(fd)?.take()?;
+        let slot = self.handle_slot(fd)?;
+        let handle = self.slots[slot].take()?;
         fs.release(handle.node);
         Some(0)
     }

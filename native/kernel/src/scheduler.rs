@@ -94,14 +94,18 @@ impl Scheduler {
         fs.rmdir(&self.tasks[self.current].fs, path, live_task_fs)
     }
 
-    pub(crate) fn spawn_hello(&mut self, directory_fd: Option<usize>) -> Option<usize> {
+    pub(crate) fn spawn_hello(
+        &mut self,
+        fs: &mut RamFs,
+        directory_fd: Option<usize>,
+    ) -> Option<usize> {
         if self.tasks[HELLO_TASK_INDEX].state != TaskState::Stopped {
             return None;
         }
-        let (fs, grant) = match directory_fd {
+        let (task_fs, grant) = match directory_fd {
             Some(fd) => {
-                let (fs, child_fd) = self.tasks[self.current].fs.grant_directory(fd)?;
-                (fs, Some(child_fd))
+                let (task_fs, child_fd) = self.tasks[self.current].fs.grant_directory(fs, fd)?;
+                (task_fs, Some(child_fd))
             }
             None => (TaskFs::new(), None),
         };
@@ -114,7 +118,7 @@ impl Scheduler {
         if let Some(fd) = grant {
             task.frame.set_startup_args(fd, 1);
         }
-        task.fs = fs;
+        task.fs = task_fs;
         task.timer_fired = false;
         task.state = TaskState::Runnable;
         self.hello_run = HelloRun::Running;
