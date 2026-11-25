@@ -70,8 +70,25 @@ oversized write or a range outside the user stack returns -1 without output.
 The hello program uses this call to print `Hello from user mode`.
 
 Call 4 polls the console. It returns one UART byte in `a0` when input is ready
-and -1 otherwise. At the `clv> ` prompt, type `help` and press Enter to see the
-available commands. Type `exit` and press Enter to stop the shell.
+and -1 otherwise. At the `clv> ` prompt, type `help` to see the available
+commands. Use `ls` to list the RamFS root, `cat /hello.txt` or
+`cat /about.txt` to read a file, and `exit` to stop the shell.
+
+The read-only RamFS contains `/hello.txt` and `/about.txt`. Paths can be
+absolute or relative to the root. Each task has four file handles, and each
+open handle has an independent cursor.
+
+| Call | Arguments | Result in `a0` |
+| --- | --- | --- |
+| 5 `open` | `a0` path address, `a1` path length up to 64 bytes | Handle |
+| 6 `read` | `a0` file handle, `a1` destination address, `a2` capacity | Bytes copied, or 0 at EOF |
+| 7 `readdir` | `a0` root directory handle, `a1` destination address, `a2` capacity | One entry name's byte count, or 0 at end |
+| 8 `close` | `a0` handle | 0 |
+
+File calls return -1 on error. Paths and destination buffers must reside in
+the calling task's stack. Reads and directory listings advance their cursor
+only after a successful copy. Directory entry names are returned as bytes
+without a trailing newline or NUL.
 
 Call 1 takes an exit status in `a0` and removes the calling task from the
 schedule. In a successful run, both tasks report

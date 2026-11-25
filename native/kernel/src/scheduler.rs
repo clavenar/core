@@ -1,3 +1,4 @@
+use crate::fs::ramfs::FileHandles;
 use crate::memory::sv39::{AddressSpace, USER_STACK_TOP};
 
 #[derive(Clone, Copy)]
@@ -11,6 +12,7 @@ pub(crate) struct TrapFrame {
 struct Task {
     frame: TrapFrame,
     address_space: AddressSpace,
+    files: FileHandles,
     runnable: bool,
     timer_fired: bool,
 }
@@ -35,6 +37,7 @@ impl Scheduler {
                         sstatus,
                     },
                     address_space,
+                    files: FileHandles::new(),
                     runnable: true,
                     timer_fired: false,
                 }
@@ -59,6 +62,10 @@ impl Scheduler {
         self.tasks[self.current].timer_fired
     }
 
+    pub(crate) fn file_handles(&mut self) -> &mut FileHandles {
+        &mut self.tasks[self.current].files
+    }
+
     pub(crate) fn preempt(&mut self, frame: &mut TrapFrame) -> bool {
         let task = &mut self.tasks[self.current];
         task.timer_fired = true;
@@ -67,7 +74,9 @@ impl Scheduler {
     }
 
     pub(crate) fn stop_current(&mut self, frame: &mut TrapFrame) -> bool {
-        self.tasks[self.current].runnable = false;
+        let task = &mut self.tasks[self.current];
+        task.runnable = false;
+        task.files = FileHandles::new();
         self.switch(frame)
     }
 

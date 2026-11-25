@@ -5,20 +5,52 @@ use super::sv39::{USER_STACK_BASE, USER_STACK_TOP};
 pub(crate) const SSTATUS_SUM: usize = 1 << 18;
 
 pub(crate) fn copy_from_user_stack(source: usize, destination: &mut [u8]) -> bool {
-    if destination.is_empty() {
-        return true;
-    }
-
-    let Some(end) = source.checked_add(destination.len()) else {
+    if !in_user_stack(source, destination.len()) {
         return false;
+    }
+    // SAFETY: The source is in the current task's stack and the destination
+    // slice is writable supervisor memory.
+    unsafe {
+        copy_bytes(
+            source,
+            destination.as_mut_ptr().expose_provenance(),
+            destination.len(),
+        );
+    }
+    true
+}
+
+pub(crate) fn copy_to_user_stack(source: &[u8], destination: usize, capacity: usize) -> bool {
+    if source.len() > capacity || !in_user_stack(destination, capacity) {
+        return false;
+    }
+    // SAFETY: The source slice is readable supervisor memory and the copied
+    // bytes fit within the validated user destination.
+    unsafe {
+        copy_bytes(
+            source.as_ptr().expose_provenance(),
+            destination,
+            source.len(),
+        )
     };
-    if source < USER_STACK_BASE || end > USER_STACK_TOP {
-        return false;
-    }
+    true
+}
 
-    // SAFETY: The validated source range is wholly within the current task's
-    // stack mapping. The destination is writable supervisor memory, and
-    // the boot hart keeps interrupts disabled. SUM is cleared before return.
+fn in_user_stack(address: usize, length: usize) -> bool {
+    length == 0
+        || (address >= USER_STACK_BASE
+            && address
+                .checked_add(length)
+                .is_some_and(|end| end <= USER_STACK_TOP))
+}
+
+// The caller supplies readable and writable ranges on the active address space.
+unsafe fn copy_bytes(source: usize, destination: usize, length: usize) {
+    if length == 0 {
+        return;
+    }
+    // SAFETY: The syscall handler keeps supervisor interrupts disabled.
+    // SUM is enabled only during the copy.
     unsafe {
         asm!(
             "csrs sstatus, {sum}",
@@ -31,12 +63,11 @@ pub(crate) fn copy_from_user_stack(source: usize, destination: &mut [u8]) -> boo
             "bnez {count}, 2b",
             "csrc sstatus, {sum}",
             source = inout(reg) source => _,
-            destination = inout(reg) destination.as_mut_ptr() => _,
-            count = inout(reg) destination.len() => _,
+            destination = inout(reg) destination => _,
+            count = inout(reg) length => _,
             byte = out(reg) _,
             sum = in(reg) SSTATUS_SUM,
             options(nostack),
         );
     }
-    true
 }

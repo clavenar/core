@@ -23,7 +23,8 @@ fn build_program(source: &Path, linker_script: &Path, name: &str) {
         .arg("--target")
         .arg(env::var_os("TARGET").unwrap())
         .args([
-            "-Copt-level=s",
+            "-Copt-level=z",
+            "-Clto=fat",
             "-Cpanic=abort",
             "-Clink-arg=--no-relax",
             "-Clink-arg=--strip-all",
