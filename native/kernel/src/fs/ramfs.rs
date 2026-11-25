@@ -155,6 +155,28 @@ impl RamFs {
         Some(0)
     }
 
+    pub(crate) fn rmdir<'a>(
+        &mut self,
+        current: &TaskFs,
+        path: &[u8],
+        mut live_task_fs: impl Iterator<Item = &'a TaskFs>,
+    ) -> Option<usize> {
+        let ResolvedPath::Entry(parent, name) = self.resolve_path(current.cwd, path)? else {
+            return None;
+        };
+        let Node::Directory(directory @ DirectoryId::Child(index)) = self.lookup(parent, name)?
+        else {
+            return None;
+        };
+        if self.next_entry(directory, 0).is_some()
+            || live_task_fs.any(|task_fs| task_fs.uses_directory(directory))
+        {
+            return None;
+        }
+        self.directories[index] = None;
+        Some(0)
+    }
+
     fn unlink(&mut self, cwd: DirectoryId, path: &[u8]) -> Option<usize> {
         if path.ends_with(b"/") {
             return None;
@@ -270,7 +292,7 @@ impl RamFs {
             let dir = slot.as_ref().filter(|dir| dir.parent == parent)?;
             Some(dir.name.as_bytes())
         });
-        // Keep cursor positions tied to slots across file removal.
+        // Keep cursor positions tied to slots across removals.
         boot_names
             .chain(file_names)
             .chain(directory_names)
@@ -316,6 +338,15 @@ impl TaskFs {
 
     pub(crate) fn unlink(&self, fs: &mut RamFs, path: &[u8]) -> Option<usize> {
         fs.unlink(self.cwd, path)
+    }
+
+    fn uses_directory(&self, directory: DirectoryId) -> bool {
+        self.cwd == directory
+            || self
+                .slots
+                .iter()
+                .flatten()
+                .any(|handle| matches!(handle.node, Node::Directory(open) if open == directory))
     }
 
     pub(crate) fn chdir(&mut self, fs: &RamFs, path: &[u8]) -> Option<usize> {

@@ -3,8 +3,8 @@
 
 use clv_abi::{
     OPEN_READ, OPEN_WRITE_TRUNCATE, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD, SYS_MKDIR,
-    SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE,
-    SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_TIMER_FIRED, SYS_UNLINK,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -72,7 +72,7 @@ fn run_command(line: &[u8]) {
     let (command, arguments) = split_word(line.trim_ascii());
     match command {
         b"help" if arguments.is_empty() => write(
-            b"help  pwd  cd <path>  ls [path]  mkdir <path>  cat <path>  write <path> <text>  rm <path>  exit\r\n",
+            b"help  pwd  cd <path>  ls [path]  mkdir <path>  rmdir <path>  cat <path>  write <path> <text>  rm <path>  exit\r\n",
         ),
         b"pwd" if arguments.is_empty() => pwd(),
         b"cd" => run_path_command(
@@ -88,6 +88,12 @@ fn run_command(line: &[u8]) {
             arguments,
             b"usage: mkdir <path>\r\n",
             b"cannot create directory\r\n",
+        ),
+        b"rmdir" => run_path_command(
+            SYS_RMDIR,
+            arguments,
+            b"usage: rmdir <path>\r\n",
+            b"cannot remove directory\r\n",
         ),
         b"cat" if arguments.is_empty() => write(b"usage: cat <path>\r\n"),
         b"cat" => show(arguments, SYS_READ),

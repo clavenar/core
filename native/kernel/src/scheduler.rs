@@ -52,6 +52,15 @@ impl Scheduler {
         &mut self.tasks[self.current].fs
     }
 
+    pub(crate) fn rmdir(&self, fs: &mut RamFs, path: &[u8]) -> Option<usize> {
+        let live_task_fs = self
+            .tasks
+            .iter()
+            .filter(|task| task.runnable)
+            .map(|task| &task.fs);
+        fs.rmdir(&self.tasks[self.current].fs, path, live_task_fs)
+    }
+
     pub(crate) fn preempt(&mut self, frame: &mut TrapFrame) -> bool {
         let task = &mut self.tasks[self.current];
         task.timer_fired = true;

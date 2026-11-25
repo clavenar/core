@@ -78,8 +78,8 @@ commands.
 print the current directory and `ls` to list it. Use `ls /` to list the root
 or `ls <path>` to list another directory. In `/notes`, `write todo.txt hello`
 creates or replaces a file with one line of text, `cat todo.txt` reads it, and
-`rm todo.txt` removes it. Use `cd ..` to go up one directory and `exit` to stop
-the shell.
+`rm todo.txt` removes it. Use `cd ..` to go up one directory and `rmdir notes`
+to remove the empty directory. Use `exit` to stop the shell.
 
 RamFS starts with read-only `/hello.txt` and `/about.txt` and holds up to four
 directories besides the root and four writable files of 256 bytes each.
@@ -101,6 +101,7 @@ and each open handle has an independent cursor.
 | 11 `mkdir` | `a0` path address, `a1` path length up to 64 bytes | 0 |
 | 12 `chdir` | `a0` path address, `a1` path length up to 64 bytes | 0 |
 | 13 `getcwd` | `a0` destination address, `a1` capacity | Absolute path's byte count |
+| 14 `rmdir` | `a0` path address, `a1` path length up to 64 bytes | 0 |
 
 Open mode 0 opens a path for reading. Mode 1 opens a writable file for reading
 and writing, creating it if absent and truncating it to zero length otherwise.
@@ -118,6 +119,11 @@ Unlink removes a writable file's name immediately. Open handles retain access
 to that file, and its slot becomes reusable once the last handle closes.
 Recreating the path while an old handle is open uses a separate slot.
 Task exit and user faults close the task's handles.
+
+`rmdir` frees a directory slot as soon as it removes the name. Remove all
+linked files and subdirectories first. Any live task's working directory or
+open directory handle keeps that directory in use. Attempts to remove `/` or
+a path ending in `.` or `..` return -1.
 
 Call 1 takes an exit status in `a0` and removes the calling task from the
 schedule. In a successful run, both tasks report
