@@ -37,7 +37,8 @@ SECTIONS
     } :data
 
     .stack ALIGN(16) (NOLOAD) : {
-        . += 16K;
+        /* Boot constructs the scheduler and RamFS before entering user mode. */
+        . += 32K;
         __stack_top = .;
     } :data
 

@@ -1,7 +1,7 @@
-use clv::{ChildReply, ChildStatus, fs, print};
+use clv::{ChildReply, ChildStatus, fs, pipe, print};
 use clv_abi::{
-    MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind,
-    RequestKind,
+    MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PIPE_CAPACITY, PROGRAM_ECHO, PROGRAM_HELLO,
+    ReplyKind, RequestKind,
 };
 
 use super::split_word;
@@ -99,14 +99,29 @@ impl Children {
     }
 
     pub(super) fn ask_file(&mut self, arguments: &[u8]) {
-        let (name, path) = split_word(arguments);
+        let (first, rest) = split_word(arguments);
+        let stream = first == b"--stream";
+        let (name, path) = if stream {
+            split_word(rest)
+        } else {
+            (first, rest)
+        };
         let child = match self.named(name) {
             Some(child) if child.selector == PROGRAM_HELLO && !path.is_empty() => child,
-            _ => return print(b"usage: askfile hello <path>\r\n"),
+            _ => return print(b"usage: askfile [--stream] hello <path>\r\n"),
         };
-        if let Some(handle) = spawn_scoped_hello(path, |fd| clv::spawn_with_file(PROGRAM_HELLO, fd))
-        {
-            child.collect_reply(handle);
+        let spawn = if stream {
+            clv::spawn_with_file_pipe
+        } else {
+            clv::spawn_with_file
+        };
+        if let Some(handle) = spawn_scoped_hello(path, |fd| spawn(PROGRAM_HELLO, fd)) {
+            child.handle = handle;
+            if stream {
+                print_stream(handle);
+            } else {
+                print_reply(handle);
+            }
         }
     }
 
@@ -177,5 +192,20 @@ fn print_reply(handle: usize) {
             ReplyKind::ReadFailed => print(b"cannot read requested file\r\n"),
         },
         None => print(b"recv failed\r\n"),
+    }
+}
+
+fn print_stream(handle: usize) {
+    let mut buffer = [0; PIPE_CAPACITY];
+    let ok = loop {
+        match pipe::read(handle, &mut buffer) {
+            Some([]) => break true,
+            Some(bytes) if clv::write_console(bytes) == Some(bytes.len()) => {}
+            _ => break false,
+        }
+    };
+    pipe::close(handle);
+    if !ok {
+        print(b"cannot read file stream\r\n");
     }
 }

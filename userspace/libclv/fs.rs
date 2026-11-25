@@ -3,7 +3,7 @@ use clv_abi::{
     SYS_READDIR, SYS_RMDIR, SYS_UNLINK, SYS_WRITE,
 };
 
-use super::{syscall, syscall_result, with_stack_bytes};
+use super::{read_into, syscall, syscall_result, with_stack_bytes, write_from};
 
 fn path_call(number: usize, path: &[u8], mode: usize) -> Option<usize> {
     with_stack_bytes::<PATH_MAX_BYTES>(path, |address, length| {
@@ -51,16 +51,6 @@ pub fn getcwd(buffer: &mut [u8]) -> Option<&[u8]> {
     buffer.get(..count)
 }
 
-fn read_into(number: usize, handle: usize, buffer: &mut [u8]) -> Option<&[u8]> {
-    let count = syscall(
-        number,
-        handle,
-        buffer.as_mut_ptr().expose_provenance(),
-        buffer.len(),
-    );
-    buffer.get(..count)
-}
-
 pub fn read(handle: usize, buffer: &mut [u8]) -> Option<&[u8]> {
     read_into(SYS_READ, handle, buffer)
 }
@@ -71,10 +61,5 @@ pub fn readdir(handle: usize, buffer: &mut [u8]) -> Option<&[u8]> {
 
 /// Writes from a caller-owned stack buffer.
 pub fn write(handle: usize, bytes: &[u8]) -> Option<usize> {
-    syscall_result(syscall(
-        SYS_WRITE,
-        handle,
-        bytes.as_ptr().expose_provenance(),
-        bytes.len(),
-    ))
+    write_from(SYS_WRITE, handle, bytes)
 }

@@ -30,6 +30,10 @@ pub const SYS_SPAWN_REQUEST: usize = 24;
 pub const SYS_REQUEST_RECV: usize = 25;
 pub const SYS_REPLY_SEND: usize = 26;
 pub const SYS_REPLY_RECV: usize = 27;
+pub const SYS_SPAWN_WITH_FILE_PIPE: usize = 28;
+pub const SYS_PIPE_READ: usize = 29;
+pub const SYS_PIPE_WRITE: usize = 30;
+pub const SYS_PIPE_CLOSE: usize = 31;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
@@ -75,6 +79,7 @@ impl ReplyKind {
 
 /// A child receives its RamFS grant handle in `a1` and its kind in `a2`.
 /// A launch without a grant sets `a2` to 0.
+/// A file grant with a pipe also supplies the write endpoint in `a3`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum GrantKind {
@@ -84,6 +89,7 @@ pub enum GrantKind {
 
 pub const PATH_MAX_BYTES: usize = 64;
 pub const MESSAGE_MAX_BYTES: usize = 64;
+pub const PIPE_CAPACITY: usize = 32;
 pub const FILE_REPLY_OK: u8 = 0;
 pub const FILE_REPLY_ERROR: u8 = 1;
 pub const PROGRAM_HELLO: usize = 0;

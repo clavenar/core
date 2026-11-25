@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use clv::{LaunchRequest, fs};
+use clv::{LaunchRequest, fs, pipe};
 use clv_abi::{
     GrantKind, MESSAGE_MAX_BYTES, PROBE_VALUE, ReplyKind, RequestKind, SYS_EXIT, SYS_PROBE,
     SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
@@ -20,9 +20,14 @@ global_asm!(
     print_granted_hello = sym print_granted_hello,
 );
 
-extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize) -> usize {
+extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, writer: usize) -> usize {
     let mut buffer = [0; MESSAGE_MAX_BYTES];
     if grant_kind == GrantKind::File as usize {
+        if writer != 0 {
+            let status = copy_file(handle, |bytes| pipe::write(writer, bytes));
+            pipe::close(writer);
+            return status;
+        }
         return reply_with_file(Some(handle), &mut buffer);
     }
     if let Some(LaunchRequest::Received { kind, bytes, .. }) = clv::receive_request(&mut buffer) {
@@ -64,17 +69,23 @@ extern "C" fn print_granted_hello(directory: usize) -> usize {
         clv::print(b"cannot open hello.txt\r\n");
         return 1;
     };
+    copy_file(handle, clv::write_console)
+}
 
+fn copy_file(handle: usize, write: impl Fn(&[u8]) -> Option<usize>) -> usize {
     let mut buffer = [0; 128];
-    let status = loop {
-        let Some(bytes) = fs::read(handle, &mut buffer) else {
+    let status = 'file: loop {
+        let Some(mut bytes) = fs::read(handle, &mut buffer) else {
             break 1;
         };
         if bytes.is_empty() {
             break 0;
         }
-        if clv::write_console(bytes) != Some(bytes.len()) {
-            break 1;
+        while !bytes.is_empty() {
+            match write(bytes) {
+                Some(count) if count > 0 && count <= bytes.len() => bytes = &bytes[count..],
+                _ => break 'file 1,
+            }
         }
     };
     fs::close(handle);

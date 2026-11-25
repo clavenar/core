@@ -42,9 +42,10 @@ impl TrapFrame {
         }
     }
 
-    pub(crate) fn set_startup_args(&mut self, a1: usize, a2: usize) {
+    pub(crate) fn set_startup_args(&mut self, a1: usize, a2: usize, a3: usize) {
         self.registers[11] = a1;
         self.registers[12] = a2;
+        self.registers[13] = a3;
     }
 }
 
@@ -97,7 +98,7 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
     let current = scheduler.current_id();
     if scause == timer::INTERRUPT_CAUSE {
         if scheduler.preempt(frame) {
-            switch_task(scheduler, current, b"timer switch ");
+            switch_task(scheduler, current, SwitchReason::Timer);
         }
         arm_timer();
         // The frame now contains the selected task's interrupted instruction.
@@ -117,14 +118,16 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
     match syscall::dispatch(scheduler, fs, frame) {
         syscall::Outcome::Resume => {}
         syscall::Outcome::Exit(status) => {
-            write_task(current);
-            uart::write(b" user exit status=");
-            write_hex(status);
-            uart::write(b"\r\n");
+            if !scheduler.has_active_pipe_reader() {
+                write_task(current);
+                uart::write(b" user exit status=");
+                write_hex(status);
+                uart::write(b"\r\n");
+            }
             finish_task(scheduler, fs, frame, TaskCompletion::Exited(status));
         }
         syscall::Outcome::Wait => {
-            switch_task(scheduler, current, b"wait switch ");
+            switch_task(scheduler, current, SwitchReason::Wait);
             arm_timer();
         }
     }
@@ -141,20 +144,35 @@ fn finish_task(
         uart::write(b"all tasks exited\r\n");
         idle();
     }
-    let reason: &[u8] = match completion {
-        TaskCompletion::Exited(_) => b"exit switch ",
-        TaskCompletion::Faulted(_) => b"fault switch ",
+    let reason = match completion {
+        TaskCompletion::Exited(_) => SwitchReason::Exit,
+        TaskCompletion::Faulted(_) => SwitchReason::Fault,
     };
     switch_task(scheduler, previous, reason);
     arm_timer();
 }
 
-fn switch_task(scheduler: &Scheduler, previous: usize, reason: &[u8]) {
+enum SwitchReason {
+    Timer,
+    Wait,
+    Exit,
+    Fault,
+}
+
+fn switch_task(scheduler: &Scheduler, previous: usize, reason: SwitchReason) {
     if !scheduler.address_space().activate() {
         uart::write(b"Sv39 task switch failed\r\n");
         idle();
     }
-    uart::write(reason);
+    // Routine switch traces share the shell's UART with the bytes it is draining.
+    let trace: &[u8] = match reason {
+        SwitchReason::Fault => b"fault switch ",
+        _ if scheduler.has_active_pipe_reader() => return,
+        SwitchReason::Timer => b"timer switch ",
+        SwitchReason::Wait => b"wait switch ",
+        SwitchReason::Exit => b"exit switch ",
+    };
+    uart::write(trace);
     write_task(previous);
     uart::write(b" -> ");
     write_task(scheduler.current_id());

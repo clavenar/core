@@ -74,7 +74,7 @@ fn run_command(line: &[u8], children: &mut Children) {
             b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\n\
               run hello [dir]  run echo\r\n\
               ask [--read] <hello|echo> <text>  askat [--echo] hello <dir> <payload>\r\n\
-              askfile hello <path>\r\n\
+              askfile [--stream] hello <path>\r\n\
               recv <hello|echo>  wait <hello|echo>\r\n",
         ),
         b"pwd" if arguments.is_empty() => files::pwd(),

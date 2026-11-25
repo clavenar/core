@@ -4,13 +4,14 @@
 //! Receive buffers and direct file and console I/O use the caller's stack buffers.
 
 pub mod fs;
+pub mod pipe;
 
 use clv_abi::{
     MESSAGE_MAX_BYTES, NO_DIRECTORY_GRANT, ReplyKind, RequestKind, SYS_EXIT, SYS_MESSAGE_RECV,
     SYS_MESSAGE_SEND, SYS_READ_CONSOLE, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV,
     SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_WAIT, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
-    WAIT_EXITED, WAIT_FAULTED,
+    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_WAIT, SYS_WRITE_CONSOLE,
+    SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 use core::arch::asm;
 
@@ -59,6 +60,25 @@ fn with_stack_bytes<const CAPACITY: usize>(
 
 fn syscall_result(value: usize) -> Option<usize> {
     (value != SYSCALL_ERROR).then_some(value)
+}
+
+fn read_into(number: usize, handle: usize, buffer: &mut [u8]) -> Option<&[u8]> {
+    let count = syscall(
+        number,
+        handle,
+        buffer.as_mut_ptr().expose_provenance(),
+        buffer.len(),
+    );
+    buffer.get(..count)
+}
+
+fn write_from(number: usize, handle: usize, bytes: &[u8]) -> Option<usize> {
+    syscall_result(syscall(
+        number,
+        handle,
+        bytes.as_ptr().expose_provenance(),
+        bytes.len(),
+    ))
 }
 
 pub fn exit(status: usize) -> ! {
@@ -112,6 +132,11 @@ pub fn spawn(program: usize, directory: Option<usize>, request: Option<&[u8]>) -
 
 pub fn spawn_with_file(program: usize, file: usize) -> Option<usize> {
     syscall_result(syscall(SYS_SPAWN_WITH_FILE, program, file, 0))
+}
+
+/// Grants a file to the child and returns the parent's handle for pipe reads and wait.
+pub fn spawn_with_file_pipe(program: usize, file: usize) -> Option<usize> {
+    syscall_result(syscall(SYS_SPAWN_WITH_FILE_PIPE, program, file, 0))
 }
 
 pub fn spawn_request(

@@ -7,6 +7,7 @@ _start:
     mv s1, a0
     mv s2, a1
     mv s3, a2
+    mv s4, a3
     sd s1, 8(sp)
     li s0, 0x123
     li t1, 0x456
@@ -37,6 +38,7 @@ _start:
 
     mv a0, s2
     mv a1, s3
+    mv a2, s4
     call {reply_or_report_ready}
     li t0, -1
     bne a0, t0, .Luser_exit

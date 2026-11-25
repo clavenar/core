@@ -1,7 +1,10 @@
+mod pipe;
+
 use clv_abi::{GrantKind, PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind};
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::fs::ramfs::{RamFs, TaskFs};
+use crate::ipc::pipe::Pipe;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::sv39::{AddressSpace, USER_STACK_TOP};
 
@@ -15,7 +18,21 @@ enum TaskState {
     Runnable,
     WaitingForChild(usize),
     WaitingForMessage(usize),
+    WaitingForPipeData(usize),
+    WaitingForPipeSpace,
     Stopped,
+}
+
+impl TaskState {
+    fn wake_from(&mut self, wait: Self) {
+        if *self == wait {
+            *self = Self::Runnable;
+        }
+    }
+
+    fn waits_for_result(self, handle: usize) -> bool {
+        self == Self::WaitingForChild(handle) || self == Self::WaitingForMessage(handle)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -29,11 +46,19 @@ struct ChildLaunch {
     request: Option<Message>,
     reply: Option<Message>,
     legacy_file_reply: bool,
+    pipe: Option<Pipe>,
     completion: Option<TaskCompletion>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum LaunchGrant {
+    Directory(usize),
+    File(usize),
+    FileWithPipe(usize),
+}
+
 pub(crate) enum WaitResult {
-    NoLaunch,
+    Unavailable,
     Blocked,
     Completed(TaskCompletion),
 }
@@ -133,7 +158,7 @@ impl Scheduler {
         &mut self,
         fs: &mut RamFs,
         program: usize,
-        grant: Option<(GrantKind, usize)>,
+        grant: Option<LaunchGrant>,
         request: Option<Message>,
     ) -> Option<usize> {
         let index = match program {
@@ -153,13 +178,18 @@ impl Scheduler {
             index + 1,
             self.initial_status,
         );
-        let task_fs = match grant {
-            Some((kind, fd)) => {
+        let (task_fs, pipe) = match grant {
+            Some(grant) => {
+                let (kind, fd, writer) = match grant {
+                    LaunchGrant::Directory(fd) => (GrantKind::Directory, fd, 0),
+                    LaunchGrant::File(fd) => (GrantKind::File, fd, 0),
+                    LaunchGrant::FileWithPipe(fd) => (GrantKind::File, fd, handle),
+                };
                 let (task_fs, child_fd) = self.tasks[self.current].fs.grant(fs, fd, kind)?;
-                frame.set_startup_args(child_fd, kind as usize);
-                task_fs
+                frame.set_startup_args(child_fd, kind as usize, writer);
+                (task_fs, (writer != 0).then(Pipe::new))
             }
-            None => TaskFs::empty(),
+            None => (TaskFs::empty(), None),
         };
 
         let task = &mut self.tasks[index];
@@ -170,15 +200,18 @@ impl Scheduler {
         task.fs = task_fs;
         task.timer_fired = false;
         // Older children use an in-band status byte to answer a file read.
-        let legacy_file_reply = matches!(grant, Some((GrantKind::File, _)))
-            || request
-                .as_ref()
-                .is_some_and(|message| message.kind == MessageKind::Request(RequestKind::ReadFile));
+        let legacy_file_reply = matches!(
+            grant,
+            Some(LaunchGrant::File(_) | LaunchGrant::FileWithPipe(_))
+        ) || request
+            .as_ref()
+            .is_some_and(|message| message.kind == MessageKind::Request(RequestKind::ReadFile));
         task.launch = Some(ChildLaunch {
             handle,
             request,
             reply: None,
             legacy_file_reply,
+            pipe,
             completion: None,
         });
         task.state = TaskState::Runnable;
@@ -188,17 +221,17 @@ impl Scheduler {
 
     pub(crate) fn wait_child(&mut self, handle: usize, frame: &mut TrapFrame) -> WaitResult {
         let Some((launch, state)) = self.launch_for_shell(handle) else {
-            return WaitResult::NoLaunch;
+            return WaitResult::Unavailable;
         };
         if let Some(completion) = launch.completion.take() {
             return WaitResult::Completed(completion);
         }
-        if state == TaskState::Runnable
-            && self.block_shell(frame, TaskState::WaitingForChild(handle))
+        if *state == TaskState::Runnable
+            && self.block_current(frame, TaskState::WaitingForChild(handle))
         {
             WaitResult::Blocked
         } else {
-            WaitResult::NoLaunch
+            WaitResult::Unavailable
         }
     }
 
@@ -228,10 +261,9 @@ impl Scheduler {
         }
         launch.reply = Some(reply);
         let handle = launch.handle;
-        let shell = &mut self.tasks[SHELL_TASK_INDEX];
-        if shell.state == TaskState::WaitingForMessage(handle) {
-            shell.state = TaskState::Runnable;
-        }
+        self.tasks[SHELL_TASK_INDEX]
+            .state
+            .wake_from(TaskState::WaitingForMessage(handle));
         Some(length)
     }
 
@@ -247,12 +279,9 @@ impl Scheduler {
                 .launch
                 .as_mut()
                 .map(|launch| (&mut launch.request, None)),
-            Mailbox::ChildReply(handle) => self.launch_for_shell(handle).map(|(launch, state)| {
-                (
-                    &mut launch.reply,
-                    (state == TaskState::Runnable).then_some(handle),
-                )
-            }),
+            Mailbox::ChildReply(handle) => self
+                .launch_for_shell(handle)
+                .map(|(launch, state)| (&mut launch.reply, Some((handle, *state)))),
         };
         let Some((pending, wait_for)) = pending else {
             return ReceiveResult::Error;
@@ -270,16 +299,18 @@ impl Scheduler {
             *pending = None;
             return result;
         }
-        if let Some(handle) = wait_for
-            && self.block_shell(frame, TaskState::WaitingForMessage(handle))
-        {
-            ReceiveResult::Blocked
-        } else {
-            ReceiveResult::Ready {
+        match wait_for {
+            Some((_, TaskState::WaitingForPipeSpace)) => ReceiveResult::Error,
+            Some((handle, TaskState::Runnable))
+                if self.block_current(frame, TaskState::WaitingForMessage(handle)) =>
+            {
+                ReceiveResult::Blocked
+            }
+            _ => ReceiveResult::Ready {
                 length: 0,
                 sender: 0,
                 tag: 0,
-            }
+            },
         }
     }
 
@@ -302,42 +333,45 @@ impl Scheduler {
         if let Some(launch) = &mut task.launch {
             launch.request = None;
             launch.completion = Some(completion);
+            if let Some(pipe) = &mut launch.pipe {
+                pipe.close_writer();
+            }
             let handle = launch.handle;
             let shell = &mut self.tasks[SHELL_TASK_INDEX];
-            if shell.state == TaskState::WaitingForChild(handle)
-                || shell.state == TaskState::WaitingForMessage(handle)
+            if shell.state.waits_for_result(handle)
+                || shell.state == TaskState::WaitingForPipeData(handle)
             {
                 shell.state = TaskState::Runnable;
             }
         } else if self.current == SHELL_TASK_INDEX {
-            for launch in self
-                .tasks
-                .iter_mut()
-                .filter_map(|task| task.launch.as_mut())
-            {
-                launch.reply = None;
+            for task in &mut self.tasks {
+                if let Some(launch) = &mut task.launch {
+                    launch.reply = None;
+                    launch.close_pipe_reader(&mut task.state);
+                }
             }
         }
         self.switch(frame)
     }
 
-    fn launch_for_shell(&mut self, handle: usize) -> Option<(&mut ChildLaunch, TaskState)> {
+    fn launch_for_shell(&mut self, handle: usize) -> Option<(&mut ChildLaunch, &mut TaskState)> {
         if self.current != SHELL_TASK_INDEX {
             return None;
         }
         self.tasks.iter_mut().find_map(|task| {
             let launch = task.launch.as_mut()?;
-            (launch.handle == handle).then_some((launch, task.state))
+            (launch.handle == handle).then_some((launch, &mut task.state))
         })
     }
 
-    fn block_shell(&mut self, frame: &mut TrapFrame, state: TaskState) -> bool {
-        // Keep the ECALL's PC so the shell retries its syscall after waking.
-        self.tasks[SHELL_TASK_INDEX].frame = *frame;
+    fn block_current(&mut self, frame: &mut TrapFrame, state: TaskState) -> bool {
+        // Keep the ECALL's PC so the task retries its syscall after waking.
+        let current = self.current;
+        self.tasks[current].frame = *frame;
         if !self.switch(frame) {
             return false;
         }
-        self.tasks[SHELL_TASK_INDEX].state = state;
+        self.tasks[current].state = state;
         true
     }
 

@@ -55,7 +55,7 @@ as task 1 and the shell as task 2. Task 3 starts when the shell launches
 `echo`. Each receives its task ID in `a0` and runs with its own Sv39 root
 and read/execute image. Each task has a 4 KiB read/write, non-executable stack
 at `0x00402000`. The kernel and UART mappings are shared in supervisor mode.
-The kernel, supervisor stack, and 21-frame boot pool fit within one aligned
+The kernel, 32 KiB supervisor stack, and 21-frame boot pool fit within one aligned
 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
@@ -141,6 +141,23 @@ wait hello
 ```
 
 The shell prints `approved` and reports that `hello` exited with status 0.
+
+`askfile --stream hello <path>` grants the same read-only file and a write
+end of a 32-byte pipe. The shell reads until EOF and prints the file bytes.
+In QEMU, the first two commands below print all 77 bytes of `/about.txt`,
+including its line ending. The wait reports exit status 0.
+
+```text
+cat /about.txt
+askfile --stream hello /about.txt
+wait hello
+```
+
+An empty file produces no bytes. The shell returns to the prompt at EOF,
+and `wait hello` collects the child's exit status or fault separately.
+While the shell drains a pipe, the kernel pauses routine switch and exit
+traces on the shared UART so they do not interrupt the file contents.
+Fault diagnostics still appear immediately.
 
 The shell records the latest successful launch handle for each program.
 `wait hello` and `wait echo` collect the selected child's exit status or
@@ -335,6 +352,34 @@ to 63 data bytes. Both errors return the single status byte 1. In the other
 direction, call 27 reads a legacy call 19 message as `Echo`. For a `ReadFile`
 request or single-file grant it recognizes the original file format, mapping
 status 0 to `FileData` and a lone status byte 1 to `ReadFailed`.
+
+Call 28 (`spawn_with_file_pipe`) takes the program selector in `a0` and the
+shell's regular file handle in `a1`. The kernel grants the child an independent
+read-only file handle using the same rules as call 23. It also creates a
+one-way pipe for this launch. The returned child handle identifies the shell's
+read end. At startup the child gets its file in `a1`, grant kind 2 in `a2`,
+and the handle for its write end in `a3`. Other launches start with `a3` zero.
+
+| Call | Arguments | Result in `a0` |
+| --- | --- | --- |
+| 29 `pipe_read` | `a0` launch handle, `a1` shell stack destination, `a2` capacity | Bytes read in order, or 0 at EOF |
+| 30 `pipe_write` | `a0` launch handle, `a1` child stack source, `a2` length | Bytes accepted, possibly a prefix |
+| 31 `pipe_close` | `a0` launch handle | 0 after closing the caller's pipe end |
+
+The pipe holds 32 bytes. A nonempty write sleeps when the pipe is full and
+resumes when the shell reads. A nonempty read sleeps while the pipe is empty
+and the writer is open. Each transfer validates the full user buffer before
+moving bytes. Zero-length I/O on a connected endpoint returns 0 immediately.
+Invalid handles, wrong endpoints or invalid buffers return -1.
+
+Closing the writer or stopping the child preserves buffered bytes for the
+reader. Once drained, further reads return EOF. Closing the reader or stopping
+the shell discards unread bytes and wakes a blocked writer with an error.
+Closing either end leaves the launch status available to `wait`. If the
+shell waits for a result or reply while that child is blocked on a full pipe,
+the wait or receive returns -1 so the shell can drain or close the pipe and
+retry. A queued reply or completed status can still be collected. A successful
+relaunch invalidates the previous pipe handle along with the previous launch.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

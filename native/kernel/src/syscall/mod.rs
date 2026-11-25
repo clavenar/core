@@ -1,9 +1,10 @@
 use clv_abi::{
-    GrantKind, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE, PATH_MAX_BYTES,
+    NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE, PATH_MAX_BYTES,
     PROBE_VALUE, PROGRAM_HELLO, ReplyKind, RequestKind, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD,
-    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PROBE, SYS_READ,
-    SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR,
-    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
+    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE,
+    SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR,
+    SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_PIPE,
     SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE,
     SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
@@ -12,9 +13,12 @@ use crate::arch::riscv64::trap::TrapFrame;
 use crate::console::write_task;
 use crate::drivers::uart;
 use crate::fs::ramfs::{RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
+use crate::ipc::pipe::PipeResult;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::usercopy::{copy_from_user_stack, copy_to_user_stack, in_user_stack};
-use crate::scheduler::{Mailbox, ReceiveResult, Scheduler, TaskCompletion, WaitResult};
+use crate::scheduler::{
+    LaunchGrant, Mailbox, ReceiveResult, Scheduler, TaskCompletion, WaitResult,
+};
 
 const CONSOLE_WRITE_LIMIT: usize = 128;
 const REG_A0: usize = 10;
@@ -78,11 +82,33 @@ pub(crate) fn dispatch(
         }
         SYS_SPAWN => scheduler.spawn(fs, a0, None, None).unwrap_or(SYSCALL_ERROR),
         SYS_SPAWN_AT => scheduler
-            .spawn(fs, a0, Some((GrantKind::Directory, a1)), None)
+            .spawn(fs, a0, Some(LaunchGrant::Directory(a1)), None)
             .unwrap_or(SYSCALL_ERROR),
         SYS_SPAWN_WITH_FILE => scheduler
-            .spawn(fs, a0, Some((GrantKind::File, a1)), None)
+            .spawn(fs, a0, Some(LaunchGrant::File(a1)), None)
             .unwrap_or(SYSCALL_ERROR),
+        SYS_SPAWN_WITH_FILE_PIPE => scheduler
+            .spawn(fs, a0, Some(LaunchGrant::FileWithPipe(a1)), None)
+            .unwrap_or(SYSCALL_ERROR),
+        SYS_PIPE_READ | SYS_PIPE_WRITE if in_user_stack(a1, a2) => {
+            let result = if number == SYS_PIPE_READ {
+                scheduler.read_pipe(a0, a2, frame, |bytes| copy_to_user_stack(bytes, a1, a2))
+            } else {
+                scheduler.write_pipe(a0, a2, frame, |bytes| copy_from_user_stack(a1, bytes))
+            };
+            match result {
+                PipeResult::Ready(count) => count,
+                PipeResult::Wait => return Outcome::Wait,
+                PipeResult::Error => SYSCALL_ERROR,
+            }
+        }
+        SYS_PIPE_CLOSE => {
+            if scheduler.close_pipe(a0) {
+                0
+            } else {
+                SYSCALL_ERROR
+            }
+        }
         SYS_SPAWN_WITH_MESSAGE => {
             spawn_with_request(scheduler, fs, a0, None, RequestKind::Echo, a1, a2)
                 .unwrap_or(SYSCALL_ERROR)
@@ -104,7 +130,7 @@ pub(crate) fn dispatch(
                 .unwrap_or(SYSCALL_ERROR)
         }
         SYS_WAIT => match scheduler.wait_child(a0, frame) {
-            WaitResult::NoLaunch => SYSCALL_ERROR,
+            WaitResult::Unavailable => SYSCALL_ERROR,
             WaitResult::Blocked => return Outcome::Wait,
             WaitResult::Completed(completion) => {
                 let (kind, value) = match completion {
@@ -172,7 +198,7 @@ fn spawn_with_request(
         length,
         |bytes| copy_from_user_stack(address, bytes),
     )?;
-    let grant = directory_fd.map(|fd| (GrantKind::Directory, fd));
+    let grant = directory_fd.map(LaunchGrant::Directory);
     scheduler.spawn(fs, program, grant, Some(request))
 }
 

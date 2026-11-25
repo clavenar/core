@@ -1,3 +1,5 @@
+pub(crate) mod pipe;
+
 use clv_abi::{FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, ReplyKind, RequestKind};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
