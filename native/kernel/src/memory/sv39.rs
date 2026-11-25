@@ -1,4 +1,5 @@
 use core::arch::asm;
+use core::ptr::NonNull;
 
 use super::frame::{FRAME_SIZE, Frame, FrameAllocator};
 use super::user_image::USER_TEXT_BASE;
@@ -103,6 +104,7 @@ impl BootMappings {
         root.words_mut()[vpn_index(self.uart, 2)] = pte(low_middle.physical_address(), VALID);
         Some(AddressSpace {
             root: root.physical_address(),
+            user_stack: NonNull::from(user_stack),
         })
     }
 }
@@ -110,11 +112,21 @@ impl BootMappings {
 #[derive(Clone, Copy)]
 pub(crate) struct AddressSpace {
     root: usize,
+    user_stack: NonNull<Frame>,
 }
 
 impl AddressSpace {
     pub(crate) fn root_address(self) -> usize {
         self.root
+    }
+
+    /// # Safety
+    /// The task must be stopped and its stack frame must be writable through
+    /// the supervisor identity map.
+    pub(crate) unsafe fn clear_user_stack(self) {
+        // SAFETY: The frame is reserved for this task and the caller ensures
+        // exclusive access while clearing it.
+        unsafe { self.user_stack.as_ptr().write_bytes(0, 1) };
     }
 
     pub(crate) fn activate(self) -> bool {

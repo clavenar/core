@@ -2,9 +2,9 @@
 #![no_main]
 
 use clv_abi::{
-    OPEN_READ, OPEN_WRITE_TRUNCATE, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD, SYS_MKDIR,
-    SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_TIMER_FIRED, SYS_UNLINK,
-    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    OPEN_READ, OPEN_WRITE_TRUNCATE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD,
+    SYS_MKDIR, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN,
+    SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -72,7 +72,7 @@ fn run_command(line: &[u8]) {
     let (command, arguments) = split_word(line.trim_ascii());
     match command {
         b"help" if arguments.is_empty() => write(
-            b"help  pwd  cd <path>  ls [path]  mkdir <path>  rmdir <path>  cat <path>  write <path> <text>  rm <path>  exit\r\n",
+            b"help  pwd  cd <path>  ls [path]  mkdir <path>  rmdir <path>  cat <path>  write <path> <text>  rm <path>  run hello  exit\r\n",
         ),
         b"pwd" if arguments.is_empty() => pwd(),
         b"cd" => run_path_command(
@@ -104,6 +104,12 @@ fn run_command(line: &[u8]) {
             b"usage: rm <path>\r\n",
             b"cannot remove path\r\n",
         ),
+        b"run" if arguments == b"hello" => {
+            if syscall(SYS_SPAWN, PROGRAM_HELLO, 0, 0) == SYSCALL_ERROR {
+                write(b"hello is already running\r\n");
+            }
+        }
+        b"run" => write(b"usage: run hello\r\n"),
         b"exit" if arguments.is_empty() => exit(0),
         b"" => {}
         _ => write(b"unknown command\r\n"),

@@ -58,6 +58,12 @@ OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
 starts a fresh quantum when the timer fires or a stopped task is replaced.
 
+At the shell prompt, `run hello` starts the embedded `hello` program in its
+boot task slot. The shell stays interactive while the program runs. Each
+launch starts with a cleared stack, fresh registers and timer state, an
+empty handle table, and working directory `/`. Exit or fault frees the slot
+for another launch.
+
 The user program passes the call number in `a7` and executes `ecall`. Call 0
 prints `task N user probe` and returns 42 in `a0`. Call 3 returns 1 in `a0` once
 the calling task has received a timer interrupt and 0 until then. The hello
@@ -129,6 +135,10 @@ Call 1 takes an exit status in `a0` and removes the calling task from the
 schedule. In a successful run, both tasks report
 `user exit status=0x0000000000000000`, then the kernel prints `all tasks exited`
 and idles. Unknown call numbers return -1 in `a0`.
+
+Call 15 (`spawn`) takes a program selector in `a0`. Selector 0 chooses `hello`.
+It returns 0 when the task is ready to run and -1 if the selector is unknown
+or the task is already running.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).
