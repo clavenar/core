@@ -52,8 +52,14 @@ non-executable stack page. The kernel, stacks, and 16-frame boot pool fit
 within one aligned 2 MiB physical region.
 
 The user program passes the call number in `a7` and executes `ecall`. Call 0
-prints `user probe` and returns 42 in `a0`. The program checks the result, its
-saved registers, and its stack contents.
+prints `user probe`, arms a one-shot timer through OpenSBI on the first call,
+and returns 42 in `a0`. A timer setup failure returns -1.
+
+The interrupt handler disarms the timer, prints `user timer interrupt` once,
+and resumes at the interrupted user instruction. Call 3 returns 1 in `a0` once
+the interrupt has fired and 0 while it is pending or unarmed. The hello
+program waits for the interrupt, then checks its saved registers and stack
+contents.
 
 Call 2 writes to the console. It takes a user stack address in `a0` and a byte
 count in `a1`. The kernel accepts up to 128 bytes, copies the full range before

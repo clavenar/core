@@ -2,6 +2,7 @@
     .equ SYS_PROBE, 0
     .equ SYS_EXIT, 1
     .equ SYS_WRITE_CONSOLE, 2
+    .equ SYS_TIMER_FIRED, 3
     .equ PROBE_VALUE, 42
 
     .section .text.entry, "ax", @progbits
@@ -17,6 +18,17 @@ _start:
     ecall
     li t0, PROBE_VALUE
     bne a0, t0, .Luser_failed
+
+    # Keep running in user mode until the kernel observes the interrupt.
+.Lwait_for_timer:
+    li t2, 256
+.Ltimer_delay:
+    addi t2, t2, -1
+    bnez t2, .Ltimer_delay
+    li a7, SYS_TIMER_FIRED
+    ecall
+    beqz a0, .Lwait_for_timer
+
     li t0, 0x456
     bne t1, t0, .Luser_failed
     li t0, 0x123

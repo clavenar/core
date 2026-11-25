@@ -2,6 +2,8 @@
 #![no_main]
 
 mod memory;
+#[path = "arch/riscv64/timer.rs"]
+mod timer;
 
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
@@ -31,6 +33,7 @@ const USER_ECALL: usize = 8;
 const SYS_PROBE: usize = 0;
 const SYS_EXIT: usize = 1;
 const SYS_WRITE_CONSOLE: usize = 2;
+const SYS_TIMER_FIRED: usize = 3;
 const SYSCALL_ERROR: usize = usize::MAX;
 const CONSOLE_WRITE_LIMIT: usize = 128;
 const PROBE_VALUE: usize = 42;
@@ -92,6 +95,12 @@ extern "C" fn kernel_main() -> ! {
 // SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.
 #[unsafe(no_mangle)]
 extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: usize) {
+    if scause == timer::INTERRUPT_CAUSE {
+        timer::complete();
+        uart_write(b"user timer interrupt\r\n");
+        // Resume at the interrupted user instruction.
+        return;
+    }
     if scause != USER_ECALL {
         supervisor_trap_fatal(scause, frame.sepc, stval);
     }
@@ -99,7 +108,12 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
     match frame.registers[REG_A7] {
         SYS_PROBE => {
             uart_write(b"user probe\r\n");
-            frame.registers[REG_A0] = PROBE_VALUE;
+            frame.registers[REG_A0] = if timer::arm_once() {
+                PROBE_VALUE
+            } else {
+                uart_write(b"SBI timer setup failed\r\n");
+                SYSCALL_ERROR
+            };
         }
         SYS_EXIT => {
             uart_write(b"user exit status=");
@@ -111,6 +125,7 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
             frame.registers[REG_A0] =
                 write_console(frame.registers[REG_A0], frame.registers[REG_A1]);
         }
+        SYS_TIMER_FIRED => frame.registers[REG_A0] = usize::from(timer::fired()),
         _ => frame.registers[REG_A0] = SYSCALL_ERROR,
     }
     // ECALL is a 32-bit instruction, including on cores with compressed code.
@@ -177,6 +192,7 @@ fn panic(_info: &PanicInfo<'_>) -> ! {
 }
 
 fn idle() -> ! {
+    timer::cancel();
     loop {
         // SAFETY: WFI is available in supervisor mode on this target and
         // does not access memory or modify the stack.
