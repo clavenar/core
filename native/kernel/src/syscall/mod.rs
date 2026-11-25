@@ -1,6 +1,6 @@
 use clv_abi::{
-    OPEN_READ, OPEN_WRITE_TRUNCATE, PROBE_VALUE, SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_PROBE,
-    SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE,
+    OPEN_READ, OPEN_WRITE_TRUNCATE, PROBE_VALUE, SYS_CLOSE, SYS_EXIT, SYS_MKDIR, SYS_OPEN,
+    SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE,
     SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
@@ -56,6 +56,7 @@ pub(crate) fn dispatch(
             .unwrap_or(SYSCALL_ERROR),
         SYS_WRITE => write_file(scheduler.file_handles(), fs, a0, a1, a2).unwrap_or(SYSCALL_ERROR),
         SYS_UNLINK => with_user_path(a0, a1, |path| fs.unlink(path)).unwrap_or(SYSCALL_ERROR),
+        SYS_MKDIR => with_user_path(a0, a1, |path| fs.mkdir(path)).unwrap_or(SYSCALL_ERROR),
         _ => SYSCALL_ERROR,
     };
     // ECALL is a 32-bit instruction, including on cores with compressed code.

@@ -72,24 +72,28 @@ The hello program uses this call to print `Hello from user mode`.
 
 Call 4 polls the console. It returns one UART byte in `a0` when input is ready
 and -1 otherwise. At the `clv> ` prompt, type `help` to see the available
-commands. Use `ls` to list the RamFS root, `cat /hello.txt` or
-`cat /about.txt` to read a file, and `exit` to stop the shell. The command
-`write /note.txt hello` creates or replaces a file with one line of text.
-Use `rm /note.txt` to remove a writable file.
+commands. Use `ls` to list the RamFS root or `ls <path>` to list a directory.
+`mkdir /notes` creates a directory, and `write /notes/todo.txt hello` creates
+or replaces a file with one line of text. Use `cat /notes/todo.txt` to read
+it, `rm /notes/todo.txt` to remove it, and `exit` to stop the shell.
 
 RamFS starts with read-only `/hello.txt` and `/about.txt` and holds up to four
-writable files of 256 bytes each. Writable files live in RAM until reboot.
-Paths can be absolute or relative to the root. Each task has four file
-handles, and each open handle has an independent cursor.
+directories besides the root and four writable files of 256 bytes each.
+Directories and writable files live in RAM until reboot. Relative paths start
+at the root. During path resolution, `.` keeps the current directory and `..`
+moves to its parent, staying at the root when already there. Creating a file
+or directory requires an existing parent. Each task has four handles, and
+each open handle has an independent cursor.
 
 | Call | Arguments | Result in `a0` |
 | --- | --- | --- |
 | 5 `open` | `a0` path address, `a1` path length up to 64 bytes, `a2` mode | Handle |
 | 6 `read` | `a0` file handle, `a1` destination address, `a2` capacity | Bytes copied, or 0 at EOF |
-| 7 `readdir` | `a0` root directory handle, `a1` destination address, `a2` capacity | One entry name's byte count, or 0 at end |
+| 7 `readdir` | `a0` directory handle, `a1` destination address, `a2` capacity | One entry name's byte count, or 0 at end |
 | 8 `close` | `a0` handle | 0 |
 | 9 `write` | `a0` writable handle, `a1` source address, `a2` byte count | Bytes written |
 | 10 `unlink` | `a0` path address, `a1` path length up to 64 bytes | 0 |
+| 11 `mkdir` | `a0` path address, `a1` path length up to 64 bytes | 0 |
 
 Open mode 0 opens a path for reading. Mode 1 opens a writable file for reading
 and writing, creating it if absent and truncating it to zero length otherwise.

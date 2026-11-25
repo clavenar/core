@@ -2,8 +2,9 @@
 #![no_main]
 
 use clv_abi::{
-    OPEN_READ, OPEN_WRITE_TRUNCATE, SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    OPEN_READ, OPEN_WRITE_TRUNCATE, SYS_CLOSE, SYS_EXIT, SYS_MKDIR, SYS_OPEN, SYS_READ,
+    SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WRITE, SYS_WRITE_CONSOLE,
+    SYSCALL_ERROR,
 };
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -69,15 +70,24 @@ extern "C" fn _start() -> ! {
 
 fn run_command(line: &[u8]) {
     match line.trim_ascii() {
-        b"help" => write(b"help  ls  cat <path>  write <path> <text>  rm <path>  exit\r\n"),
+        b"help" => write(
+            b"help  ls [path]  mkdir <path>  cat <path>  write <path> <text>  rm <path>  exit\r\n",
+        ),
         b"ls" => show(&[b'/'], SYS_READDIR),
+        b"mkdir" => write(b"usage: mkdir <path>\r\n"),
         b"cat" => write(b"usage: cat <path>\r\n"),
         b"write" => write(WRITE_USAGE),
         b"rm" => write(b"usage: rm <path>\r\n"),
         b"exit" => exit(0),
         b"" => {}
         command => {
-            if let Some(path) = command.strip_prefix(b"cat ") {
+            if let Some(path) = command.strip_prefix(b"ls ") {
+                show(path.trim_ascii(), SYS_READDIR);
+            } else if let Some(path) = command.strip_prefix(b"mkdir ") {
+                if call_path(SYS_MKDIR, path.trim_ascii(), 0) == SYSCALL_ERROR {
+                    write(b"cannot create directory\r\n");
+                }
+            } else if let Some(path) = command.strip_prefix(b"cat ") {
                 show(path.trim_ascii(), SYS_READ);
             } else if let Some(arguments) = command.strip_prefix(b"write ") {
                 write_file(arguments.trim_ascii_start());

@@ -1,6 +1,7 @@
 const HANDLE_COUNT: usize = 4;
 const WRITABLE_FILE_COUNT: usize = 4;
-const FILE_NAME_LIMIT: usize = 64;
+const DIRECTORY_COUNT: usize = 4;
+const NAME_LIMIT: usize = 64;
 pub(crate) const WRITABLE_FILE_CAPACITY: usize = 256;
 
 struct BootFile {
@@ -20,23 +21,30 @@ const BOOT_FILES: [BootFile; 2] = [
     },
 ];
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectoryId {
+    Root,
+    Child(usize),
+}
+
 #[derive(Clone, Copy)]
 enum Node {
-    Root,
+    Directory(DirectoryId),
     BootFile(usize),
     WritableFile(usize),
 }
 
-struct WritableFile {
-    name: [u8; FILE_NAME_LIMIT],
-    name_length: usize,
-    contents: [u8; WRITABLE_FILE_CAPACITY],
-    length: usize,
-    linked: bool,
-    open_handles: usize,
+enum ResolvedPath<'a> {
+    Directory(DirectoryId),
+    Entry(DirectoryId, &'a [u8]),
 }
 
-impl WritableFile {
+struct Name {
+    bytes: [u8; NAME_LIMIT],
+    length: usize,
+}
+
+impl Name {
     fn new(name: &[u8]) -> Option<Self> {
         if name.is_empty()
             || name == b"."
@@ -45,63 +53,117 @@ impl WritableFile {
         {
             return None;
         }
-        let mut bytes = [0; FILE_NAME_LIMIT];
+        let mut bytes = [0; NAME_LIMIT];
         bytes.get_mut(..name.len())?.copy_from_slice(name);
         Some(Self {
-            name: bytes,
-            name_length: name.len(),
+            bytes,
+            length: name.len(),
+        })
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.length]
+    }
+}
+
+struct Directory {
+    parent: DirectoryId,
+    name: Name,
+}
+
+struct WritableFile {
+    parent: DirectoryId,
+    name: Name,
+    contents: [u8; WRITABLE_FILE_CAPACITY],
+    length: usize,
+    linked: bool,
+    open_handles: usize,
+}
+
+impl WritableFile {
+    fn new(parent: DirectoryId, name: &[u8]) -> Option<Self> {
+        Some(Self {
+            parent,
+            name: Name::new(name)?,
             contents: [0; WRITABLE_FILE_CAPACITY],
             length: 0,
             linked: true,
             open_handles: 1,
         })
     }
-
-    fn name(&self) -> &[u8] {
-        &self.name[..self.name_length]
-    }
 }
 
 pub(crate) struct RamFs {
+    directories: [Option<Directory>; DIRECTORY_COUNT],
     writable: [Option<WritableFile>; WRITABLE_FILE_COUNT],
 }
 
 impl RamFs {
     pub(crate) const fn new() -> Self {
         Self {
+            directories: [const { None }; DIRECTORY_COUNT],
             writable: [const { None }; WRITABLE_FILE_COUNT],
         }
     }
 
     fn open(&mut self, path: &[u8], writable: bool) -> Option<Node> {
-        if path == b"/" {
-            return (!writable).then_some(Node::Root);
-        }
-        let name = path.strip_prefix(b"/").unwrap_or(path);
-        if let Some(index) = BOOT_FILES.iter().position(|file| file.name == name) {
-            return (!writable).then_some(Node::BootFile(index));
-        }
-        if let Some(index) = self.find_writable(name) {
-            let file = self.writable[index].as_mut()?;
-            if writable {
-                file.contents.fill(0);
-                file.length = 0;
+        let (parent, name) = match self.resolve_path(path)? {
+            ResolvedPath::Directory(directory) => {
+                return (!writable).then_some(Node::Directory(directory));
             }
-            file.open_handles += 1;
-            return Some(Node::WritableFile(index));
+            ResolvedPath::Entry(parent, name) => (parent, name),
+        };
+        let requires_directory = path.ends_with(b"/");
+        if let Some(node) = self.lookup(parent, name) {
+            return match node {
+                Node::Directory(_) if !writable => Some(node),
+                Node::BootFile(_) if !writable && !requires_directory => Some(node),
+                Node::WritableFile(index) if !requires_directory => {
+                    let file = self.writable[index].as_mut()?;
+                    if writable {
+                        file.contents.fill(0);
+                        file.length = 0;
+                    }
+                    file.open_handles += 1;
+                    Some(node)
+                }
+                _ => None,
+            };
         }
-        if !writable {
+        if !writable || requires_directory {
             return None;
         }
 
         let index = self.writable.iter().position(Option::is_none)?;
-        self.writable[index] = Some(WritableFile::new(name)?);
+        self.writable[index] = Some(WritableFile::new(parent, name)?);
         Some(Node::WritableFile(index))
     }
 
+    pub(crate) fn mkdir(&mut self, path: &[u8]) -> Option<usize> {
+        let ResolvedPath::Entry(parent, name) = self.resolve_path(path)? else {
+            return None;
+        };
+        if self.lookup(parent, name).is_some() {
+            return None;
+        }
+        let index = self.directories.iter().position(Option::is_none)?;
+        self.directories[index] = Some(Directory {
+            parent,
+            name: Name::new(name)?,
+        });
+        Some(0)
+    }
+
     pub(crate) fn unlink(&mut self, path: &[u8]) -> Option<usize> {
-        let name = path.strip_prefix(b"/").unwrap_or(path);
-        let index = self.find_writable(name)?;
+        if path.ends_with(b"/") {
+            return None;
+        }
+        let ResolvedPath::Entry(parent, name) = self.resolve_path(path)? else {
+            return None;
+        };
+        let Node::WritableFile(index) = self.lookup(parent, name)? else {
+            return None;
+        };
         let slot = &mut self.writable[index];
         let file = slot.as_mut()?;
         if file.open_handles == 0 {
@@ -112,11 +174,57 @@ impl RamFs {
         Some(0)
     }
 
-    fn find_writable(&self, name: &[u8]) -> Option<usize> {
-        self.writable.iter().position(|slot| {
+    fn resolve_path<'a>(&self, path: &'a [u8]) -> Option<ResolvedPath<'a>> {
+        if path.is_empty() {
+            return None;
+        }
+        let mut components = path
+            .split(|&byte| byte == b'/')
+            .filter(|part| !part.is_empty())
+            .peekable();
+        let mut directory = DirectoryId::Root;
+        while let Some(component) = components.next() {
+            match component {
+                b"." => {}
+                b".." => {
+                    if let DirectoryId::Child(index) = directory {
+                        directory = self.directories[index].as_ref()?.parent;
+                    }
+                }
+                name if components.peek().is_none() => {
+                    return Some(ResolvedPath::Entry(directory, name));
+                }
+                name => {
+                    let Node::Directory(next) = self.lookup(directory, name)? else {
+                        return None;
+                    };
+                    directory = next;
+                }
+            }
+        }
+        Some(ResolvedPath::Directory(directory))
+    }
+
+    fn lookup(&self, parent: DirectoryId, name: &[u8]) -> Option<Node> {
+        if parent == DirectoryId::Root {
+            if let Some(index) = BOOT_FILES.iter().position(|file| file.name == name) {
+                return Some(Node::BootFile(index));
+            }
+        }
+        if let Some(index) = self.directories.iter().position(|slot| {
             slot.as_ref()
-                .is_some_and(|file| file.linked && file.name() == name)
-        })
+                .is_some_and(|dir| dir.parent == parent && dir.name.as_bytes() == name)
+        }) {
+            return Some(Node::Directory(DirectoryId::Child(index)));
+        }
+        self.writable
+            .iter()
+            .position(|slot| {
+                slot.as_ref().is_some_and(|file| {
+                    file.linked && file.parent == parent && file.name.as_bytes() == name
+                })
+            })
+            .map(Node::WritableFile)
     }
 
     fn release(&mut self, node: Node) {
@@ -134,7 +242,7 @@ impl RamFs {
 
     fn contents(&self, node: Node) -> Option<&[u8]> {
         match node {
-            Node::Root => None,
+            Node::Directory(_) => None,
             Node::BootFile(index) => Some(BOOT_FILES[index].contents),
             Node::WritableFile(index) => {
                 let file = self.writable[index].as_ref()?;
@@ -143,19 +251,27 @@ impl RamFs {
         }
     }
 
-    fn next_entry(&self, index: usize) -> Option<(usize, &[u8])> {
-        if let Some(file) = BOOT_FILES.get(index) {
-            return Some((index + 1, file.name));
-        }
-        // Use slot indices so unlinking an earlier entry cannot shift the cursor.
-        self.writable
+    fn next_entry(&self, parent: DirectoryId, cursor: usize) -> Option<(usize, &[u8])> {
+        let boot_names = BOOT_FILES
             .iter()
+            .map(|file| (parent == DirectoryId::Root).then_some(file.name));
+        let file_names = self.writable.iter().map(|slot| {
+            let file = slot
+                .as_ref()
+                .filter(|file| file.linked && file.parent == parent)?;
+            Some(file.name.as_bytes())
+        });
+        let directory_names = self.directories.iter().map(|slot| {
+            let dir = slot.as_ref().filter(|dir| dir.parent == parent)?;
+            Some(dir.name.as_bytes())
+        });
+        // Keep cursor positions tied to slots across file removal.
+        boot_names
+            .chain(file_names)
+            .chain(directory_names)
             .enumerate()
-            .skip(index - BOOT_FILES.len())
-            .find_map(|(slot_index, slot)| {
-                let file = slot.as_ref().filter(|file| file.linked)?;
-                Some((BOOT_FILES.len() + slot_index + 1, file.name()))
-            })
+            .skip(cursor)
+            .find_map(|(index, name)| name.map(|name| (index + 1, name)))
     }
 }
 
@@ -236,10 +352,12 @@ impl FileHandles {
         deliver: impl FnOnce(&[u8]) -> bool,
     ) -> Option<usize> {
         let handle = self.slots.get_mut(fd)?.as_mut()?;
-        if !matches!(handle.node, Node::Root) {
+        let Node::Directory(directory) = handle.node else {
             return None;
-        }
-        let (next, name) = fs.next_entry(handle.cursor).unwrap_or((handle.cursor, &[]));
+        };
+        let (next, name) = fs
+            .next_entry(directory, handle.cursor)
+            .unwrap_or((handle.cursor, &[]));
         if !deliver(name) {
             return None;
         }
