@@ -41,6 +41,7 @@ pub const SYS_GOAL_CREATE: usize = 33;
 pub const SYS_GOAL_RUN: usize = 34;
 pub const SYS_GOAL_STATUS: usize = 35;
 pub const SYS_GOAL_CLOSE: usize = 36;
+pub const SYS_GOAL_CANCEL: usize = 37;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
@@ -105,6 +106,7 @@ pub const PROGRAM_ECHO: usize = 1;
 pub const NO_CHILD_HANDLE: usize = 0;
 pub const WAIT_EXITED: usize = 0;
 pub const WAIT_FAULTED: usize = 1;
+pub const WAIT_CANCELLED: usize = 2;
 
 /// Completion tags shared by `wait` and `event_wait`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -112,6 +114,7 @@ pub const WAIT_FAULTED: usize = 1;
 pub enum CompletionKind {
     Exited = WAIT_EXITED,
     Faulted = WAIT_FAULTED,
+    Cancelled = WAIT_CANCELLED,
 }
 
 impl CompletionKind {
@@ -119,7 +122,26 @@ impl CompletionKind {
         match value {
             WAIT_EXITED => Some(Self::Exited),
             WAIT_FAULTED => Some(Self::Faulted),
+            WAIT_CANCELLED => Some(Self::Cancelled),
             _ => None,
+        }
+    }
+}
+
+/// The result collected by `wait`. Cancellation carries no exit status or fault cause.
+#[derive(Clone, Copy)]
+pub enum TaskCompletion {
+    Exited(usize),
+    Faulted(usize),
+    Cancelled,
+}
+
+impl TaskCompletion {
+    pub const fn kind_and_value(self) -> (CompletionKind, usize) {
+        match self {
+            Self::Exited(status) => (CompletionKind::Exited, status),
+            Self::Faulted(cause) => (CompletionKind::Faulted, cause),
+            Self::Cancelled => (CompletionKind::Cancelled, 0),
         }
     }
 }

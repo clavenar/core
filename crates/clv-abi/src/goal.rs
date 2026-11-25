@@ -5,6 +5,7 @@ const RUNNING: usize = 1;
 const COMPLETED: usize = 2;
 const FAILED_EXIT: usize = 3;
 const FAILED_FAULT: usize = 4;
+const CANCELLED: usize = 5;
 
 /// A non-consuming snapshot of one goal and its original child launch.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -16,10 +17,14 @@ pub enum GoalStatus {
     Completed {
         child: usize,
     },
+    /// The kernel reports a nonzero exit status or a fault cause here.
     Failed {
         child: usize,
         kind: CompletionKind,
         value: usize,
+    },
+    Cancelled {
+        child: Option<usize>,
     },
 }
 
@@ -30,13 +35,23 @@ impl GoalStatus {
             Self::Ready => (READY, NO_CHILD_HANDLE, 0),
             Self::Running { child } => (RUNNING, child, 0),
             Self::Completed { child } => (COMPLETED, child, 0),
-            Self::Failed { child, kind, value } => {
-                let tag = match kind {
-                    CompletionKind::Exited => FAILED_EXIT,
-                    CompletionKind::Faulted => FAILED_FAULT,
-                };
-                (tag, child, value)
-            }
+            Self::Failed {
+                child,
+                kind: CompletionKind::Exited,
+                value,
+            } => (FAILED_EXIT, child, value),
+            Self::Failed {
+                child,
+                kind: CompletionKind::Faulted,
+                value,
+            } => (FAILED_FAULT, child, value),
+            Self::Cancelled { child: Some(child) }
+            | Self::Failed {
+                child,
+                kind: CompletionKind::Cancelled,
+                ..
+            } => (CANCELLED, child, 0),
+            Self::Cancelled { child: None } => (CANCELLED, NO_CHILD_HANDLE, 0),
         }
     }
 
@@ -55,6 +70,8 @@ impl GoalStatus {
                 kind: CompletionKind::Faulted,
                 value,
             },
+            CANCELLED if child == NO_CHILD_HANDLE => Self::Cancelled { child: None },
+            CANCELLED => Self::Cancelled { child: Some(child) },
             _ => return None,
         })
     }
@@ -64,4 +81,10 @@ impl GoalStatus {
 pub enum CloseResult {
     Closed = 0,
     Busy = 1,
+}
+
+#[repr(usize)]
+pub enum CancelResult {
+    Cancelled = 0,
+    AlreadyFinished = 1,
 }

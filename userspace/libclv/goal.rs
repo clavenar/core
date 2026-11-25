@@ -1,5 +1,5 @@
-pub use clv_abi::goal::{CloseResult, GoalStatus};
-use clv_abi::{SYS_GOAL_CLOSE, SYS_GOAL_CREATE, SYS_GOAL_RUN, SYS_GOAL_STATUS};
+pub use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
+use clv_abi::{SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE, SYS_GOAL_RUN, SYS_GOAL_STATUS};
 
 use super::{ecall, syscall, syscall_result};
 
@@ -21,6 +21,15 @@ pub fn close(goal: usize) -> Option<CloseResult> {
     match syscall(SYS_GOAL_CLOSE, goal, 0, 0) {
         n if n == CloseResult::Closed as usize => Some(CloseResult::Closed),
         n if n == CloseResult::Busy as usize => Some(CloseResult::Busy),
+        _ => None,
+    }
+}
+
+/// Cancels a ready goal or stops its running child before returning.
+pub fn cancel(goal: usize) -> Option<CancelResult> {
+    match syscall(SYS_GOAL_CANCEL, goal, 0, 0) {
+        n if n == CancelResult::Cancelled as usize => Some(CancelResult::Cancelled),
+        n if n == CancelResult::AlreadyFinished as usize => Some(CancelResult::AlreadyFinished),
         _ => None,
     }
 }

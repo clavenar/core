@@ -78,7 +78,7 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<u
               ask [--read] <hello|echo> <text>  askat [--echo] hello <dir> <payload>\r\n\
               askfile [--stream] hello <path>\r\n\
               recv <hello|echo>  wait <hello|echo>  event\r\n\
-              goal create  goal run <hello|echo>  goal status  goal close\r\n",
+              goal create  goal run <hello|echo>  goal status  goal cancel  goal close\r\n",
         ),
         b"pwd" if arguments.is_empty() => files::pwd(),
         b"cd" => files::cd(arguments),

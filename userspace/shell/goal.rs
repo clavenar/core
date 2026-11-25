@@ -1,4 +1,4 @@
-use clv::goal::{self, CloseResult, GoalStatus};
+use clv::goal::{self, CancelResult, CloseResult, GoalStatus};
 use clv::print;
 use clv_abi::CompletionKind;
 
@@ -19,6 +19,11 @@ pub(super) fn command(arguments: &[u8], current: &mut Option<usize>, children: &
             Some(status) => print_status(status),
             None => print(b"no current goal\r\n"),
         },
+        (b"cancel", b"") => match current.and_then(goal::cancel) {
+            Some(CancelResult::Cancelled) => print(b"goal cancelled\r\n"),
+            Some(CancelResult::AlreadyFinished) => print(b"goal already finished\r\n"),
+            None => print(b"no current goal\r\n"),
+        },
         (b"close", b"") => match current.and_then(goal::close) {
             Some(CloseResult::Closed) => {
                 *current = None;
@@ -27,7 +32,7 @@ pub(super) fn command(arguments: &[u8], current: &mut Option<usize>, children: &
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create | run <hello|echo> | status | close\r\n"),
+        _ => print(b"usage: goal create | run <hello|echo> | status | cancel | close\r\n"),
     }
 }
 
@@ -36,13 +41,25 @@ fn print_status(status: GoalStatus) {
         GoalStatus::Ready => return print(b"Ready\r\n"),
         GoalStatus::Running { child } => return print_handle(b"Running child=", child),
         GoalStatus::Completed { child } => (b"Completed child=", child, b" exit=", 0),
-        GoalStatus::Failed { child, kind, value } => {
-            let reason: &[u8] = match kind {
-                CompletionKind::Exited => b" exit=",
-                CompletionKind::Faulted => b" scause=",
-            };
-            (b"Failed child=", child, reason, value)
+        GoalStatus::Failed {
+            child,
+            kind: CompletionKind::Exited,
+            value,
+        } => (b"Failed child=", child, b" exit=", value),
+        GoalStatus::Failed {
+            child,
+            kind: CompletionKind::Faulted,
+            value,
+        } => (b"Failed child=", child, b" scause=", value),
+        GoalStatus::Cancelled { child: Some(child) }
+        | GoalStatus::Failed {
+            child,
+            kind: CompletionKind::Cancelled,
+            ..
+        } => {
+            return print_handle(b"Cancelled child=", child);
         }
+        GoalStatus::Cancelled { child: None } => return print(b"Cancelled\r\n"),
     };
     print_line(&[state, &hex(child), reason, &hex(value)]);
 }

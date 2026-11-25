@@ -1,3 +1,4 @@
+use clv_abi::TaskCompletion;
 use core::arch::{asm, global_asm};
 
 use super::{idle, timer};
@@ -5,7 +6,7 @@ use crate::console::{write_hex, write_task};
 use crate::drivers::uart;
 use crate::fs::ramfs::RamFs;
 use crate::memory::usercopy::SSTATUS_SUM;
-use crate::scheduler::{Scheduler, TaskCompletion};
+use crate::scheduler::Scheduler;
 use crate::syscall;
 
 global_asm!(
@@ -111,7 +112,13 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         write_task(current);
         uart::write(b" fault");
         write_trap_registers(scause, frame.sepc, stval);
-        finish_task(scheduler, fs, frame, TaskCompletion::Faulted(scause));
+        finish_task(
+            scheduler,
+            fs,
+            frame,
+            TaskCompletion::Faulted(scause),
+            SwitchReason::Fault,
+        );
         return;
     }
 
@@ -124,7 +131,13 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
                 write_hex(status);
                 uart::write(b"\r\n");
             }
-            finish_task(scheduler, fs, frame, TaskCompletion::Exited(status));
+            finish_task(
+                scheduler,
+                fs,
+                frame,
+                TaskCompletion::Exited(status),
+                SwitchReason::Exit,
+            );
         }
         syscall::Outcome::Wait => {
             switch_task(scheduler, current, SwitchReason::Wait);
@@ -138,16 +151,13 @@ fn finish_task(
     fs: &mut RamFs,
     frame: &mut TrapFrame,
     completion: TaskCompletion,
+    reason: SwitchReason,
 ) {
     let previous = scheduler.current_id();
     if !scheduler.stop_current(fs, frame, completion) {
         uart::write(b"all tasks exited\r\n");
         idle();
     }
-    let reason = match completion {
-        TaskCompletion::Exited(_) => SwitchReason::Exit,
-        TaskCompletion::Faulted(_) => SwitchReason::Fault,
-    };
     switch_task(scheduler, previous, reason);
     arm_timer();
 }

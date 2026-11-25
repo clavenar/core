@@ -1,6 +1,8 @@
-use clv_abi::goal::{CloseResult, GoalStatus};
+use clv_abi::TaskCompletion;
+use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
 
-use super::{SHELL_TASK_INDEX, Scheduler, TaskCompletion};
+use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
+use crate::fs::ramfs::RamFs;
 
 pub(super) struct Goal {
     handle: usize,
@@ -22,6 +24,7 @@ impl Goal {
         }
         self.status = match completion {
             TaskCompletion::Exited(0) => GoalStatus::Completed { child },
+            TaskCompletion::Cancelled => GoalStatus::Cancelled { child: Some(child) },
             _ => {
                 let (kind, value) = completion.kind_and_value();
                 GoalStatus::Failed { child, kind, value }
@@ -64,5 +67,23 @@ impl Scheduler {
         }
         self.goal = None;
         Some(CloseResult::Closed)
+    }
+
+    pub(crate) fn cancel_goal(&mut self, handle: usize, fs: &mut RamFs) -> Option<CancelResult> {
+        match self.goal_status(handle)? {
+            GoalStatus::Ready => self.goal.as_mut()?.status = GoalStatus::Cancelled { child: None },
+            GoalStatus::Running { child } => {
+                let index = self.launch_index(child)?;
+                if self.tasks[index].state == TaskState::Stopped {
+                    return None;
+                }
+                self.stop_task(index, fs, TaskCompletion::Cancelled);
+            }
+            GoalStatus::Cancelled { .. } => {}
+            GoalStatus::Completed { .. } | GoalStatus::Failed { .. } => {
+                return Some(CancelResult::AlreadyFinished);
+            }
+        }
+        Some(CancelResult::Cancelled)
     }
 }

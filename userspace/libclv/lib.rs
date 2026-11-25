@@ -159,20 +159,18 @@ pub fn spawn_request(
     })
 }
 
-pub enum ChildStatus {
-    Exited(usize),
-    Faulted(usize),
-}
+pub use clv_abi::TaskCompletion as ChildStatus;
 
 pub fn wait(handle: usize) -> Option<ChildStatus> {
     let (tag, value, _) = ecall(SYS_WAIT, handle, 0, 0, 0, 0);
     Some(match CompletionKind::from_raw(tag)? {
         CompletionKind::Exited => ChildStatus::Exited(value),
         CompletionKind::Faulted => ChildStatus::Faulted(value),
+        CompletionKind::Cancelled => ChildStatus::Cancelled,
     })
 }
 
-/// Takes the oldest child notification. The exit status or fault cause is available through `wait`.
+/// Takes the oldest child notification. Its full result is available through `wait`.
 pub fn event_wait() -> Option<ChildEvent> {
     let (handle, tag, _) = ecall(SYS_EVENT_WAIT, 0, 0, 0, 0, 0);
     match handle {

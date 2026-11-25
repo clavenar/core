@@ -156,11 +156,12 @@ impl Children {
         let Some(child) = self.programs.iter().find(|child| child.handle == handle) else {
             return print(b"unknown child handle\r\n");
         };
-        print(child.name);
-        print(match kind {
-            CompletionKind::Exited => b" exited\r\n",
-            CompletionKind::Faulted => b" faulted\r\n",
-        });
+        let status: &[u8] = match kind {
+            CompletionKind::Exited => b" exited",
+            CompletionKind::Faulted => b" faulted",
+            CompletionKind::Cancelled => b" cancelled",
+        };
+        print_line(&[child.name, status]);
     }
 
     pub(super) fn wait(&mut self, name: &[u8]) {
@@ -170,6 +171,7 @@ impl Children {
         let (status, value): (&[u8], usize) = match clv::wait(child.handle) {
             Some(ChildStatus::Exited(code)) => (b" exited ", code),
             Some(ChildStatus::Faulted(cause)) => (b" fault scause=", cause),
+            Some(ChildStatus::Cancelled) => return print_line(&[child.name, b" cancelled"]),
             None => return print(b"no pending launch\r\n"),
         };
         print_line(&[child.name, status, &hex(value)]);

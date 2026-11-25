@@ -4,6 +4,7 @@ mod pipe;
 use self::goal::Goal;
 use clv_abi::{
     ChildEvent, CompletionKind, GrantKind, PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
+    TaskCompletion,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -39,21 +40,6 @@ impl TaskState {
         self == Self::WaitingForChild(handle)
             || self == Self::WaitingForMessage(handle)
             || self == Self::WaitingForEvent
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum TaskCompletion {
-    Exited(usize),
-    Faulted(usize),
-}
-
-impl TaskCompletion {
-    pub(crate) fn kind_and_value(self) -> (CompletionKind, usize) {
-        match self {
-            Self::Exited(status) => (CompletionKind::Exited, status),
-            Self::Faulted(cause) => (CompletionKind::Faulted, cause),
-        }
     }
 }
 
@@ -396,8 +382,13 @@ impl Scheduler {
         frame: &mut TrapFrame,
         completion: TaskCompletion,
     ) -> bool {
+        self.stop_task(self.current, fs, completion);
+        self.switch(frame)
+    }
+
+    fn stop_task(&mut self, index: usize, fs: &mut RamFs, completion: TaskCompletion) {
         let shell_live = self.tasks[SHELL_TASK_INDEX].state != TaskState::Stopped;
-        let task = &mut self.tasks[self.current];
+        let task = &mut self.tasks[index];
         task.state = TaskState::Stopped;
         task.fs.close_all(fs);
         if let Some(launch) = &mut task.launch {
@@ -424,7 +415,7 @@ impl Scheduler {
             {
                 shell.state = TaskState::Runnable;
             }
-        } else if self.current == SHELL_TASK_INDEX {
+        } else if index == SHELL_TASK_INDEX {
             for task in &mut self.tasks {
                 if let Some(launch) = &mut task.launch {
                     launch.reply = None;
@@ -436,17 +427,23 @@ impl Scheduler {
         if self.tasks[SHELL_TASK_INDEX].state == TaskState::Stopped {
             self.goal.take_if(|goal| !goal.is_running());
         }
-        self.switch(frame)
+    }
+
+    fn launch_index(&self, handle: usize) -> Option<usize> {
+        self.tasks.iter().position(|task| {
+            task.launch
+                .as_ref()
+                .is_some_and(|launch| launch.handle == handle)
+        })
     }
 
     fn launch_for_shell(&mut self, handle: usize) -> Option<(&mut ChildLaunch, &mut TaskState)> {
         if self.current != SHELL_TASK_INDEX {
             return None;
         }
-        self.tasks.iter_mut().find_map(|task| {
-            let launch = task.launch.as_mut()?;
-            (launch.handle == handle).then_some((launch, &mut task.state))
-        })
+        let index = self.launch_index(handle)?;
+        let task = &mut self.tasks[index];
+        Some((task.launch.as_mut()?, &mut task.state))
     }
 
     fn block_current(&mut self, frame: &mut TrapFrame, state: TaskState) -> bool {
