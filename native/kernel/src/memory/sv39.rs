@@ -27,18 +27,18 @@ unsafe extern "C" {
     static __kernel_end: u8;
 }
 
-pub(crate) struct BootMappings {
+pub(crate) struct BootMappings<const PROGRAMS: usize> {
     text: usize,
     uart: usize,
-    user_code: [[Option<usize>; USER_IMAGE_PAGES]; 2],
+    user_code: [[Option<usize>; USER_IMAGE_PAGES]; PROGRAMS],
     kernel_middle: usize,
     uart_leaves: usize,
 }
 
-impl BootMappings {
+impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
     pub(crate) fn new(
         frames: &mut FrameAllocator<'_>,
-        user_code: [[Option<&Frame>; USER_IMAGE_PAGES]; 2],
+        user_code: [[Option<&Frame>; USER_IMAGE_PAGES]; PROGRAMS],
         uart: usize,
     ) -> Option<Self> {
         let kernel_middle = frames.allocate_zeroed()?;
@@ -134,7 +134,7 @@ impl AddressSpace {
     pub(crate) fn activate(self) -> bool {
         let satp = SATP_SV39 | (self.root >> PAGE_SHIFT);
         let active: usize;
-        // SAFETY: Both address spaces keep the same supervisor mappings and
+        // SAFETY: All address spaces keep the same supervisor mappings and
         // their tables stay reserved. ASID zero is reused after a full fence.
         unsafe {
             asm!(

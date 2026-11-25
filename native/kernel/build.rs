@@ -13,7 +13,7 @@ fn main() {
     let userspace = root.join("userspace");
     let linker_script = userspace.join("user.ld");
     println!("cargo:rerun-if-changed={}", linker_script.display());
-    for name in ["hello", "shell"] {
+    for name in ["hello", "shell", "echo"] {
         let program = userspace.join(name);
         println!("cargo:rerun-if-changed={}", program.display());
         build_program(

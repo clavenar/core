@@ -2,7 +2,8 @@ use core::ptr;
 use core::slice::IterMut;
 
 pub(crate) const FRAME_SIZE: usize = 4096;
-const FRAME_COUNT: usize = 16;
+// Three shared mapping frames and up to six frames for each of three tasks.
+const FRAME_COUNT: usize = 21;
 const WORDS_PER_FRAME: usize = FRAME_SIZE / size_of::<u64>();
 
 #[repr(C, align(4096))]

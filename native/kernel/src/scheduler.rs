@@ -1,17 +1,19 @@
-use clv_abi::{MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, SYSCALL_ERROR};
+use clv_abi::{MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PROGRAM_ECHO, PROGRAM_HELLO};
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::memory::sv39::{AddressSpace, USER_STACK_TOP};
 
+pub(crate) const TASK_COUNT: usize = 3;
 const HELLO_TASK_INDEX: usize = 0;
 const SHELL_TASK_INDEX: usize = 1;
+const ECHO_TASK_INDEX: usize = 2;
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TaskState {
     Runnable,
-    WaitingForHello,
-    WaitingForMessage,
+    WaitingForChild(usize),
+    WaitingForMessage(usize),
     Stopped,
 }
 
@@ -21,7 +23,7 @@ pub(crate) enum TaskCompletion {
     Faulted(usize),
 }
 
-struct HelloLaunch {
+struct ChildLaunch {
     handle: usize,
     request: Option<Message>,
     reply: Option<Message>,
@@ -69,36 +71,44 @@ impl Message {
 }
 
 struct Task {
+    entry: usize,
     frame: TrapFrame,
     address_space: AddressSpace,
     fs: TaskFs,
     state: TaskState,
     timer_fired: bool,
+    launch: Option<ChildLaunch>,
 }
 
 pub(crate) struct Scheduler {
-    tasks: [Task; 2],
-    hello_start: TrapFrame,
-    hello_launch: Option<HelloLaunch>,
+    tasks: [Task; TASK_COUNT],
+    initial_status: usize,
+    next_child_handle: usize,
     current: usize,
 }
 
 impl Scheduler {
-    pub(crate) fn new(programs: [(AddressSpace, usize); 2], sstatus: usize) -> Self {
+    pub(crate) fn new(programs: [(AddressSpace, usize); TASK_COUNT], sstatus: usize) -> Self {
         let tasks = core::array::from_fn(|index| {
             let (address_space, entry) = programs[index];
             Task {
+                entry,
                 frame: TrapFrame::new_user(entry, USER_STACK_TOP, index + 1, sstatus),
                 address_space,
                 fs: TaskFs::new(),
-                state: TaskState::Runnable,
+                state: if index == ECHO_TASK_INDEX {
+                    TaskState::Stopped
+                } else {
+                    TaskState::Runnable
+                },
                 timer_fired: false,
+                launch: None,
             }
         });
         Self {
-            hello_start: tasks[HELLO_TASK_INDEX].frame,
-            hello_launch: None,
             tasks,
+            initial_status: sstatus,
+            next_child_handle: 1,
             current: HELLO_TASK_INDEX,
         }
     }
@@ -132,26 +142,24 @@ impl Scheduler {
         fs.rmdir(&self.tasks[self.current].fs, path, live_task_fs)
     }
 
-    pub(crate) fn spawn_hello(
+    pub(crate) fn spawn(
         &mut self,
         fs: &mut RamFs,
+        program: usize,
         directory_fd: Option<usize>,
         request: Option<Message>,
     ) -> Option<usize> {
-        if self.current != SHELL_TASK_INDEX
-            || self.tasks[HELLO_TASK_INDEX].state != TaskState::Stopped
-        {
+        let index = match program {
+            PROGRAM_HELLO => HELLO_TASK_INDEX,
+            PROGRAM_ECHO => ECHO_TASK_INDEX,
+            _ => return None,
+        };
+        if self.current != SHELL_TASK_INDEX || self.tasks[index].state != TaskState::Stopped {
             return None;
         }
-        // Keep the previous handle after the shell has collected its status and
-        // reply so this slot never reuses a launch handle during the same boot.
-        let previous = self
-            .hello_launch
-            .as_ref()
-            .map_or(NO_CHILD_HANDLE, |launch| launch.handle);
-        let handle = previous
-            .checked_add(1)
-            .filter(|&handle| handle != SYSCALL_ERROR)?;
+        // The maximum value is reserved for syscall errors.
+        let handle = self.next_child_handle;
+        let next_handle = handle.checked_add(1)?;
         let (task_fs, grant) = match directory_fd {
             Some(fd) => {
                 let (task_fs, child_fd) = self.tasks[self.current].fs.grant_directory(fs, fd)?;
@@ -160,35 +168,37 @@ impl Scheduler {
             None => (TaskFs::new(), None),
         };
 
-        let task = &mut self.tasks[HELLO_TASK_INDEX];
+        let task = &mut self.tasks[index];
         // SAFETY: This slot is stopped and its private stack frame is mapped
         // writable in the shared supervisor identity map.
         unsafe { task.address_space.clear_user_stack() };
-        task.frame = self.hello_start;
+        task.frame =
+            TrapFrame::new_user(task.entry, USER_STACK_TOP, index + 1, self.initial_status);
         if let Some(fd) = grant {
             task.frame.set_startup_args(fd, 1);
         }
         task.fs = task_fs;
         task.timer_fired = false;
-        self.hello_launch = Some(HelloLaunch {
+        task.launch = Some(ChildLaunch {
             handle,
             request,
             reply: None,
             completion: None,
         });
         task.state = TaskState::Runnable;
+        self.next_child_handle = next_handle;
         Some(handle)
     }
 
-    pub(crate) fn wait_hello(&mut self, handle: usize, frame: &mut TrapFrame) -> WaitResult {
-        let Some(launch) = self.hello_for_shell(handle) else {
+    pub(crate) fn wait_child(&mut self, handle: usize, frame: &mut TrapFrame) -> WaitResult {
+        let Some((launch, state)) = self.launch_for_shell(handle) else {
             return WaitResult::NoLaunch;
         };
         if let Some(completion) = launch.completion.take() {
             return WaitResult::Completed(completion);
         }
-        if self.tasks[HELLO_TASK_INDEX].state == TaskState::Runnable
-            && self.block_shell(frame, TaskState::WaitingForHello)
+        if state == TaskState::Runnable
+            && self.block_shell(frame, TaskState::WaitingForChild(handle))
         {
             WaitResult::Blocked
         } else {
@@ -201,20 +211,19 @@ impl Scheduler {
         length: usize,
         copy: impl FnOnce(&mut [u8]) -> bool,
     ) -> Option<usize> {
-        if self.current != HELLO_TASK_INDEX
-            || self.tasks[SHELL_TASK_INDEX].state == TaskState::Stopped
-        {
+        if self.tasks[SHELL_TASK_INDEX].state == TaskState::Stopped {
             return None;
         }
 
         let sender = self.current_id();
-        let launch = self.hello_launch.as_mut()?;
+        let launch = self.tasks[self.current].launch.as_mut()?;
         if launch.reply.is_some() {
             return None;
         }
         launch.reply = Some(Message::new(sender, length, copy)?);
+        let handle = launch.handle;
         let shell = &mut self.tasks[SHELL_TASK_INDEX];
-        if shell.state == TaskState::WaitingForMessage {
+        if shell.state == TaskState::WaitingForMessage(handle) {
             shell.state = TaskState::Runnable;
         }
         Some(length)
@@ -226,14 +235,17 @@ impl Scheduler {
         frame: &mut TrapFrame,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> ReceiveResult {
-        let pending = match self.current {
-            SHELL_TASK_INDEX => self.hello_for_shell(handle).map(|launch| &mut launch.reply),
-            HELLO_TASK_INDEX if handle == NO_CHILD_HANDLE => {
-                self.hello_launch.as_mut().map(|launch| &mut launch.request)
-            }
+        let mailbox = match self.current {
+            SHELL_TASK_INDEX => self
+                .launch_for_shell(handle)
+                .map(|(launch, state)| (&mut launch.reply, state == TaskState::Runnable)),
+            index if handle == NO_CHILD_HANDLE => self.tasks[index]
+                .launch
+                .as_mut()
+                .map(|launch| (&mut launch.request, false)),
             _ => None,
         };
-        let Some(pending) = pending else {
+        let Some((pending, child_running)) = mailbox else {
             return ReceiveResult::Error;
         };
         if let Some(message) = pending.as_ref() {
@@ -247,10 +259,7 @@ impl Scheduler {
             *pending = None;
             return result;
         }
-        if self.current == SHELL_TASK_INDEX
-            && self.tasks[HELLO_TASK_INDEX].state == TaskState::Runnable
-            && self.block_shell(frame, TaskState::WaitingForMessage)
-        {
+        if child_running && self.block_shell(frame, TaskState::WaitingForMessage(handle)) {
             ReceiveResult::Blocked
         } else {
             ReceiveResult::Empty
@@ -273,31 +282,36 @@ impl Scheduler {
         let task = &mut self.tasks[self.current];
         task.state = TaskState::Stopped;
         task.fs.close_all(fs);
-        if let Some(launch) = &mut self.hello_launch {
-            if self.current == HELLO_TASK_INDEX {
-                launch.request = None;
-                launch.completion = Some(completion);
-                let shell = &mut self.tasks[SHELL_TASK_INDEX];
-                if matches!(
-                    shell.state,
-                    TaskState::WaitingForHello | TaskState::WaitingForMessage
-                ) {
-                    shell.state = TaskState::Runnable;
-                }
-            } else {
+        if let Some(launch) = &mut task.launch {
+            launch.request = None;
+            launch.completion = Some(completion);
+            let handle = launch.handle;
+            let shell = &mut self.tasks[SHELL_TASK_INDEX];
+            if shell.state == TaskState::WaitingForChild(handle)
+                || shell.state == TaskState::WaitingForMessage(handle)
+            {
+                shell.state = TaskState::Runnable;
+            }
+        } else if self.current == SHELL_TASK_INDEX {
+            for launch in self
+                .tasks
+                .iter_mut()
+                .filter_map(|task| task.launch.as_mut())
+            {
                 launch.reply = None;
             }
         }
         self.switch(frame)
     }
 
-    fn hello_for_shell(&mut self, handle: usize) -> Option<&mut HelloLaunch> {
+    fn launch_for_shell(&mut self, handle: usize) -> Option<(&mut ChildLaunch, TaskState)> {
         if self.current != SHELL_TASK_INDEX {
             return None;
         }
-        self.hello_launch
-            .as_mut()
-            .filter(|launch| launch.handle == handle)
+        self.tasks.iter_mut().find_map(|task| {
+            let launch = task.launch.as_mut()?;
+            (launch.handle == handle).then_some((launch, task.state))
+        })
     }
 
     fn block_shell(&mut self, frame: &mut TrapFrame, state: TaskState) -> bool {
@@ -311,10 +325,12 @@ impl Scheduler {
     }
 
     fn switch(&mut self, frame: &mut TrapFrame) -> bool {
-        let next = 1 - self.current;
-        if self.tasks[next].state != TaskState::Runnable {
+        let Some(next) = (1..TASK_COUNT)
+            .map(|offset| (self.current + offset) % TASK_COUNT)
+            .find(|&index| self.tasks[index].state == TaskState::Runnable)
+        else {
             return false;
-        }
+        };
 
         self.current = next;
         *frame = self.tasks[next].frame;

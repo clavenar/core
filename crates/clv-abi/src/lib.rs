@@ -30,6 +30,7 @@ pub const MESSAGE_MAX_BYTES: usize = 64;
 pub const FILE_REPLY_OK: u8 = 0;
 pub const FILE_REPLY_ERROR: u8 = 1;
 pub const PROGRAM_HELLO: usize = 0;
+pub const PROGRAM_ECHO: usize = 1;
 /// A child passes this value in a2 to receive its launch request.
 pub const NO_CHILD_HANDLE: usize = 0;
 pub const WAIT_EXITED: usize = 0;

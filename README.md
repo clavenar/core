@@ -6,7 +6,7 @@ targets RV64 on QEMU `virt`.
 
 - `native/kernel/` and `native/linker/` hold kernel source and linker scripts.
 - `crates/` holds shared Rust types and ABI definitions. [`clv-abi`](crates/clv-abi/)
-  defines the syscall numbers used by the kernel and both user programs.
+  defines the syscall numbers used by the kernel and user programs.
 - `userspace/` holds native programs and libraries.
 - `platforms/qemu-riscv64-virt/` holds the reference platform definition.
 - `tests/` holds cross-component tests and fixtures.
@@ -40,29 +40,32 @@ After the OpenSBI banner, the kernel prints `Clavenar kernel booted` with the
 version from `native/kernel/Cargo.toml`. It prints `boot frame=0x...` with the
 physical address of task 1's Sv39 root table.
 
-The build links [hello](userspace/hello/) and [the shell](userspace/shell/) as
-separate RV64 ELFs and embeds both in the kernel. The loader accepts static,
-little-endian ELF64 executables with one read/execute segment of at most
-8 KiB at `0x00400000`. The segment's memory size determines whether it uses
-one or two pages. Boot reports each program's validated entry address.
+The build links [hello](userspace/hello/), [the shell](userspace/shell/), and
+[echo](userspace/echo/) as separate RV64 ELFs and embeds them in the kernel.
+The loader accepts static, little-endian ELF64 executables with one
+read/execute segment of at most 8 KiB at `0x00400000`. The segment's memory
+size determines whether it uses one or two pages. Boot reports each program's
+validated entry address.
 If loading fails, it prints `User ELF load failed` with the program name and
 idles.
 
 The kernel activates paging, prints `Sv39 paging enabled`, and starts hello
-as task 1 and the shell as task 2. Each receives its task ID in `a0` and runs
-with its own Sv39 root and read/execute image. Each task has a 4 KiB read/write,
-non-executable stack at `0x00402000`. The kernel and UART mappings are shared
-in supervisor mode. The kernel, supervisor stack, and 16-frame boot pool fit
-within one aligned 2 MiB physical region.
+as task 1 and the shell as task 2. Task 3 starts when the shell launches
+`echo`. Each receives its task ID in `a0` and runs with its own Sv39 root
+and read/execute image. Each task has a 4 KiB read/write, non-executable stack
+at `0x00402000`. The kernel and UART mappings are shared in supervisor mode.
+The kernel, supervisor stack, and 21-frame boot pool fit within one aligned
+2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
 starts a fresh quantum when the timer fires or a stopped task is replaced.
 
-At the shell prompt, `run hello` starts the embedded `hello` program in its
-boot task slot with an empty handle table and working directory `/`. The shell
-stays interactive while the program runs. Every launch starts with a cleared
-stack and fresh registers and timer state. Exit or fault frees the slot.
+At the shell prompt, `run hello` and `run echo` start the selected program
+in its own task slot with an empty handle table and working directory `/`.
+The shell stays interactive while either child runs. Every launch starts
+with a cleared stack and fresh registers and timer state. Exit or fault
+frees the slot.
 
 `run hello <directory>` grants the child a read-only directory handle. The
 child starts with that single handle and resolves paths through `open_at`.
@@ -78,13 +81,21 @@ recv hello
 wait hello
 ```
 
-A child started by `run hello` sends `hello ready` to the shell's mailbox.
-`recv hello` prints the message, waiting if the mailbox is empty and the
-child is still running. A queued reply remains available after exit or fault.
+`run hello` sends `hello ready` to the shell, and `run echo` sends
+`echo ready`. The shell can collect each reply and status independently.
+
+```text
+run hello
+run echo
+recv echo
+wait echo
+recv hello
+wait hello
+```
 
 `ask hello hello from shell` launches `hello` with a request and prints the
-echoed reply `hello from shell`. The request is available to the child when
-it starts.
+echoed reply `hello from shell`. `ask echo hello from shell` sends the same
+request to `echo`. The request is available to the child when it starts.
 
 `askat hello /notes todo.txt` grants access to `/notes` and asks `hello` to
 read `todo.txt` through that directory handle. The shell prints the first
@@ -97,12 +108,13 @@ askat hello /notes todo.txt
 wait hello
 ```
 
-The shell records the handle returned by its latest successful launch for
-`wait hello` and `recv hello`. `wait hello` collects the exit status or fault
-cause once, waiting if the child is still running. The shell can collect
-the status and queued reply in either order. A successful launch invalidates
-the previous handle and discards its uncollected results. A failed launch
-preserves the previous handle and its results.
+The shell records the latest successful launch handle for each program.
+`wait hello` and `wait echo` collect the selected child's exit status or
+fault cause once, waiting if the child is still running. `recv hello` and
+`recv echo` wait for the selected child's reply or completion. A queued
+reply remains available after exit or fault. Relaunching a program
+invalidates its previous handle and discards the results for that handle.
+A failed launch preserves the previous handle and its results.
 
 The user program passes the call number in `a7` and executes `ecall`. Call 0
 prints `task N user probe` and returns 42 in `a0`. Call 3 returns 1 in `a0` once
@@ -180,11 +192,12 @@ open directory handle keeps that directory in use. Attempts to remove `/` or
 a path ending in `.` or `..` return -1.
 
 Call 1 takes an exit status in `a0` and removes the calling task from the
-schedule. In a successful run, both tasks report
-`user exit status=0x0000000000000000`, then the kernel prints `all tasks exited`
-and idles. Unknown call numbers return -1 in `a0`.
+schedule. A task that exits successfully reports
+`user exit status=0x0000000000000000`. When the last task stops, the kernel
+prints `all tasks exited` and idles. Unknown call numbers return -1 in `a0`.
 
-Call 15 (`spawn`) takes a program selector in `a0`. Selector 0 chooses `hello`.
+Call 15 (`spawn`) takes a program selector in `a0`. Selector 0 chooses
+`hello` and selector 1 chooses `echo`.
 It returns a fresh, nonzero child handle in `a0` when the task is ready to run
 and -1 if the selector is unknown or the task is already running. All four
 spawn calls use the same child handle sequence for the current boot. Child
@@ -195,39 +208,39 @@ the result type and `a1` contains the full exit status or fault cause. Result
 type 0 means exit and 1 means fault. The call returns -1 in `a0` for an
 invalid handle, a caller other than the shell, or an already collected status.
 
-Call 18 (`spawn_at`) takes program selector 0 in `a0` and a directory handle
+Call 18 (`spawn_at`) takes a program selector in `a0` and a directory handle
 from the caller in `a1`. It returns a child handle on success and -1 on error.
 The child receives its own directory handle in `a1` and a grant flag of 1 in
 `a2`. Ordinary launches start with `a2` set to 0.
 
 Call 19 (`message_send`) takes a user stack address in `a0` and a length from
-1 to 64 bytes in `a1`. A shell-launched `hello` can queue one message for its
+1 to 64 bytes in `a1`. A shell-launched child can queue one message for its
 live parent. The call returns the byte count on success and -1 on error. A
 send to a full mailbox preserves its queued message.
 
 Call 20 (`message_recv`) takes a user stack destination in `a0` and its nonzero
-capacity in `a1`. The shell passes its child handle in `a2` to receive a reply.
-A launched `hello` passes 0 in `a2` to receive its request. The result gives
+capacity in `a1`. The shell passes a child handle in `a2` to receive a reply.
+A launched child passes 0 in `a2` to receive its request. The result gives
 the byte count in `a0` and the sender's task ID in `a1`. An empty reply mailbox
-blocks while the child runs. Other empty reads return 0 in both registers. An
-invalid handle or an invalid or undersized buffer returns -1 and preserves any
-queued message.
+blocks while the selected child runs. Other empty reads return 0 in both
+registers. An invalid handle or an invalid or undersized buffer returns -1
+and preserves any queued message.
 
-Call 21 (`spawn_with_message`) takes program selector 0 in `a0`, a user stack
+Call 21 (`spawn_with_message`) takes a program selector in `a0`, a user stack
 address in `a1`, and a length from 1 to 64 bytes in `a2`. It copies the request
 before making the child runnable and returns a child handle on success or
 -1 on error.
 The child consumes the request with `message_recv`. Exit or fault discards
 any unread request.
 
-Call 22 (`spawn_at_with_message`) takes program selector 0 in `a0`, a
-directory handle in `a1`, a user stack path address in `a2`, and a path length
+Call 22 (`spawn_at_with_message`) takes a program selector in `a0`, a
+directory handle in `a1`, a user stack request address in `a2`, and a length
 from 1 to 64 bytes in `a3`. It validates the grant and copies the request
 before scheduling the child. It returns a child handle on success or -1 on
 error.
 
-For this launch, `hello` resolves the requested path with `open_at`. A reply
-with status byte 0 carries zero to 63 file bytes. Status byte 1 reports a
+When launched this way, `hello` resolves the requested path with `open_at`.
+A reply with status byte 0 carries zero to 63 file bytes. Status byte 1 reports a
 failed read and carries just that byte. The child exits with status 0 after
 sending a successful reply and status 1 on failure.
 
@@ -245,5 +258,6 @@ Check Rust formatting with `rustfmt` from the stable toolchain.
 ```sh
 cargo +stable fmt --manifest-path native/kernel/Cargo.toml --check
 cargo +stable fmt --manifest-path crates/clv-abi/Cargo.toml --check
-rustfmt +stable --edition 2024 --check userspace/hello/main.rs userspace/shell/main.rs
+rustfmt +stable --edition 2024 --check \
+  userspace/echo/main.rs userspace/hello/main.rs userspace/shell/main.rs
 ```
