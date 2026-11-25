@@ -383,6 +383,16 @@ impl Scheduler {
         completion: TaskCompletion,
     ) -> bool {
         self.stop_task(self.current, fs, completion);
+        if self.current == SHELL_TASK_INDEX {
+            self.release_shell_goal(fs);
+            for task in &mut self.tasks {
+                if let Some(launch) = &mut task.launch {
+                    launch.reply = None;
+                    launch.event = None;
+                    launch.close_pipe_reader(&mut task.state);
+                }
+            }
+        }
         self.switch(frame)
     }
 
@@ -415,17 +425,6 @@ impl Scheduler {
             {
                 shell.state = TaskState::Runnable;
             }
-        } else if index == SHELL_TASK_INDEX {
-            for task in &mut self.tasks {
-                if let Some(launch) = &mut task.launch {
-                    launch.reply = None;
-                    launch.event = None;
-                    launch.close_pipe_reader(&mut task.state);
-                }
-            }
-        }
-        if self.tasks[SHELL_TASK_INDEX].state == TaskState::Stopped {
-            self.goal.take_if(|goal| !goal.is_running());
         }
     }
 

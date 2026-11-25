@@ -19,7 +19,7 @@ impl Goal {
     }
 
     pub(super) fn finish_child(&mut self, child: usize, completion: TaskCompletion) {
-        if !matches!(self.status, GoalStatus::Running { child: member } if member == child) {
+        if self.running_child() != Some(child) {
             return;
         }
         self.status = match completion {
@@ -32,8 +32,11 @@ impl Goal {
         };
     }
 
-    pub(super) fn is_running(&self) -> bool {
-        matches!(self.status, GoalStatus::Running { .. })
+    fn running_child(&self) -> Option<usize> {
+        match self.status {
+            GoalStatus::Running { child } => Some(child),
+            _ => None,
+        }
     }
 }
 
@@ -72,18 +75,28 @@ impl Scheduler {
     pub(crate) fn cancel_goal(&mut self, handle: usize, fs: &mut RamFs) -> Option<CancelResult> {
         match self.goal_status(handle)? {
             GoalStatus::Ready => self.goal.as_mut()?.status = GoalStatus::Cancelled { child: None },
-            GoalStatus::Running { child } => {
-                let index = self.launch_index(child)?;
-                if self.tasks[index].state == TaskState::Stopped {
-                    return None;
-                }
-                self.stop_task(index, fs, TaskCompletion::Cancelled);
-            }
+            GoalStatus::Running { child } => self.cancel_child_launch(child, fs)?,
             GoalStatus::Cancelled { .. } => {}
             GoalStatus::Completed { .. } | GoalStatus::Failed { .. } => {
                 return Some(CancelResult::AlreadyFinished);
             }
         }
         Some(CancelResult::Cancelled)
+    }
+
+    pub(super) fn release_shell_goal(&mut self, fs: &mut RamFs) {
+        if let Some(child) = self.goal.as_ref().and_then(Goal::running_child) {
+            self.cancel_child_launch(child, fs);
+        }
+        self.goal = None;
+    }
+
+    fn cancel_child_launch(&mut self, child: usize, fs: &mut RamFs) -> Option<()> {
+        let index = self.launch_index(child)?;
+        if self.tasks[index].state == TaskState::Stopped {
+            return None;
+        }
+        self.stop_task(index, fs, TaskCompletion::Cancelled);
+        Some(())
     }
 }

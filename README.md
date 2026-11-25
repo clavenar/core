@@ -112,7 +112,7 @@ The shell can own one goal and run one ordinary child in it. `goal create`
 prints the new goal handle. `goal run hello` or `goal run echo` prints the
 child's launch handle. `goal status` reports `Ready`, `Running`, `Completed`,
 `Failed`, or `Cancelled`. The kernel keeps the original child handle and
-outcome until the shell closes the goal.
+outcome until the shell closes the goal or the shell itself stops.
 
 ```text
 goal create
@@ -436,9 +436,10 @@ relaunch invalidates the previous pipe handle along with the previous launch.
 
 Call 32 (`event_wait`) takes no arguments. Only the shell can collect events.
 It receives the oldest pending completion's launch handle in `a0` and its
-kind in `a1` (0 for exit, 1 for fault, 2 for cancellation). The kernel records
-one notification per child launch, up to two at a time. The boot greeting has
-no parent launch and produces no event. Other callers receive -1 in `a0`.
+kind in `a1` (0 for exit, 1 for fault, 2 for cancellation). While the shell
+is alive, the kernel records one notification per completed launch, up to two
+at a time. The boot greeting has no parent launch and produces no event.
+Other callers receive -1 in `a0`.
 
 With an empty queue, the call sleeps while a launched child can still run.
 When no child is outstanding or all remaining children are blocked writing
@@ -471,16 +472,18 @@ wait behavior as a plain `run`. A failed run preserves the goal's state.
 | 4 | Failed | Child handle | Fault cause |
 | 5 | Cancelled | Original child handle, or 0 if cancelled while ready | 0 |
 
-Cancellation targets the goal's original launch handle. A running child's
-slot becomes available for a new launch immediately. The kernel records one
+`goal_cancel` targets the goal's original launch handle. A running child's
+slot becomes available for a new launch immediately. The kernel queues one
 event for the cancelled child. Repeating cancellation returns 0 even after
 another launch reuses the slot. Cancelling a ready goal produces no event.
 Only a ready goal accepts a new launch.
 
 Status reads are repeatable. Closing a finished goal leaves the child's
 pending reply, event and wait status available under the usual launch rules.
-If the shell exits or faults, the kernel reclaims its goal once any attached
-child stops.
+If the shell exits or faults, the kernel cancels the goal's running child
+by its original launch handle and releases the goal before scheduling another
+task. Children launched outside the goal can still run to completion, including
+a newer launch in the same program slot.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).
