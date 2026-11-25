@@ -75,7 +75,7 @@ fn run_command(line: &[u8], children: &mut Children) {
               run hello [dir]  run echo\r\n\
               ask [--read] <hello|echo> <text>  askat [--echo] hello <dir> <payload>\r\n\
               askfile [--stream] hello <path>\r\n\
-              recv <hello|echo>  wait <hello|echo>\r\n",
+              recv <hello|echo>  wait <hello|echo>  event\r\n",
         ),
         b"pwd" if arguments.is_empty() => files::pwd(),
         b"cd" => files::cd(arguments),
@@ -91,6 +91,8 @@ fn run_command(line: &[u8], children: &mut Children) {
         b"askfile" => children.ask_file(arguments),
         b"recv" => children.recv(arguments),
         b"wait" => children.wait(arguments),
+        b"event" if arguments.is_empty() => children.event(),
+        b"event" => print(b"usage: event\r\n"),
         b"exit" if arguments.is_empty() => clv::exit(0),
         b"" => {}
         _ => print(b"unknown command\r\n"),

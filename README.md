@@ -86,14 +86,23 @@ wait hello
 `run hello` sends `hello ready` to the shell, and `run echo` sends
 `echo ready`. The shell can collect each reply and status independently.
 
+`event` waits for the next child to exit or fault. It prints the child's name
+and `exited` or `faulted`. Try the following after the boot greeting.
+
 ```text
 run hello
 run echo
+event
+event
 recv echo
-wait echo
-recv hello
 wait hello
+wait echo
+event
 ```
+
+The first two events report both children in completion order. The echo reply
+is still available, both waits report status 0, and the last `event` prints
+`no child event`.
 
 `ask hello hello from shell` launches `hello` with an `Echo` request and prints the
 echoed reply `hello from shell`. `ask echo hello from shell` sends the same
@@ -380,6 +389,20 @@ shell waits for a result or reply while that child is blocked on a full pipe,
 the wait or receive returns -1 so the shell can drain or close the pipe and
 retry. A queued reply or completed status can still be collected. A successful
 relaunch invalidates the previous pipe handle along with the previous launch.
+
+Call 32 (`event_wait`) takes no arguments. Only the shell can collect events.
+It receives the oldest pending completion's launch handle in `a0` and its
+kind in `a1` (0 for exit, 1 for fault). The kernel records one notification
+per child launch, up to two at a time. The boot greeting has no parent launch
+and produces no event. Other callers receive -1 in `a0`.
+
+With an empty queue, the call sleeps while a launched child can still run.
+When no child is outstanding or all remaining children are blocked writing
+to full pipes, the call returns zero in both registers. The shell can then
+drain or close a pipe and retry. Reading an event preserves the child's
+reply, buffered pipe data and full exit status or fault cause. Collecting
+any of those first also leaves the event available. A successful relaunch
+discards the previous handle's unread event. A failed launch preserves it.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

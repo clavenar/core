@@ -1,12 +1,12 @@
 use clv_abi::{
-    NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE, PATH_MAX_BYTES,
-    PROBE_VALUE, PROGRAM_HELLO, ReplyKind, RequestKind, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD,
-    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE,
-    SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR,
-    SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
-    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_PIPE,
-    SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE,
-    SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE,
+    PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, ReplyKind, RequestKind, SYS_CHDIR, SYS_CLOSE,
+    SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN,
+    SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ,
+    SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR,
+    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
+    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -16,9 +16,7 @@ use crate::fs::ramfs::{RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
 use crate::ipc::pipe::PipeResult;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::usercopy::{copy_from_user_stack, copy_to_user_stack, in_user_stack};
-use crate::scheduler::{
-    LaunchGrant, Mailbox, ReceiveResult, Scheduler, TaskCompletion, WaitResult,
-};
+use crate::scheduler::{LaunchGrant, Mailbox, ReceiveResult, Scheduler, WaitResult};
 
 const CONSOLE_WRITE_LIMIT: usize = 128;
 const REG_A0: usize = 10;
@@ -132,13 +130,22 @@ pub(crate) fn dispatch(
         SYS_WAIT => match scheduler.wait_child(a0, frame) {
             WaitResult::Unavailable => SYSCALL_ERROR,
             WaitResult::Blocked => return Outcome::Wait,
-            WaitResult::Completed(completion) => {
-                let (kind, value) = match completion {
-                    TaskCompletion::Exited(status) => (WAIT_EXITED, status),
-                    TaskCompletion::Faulted(cause) => (WAIT_FAULTED, cause),
-                };
+            WaitResult::Ready(completion) => {
+                let (kind, value) = completion.kind_and_value();
                 frame.registers[REG_A1] = value;
-                kind
+                kind as usize
+            }
+        },
+        SYS_EVENT_WAIT => match scheduler.wait_event(frame) {
+            WaitResult::Unavailable => SYSCALL_ERROR,
+            WaitResult::Blocked => return Outcome::Wait,
+            WaitResult::Ready(ChildEvent::Completed { handle, kind }) => {
+                frame.registers[REG_A1] = kind as usize;
+                handle
+            }
+            WaitResult::Ready(ChildEvent::Empty) => {
+                frame.registers[REG_A1] = 0;
+                NO_CHILD_HANDLE
             }
         },
         SYS_MESSAGE_SEND => scheduler

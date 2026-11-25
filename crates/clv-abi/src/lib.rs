@@ -34,6 +34,7 @@ pub const SYS_SPAWN_WITH_FILE_PIPE: usize = 28;
 pub const SYS_PIPE_READ: usize = 29;
 pub const SYS_PIPE_WRITE: usize = 30;
 pub const SYS_PIPE_CLOSE: usize = 31;
+pub const SYS_EVENT_WAIT: usize = 32;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
@@ -94,10 +95,35 @@ pub const FILE_REPLY_OK: u8 = 0;
 pub const FILE_REPLY_ERROR: u8 = 1;
 pub const PROGRAM_HELLO: usize = 0;
 pub const PROGRAM_ECHO: usize = 1;
-/// A child passes this value in a2 to receive its launch request.
+/// A child passes zero in `a2` to receive its request. An empty event wait returns it in `a0`.
 pub const NO_CHILD_HANDLE: usize = 0;
 pub const WAIT_EXITED: usize = 0;
 pub const WAIT_FAULTED: usize = 1;
+
+/// Completion tags shared by `wait` and `event_wait`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum CompletionKind {
+    Exited = WAIT_EXITED,
+    Faulted = WAIT_FAULTED,
+}
+
+impl CompletionKind {
+    pub const fn from_raw(value: usize) -> Option<Self> {
+        match value {
+            WAIT_EXITED => Some(Self::Exited),
+            WAIT_FAULTED => Some(Self::Faulted),
+            _ => None,
+        }
+    }
+}
+
+/// The oldest pending child completion, or an empty queue when no child can progress.
+pub enum ChildEvent {
+    Empty,
+    Completed { handle: usize, kind: CompletionKind },
+}
+
 pub const OPEN_READ: usize = 0;
 pub const OPEN_WRITE_TRUNCATE: usize = 1;
 pub const SYSCALL_ERROR: usize = usize::MAX;

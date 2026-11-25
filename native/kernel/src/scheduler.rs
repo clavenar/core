@@ -1,6 +1,8 @@
 mod pipe;
 
-use clv_abi::{GrantKind, PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind};
+use clv_abi::{
+    ChildEvent, CompletionKind, GrantKind, PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
+};
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::fs::ramfs::{RamFs, TaskFs};
@@ -17,6 +19,7 @@ const ECHO_TASK_INDEX: usize = 2;
 enum TaskState {
     Runnable,
     WaitingForChild(usize),
+    WaitingForEvent,
     WaitingForMessage(usize),
     WaitingForPipeData(usize),
     WaitingForPipeSpace,
@@ -31,7 +34,9 @@ impl TaskState {
     }
 
     fn waits_for_result(self, handle: usize) -> bool {
-        self == Self::WaitingForChild(handle) || self == Self::WaitingForMessage(handle)
+        self == Self::WaitingForChild(handle)
+            || self == Self::WaitingForMessage(handle)
+            || self == Self::WaitingForEvent
     }
 }
 
@@ -41,6 +46,21 @@ pub(crate) enum TaskCompletion {
     Faulted(usize),
 }
 
+impl TaskCompletion {
+    pub(crate) fn kind_and_value(self) -> (CompletionKind, usize) {
+        match self {
+            Self::Exited(status) => (CompletionKind::Exited, status),
+            Self::Faulted(cause) => (CompletionKind::Faulted, cause),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PendingEvent {
+    sequence: usize,
+    kind: CompletionKind,
+}
+
 struct ChildLaunch {
     handle: usize,
     request: Option<Message>,
@@ -48,6 +68,7 @@ struct ChildLaunch {
     legacy_file_reply: bool,
     pipe: Option<Pipe>,
     completion: Option<TaskCompletion>,
+    event: Option<PendingEvent>,
 }
 
 #[derive(Clone, Copy)]
@@ -57,10 +78,10 @@ pub(crate) enum LaunchGrant {
     FileWithPipe(usize),
 }
 
-pub(crate) enum WaitResult {
+pub(crate) enum WaitResult<T> {
     Unavailable,
     Blocked,
-    Completed(TaskCompletion),
+    Ready(T),
 }
 
 pub(crate) enum Mailbox {
@@ -92,6 +113,7 @@ pub(crate) struct Scheduler {
     tasks: [Task; TASK_COUNT],
     initial_status: usize,
     next_child_handle: usize,
+    next_event_sequence: usize,
     current: usize,
 }
 
@@ -121,6 +143,7 @@ impl Scheduler {
             tasks,
             initial_status: sstatus,
             next_child_handle: 1,
+            next_event_sequence: 0,
             current: HELLO_TASK_INDEX,
         }
     }
@@ -213,18 +236,23 @@ impl Scheduler {
             legacy_file_reply,
             pipe,
             completion: None,
+            event: None,
         });
         task.state = TaskState::Runnable;
         self.next_child_handle = next_handle;
         Some(handle)
     }
 
-    pub(crate) fn wait_child(&mut self, handle: usize, frame: &mut TrapFrame) -> WaitResult {
+    pub(crate) fn wait_child(
+        &mut self,
+        handle: usize,
+        frame: &mut TrapFrame,
+    ) -> WaitResult<TaskCompletion> {
         let Some((launch, state)) = self.launch_for_shell(handle) else {
             return WaitResult::Unavailable;
         };
         if let Some(completion) = launch.completion.take() {
-            return WaitResult::Completed(completion);
+            return WaitResult::Ready(completion);
         }
         if *state == TaskState::Runnable
             && self.block_current(frame, TaskState::WaitingForChild(handle))
@@ -232,6 +260,37 @@ impl Scheduler {
             WaitResult::Blocked
         } else {
             WaitResult::Unavailable
+        }
+    }
+
+    pub(crate) fn wait_event(&mut self, frame: &mut TrapFrame) -> WaitResult<ChildEvent> {
+        if self.current != SHELL_TASK_INDEX {
+            return WaitResult::Unavailable;
+        }
+        let oldest = self
+            .tasks
+            .iter_mut()
+            .filter_map(|task| {
+                let launch = task.launch.as_mut()?;
+                let event = launch.event?;
+                Some((launch, event))
+            })
+            .min_by_key(|(_, event)| event.sequence);
+        if let Some((launch, event)) = oldest {
+            launch.event = None;
+            return WaitResult::Ready(ChildEvent::Completed {
+                handle: launch.handle,
+                kind: event.kind,
+            });
+        }
+        let can_finish = self
+            .tasks
+            .iter()
+            .any(|task| task.launch.is_some() && task.state == TaskState::Runnable);
+        if can_finish && self.block_current(frame, TaskState::WaitingForEvent) {
+            WaitResult::Blocked
+        } else {
+            WaitResult::Ready(ChildEvent::Empty)
         }
     }
 
@@ -327,12 +386,21 @@ impl Scheduler {
         frame: &mut TrapFrame,
         completion: TaskCompletion,
     ) -> bool {
+        let shell_live = self.tasks[SHELL_TASK_INDEX].state != TaskState::Stopped;
         let task = &mut self.tasks[self.current];
         task.state = TaskState::Stopped;
         task.fs.close_all(fs);
         if let Some(launch) = &mut task.launch {
             launch.request = None;
             launch.completion = Some(completion);
+            if shell_live {
+                launch.event = Some(PendingEvent {
+                    sequence: self.next_event_sequence,
+                    kind: completion.kind_and_value().0,
+                });
+                // Spawn checks for handle exhaustion. One event per launch keeps this count in range.
+                self.next_event_sequence += 1;
+            }
             if let Some(pipe) = &mut launch.pipe {
                 pipe.close_writer();
             }
@@ -347,6 +415,7 @@ impl Scheduler {
             for task in &mut self.tasks {
                 if let Some(launch) = &mut task.launch {
                     launch.reply = None;
+                    launch.event = None;
                     launch.close_pipe_reader(&mut task.state);
                 }
             }

@@ -7,11 +7,11 @@ pub mod fs;
 pub mod pipe;
 
 use clv_abi::{
-    MESSAGE_MAX_BYTES, NO_DIRECTORY_GRANT, ReplyKind, RequestKind, SYS_EXIT, SYS_MESSAGE_RECV,
-    SYS_MESSAGE_SEND, SYS_READ_CONSOLE, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV,
-    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_WAIT, SYS_WRITE_CONSOLE,
-    SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    ChildEvent, CompletionKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, ReplyKind,
+    RequestKind, SYS_EVENT_WAIT, SYS_EXIT, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_READ_CONSOLE,
+    SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_PIPE,
+    SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_WAIT, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::asm;
 
@@ -164,10 +164,23 @@ pub enum ChildStatus {
 }
 
 pub fn wait(handle: usize) -> Option<ChildStatus> {
-    match ecall(SYS_WAIT, handle, 0, 0, 0, 0) {
-        (WAIT_EXITED, status, _) => Some(ChildStatus::Exited(status)),
-        (WAIT_FAULTED, cause, _) => Some(ChildStatus::Faulted(cause)),
-        _ => None,
+    let (tag, value, _) = ecall(SYS_WAIT, handle, 0, 0, 0, 0);
+    Some(match CompletionKind::from_raw(tag)? {
+        CompletionKind::Exited => ChildStatus::Exited(value),
+        CompletionKind::Faulted => ChildStatus::Faulted(value),
+    })
+}
+
+/// Takes the oldest child notification. The exit status or fault cause is available through `wait`.
+pub fn event_wait() -> Option<ChildEvent> {
+    let (handle, tag, _) = ecall(SYS_EVENT_WAIT, 0, 0, 0, 0, 0);
+    match handle {
+        SYSCALL_ERROR => None,
+        NO_CHILD_HANDLE => Some(ChildEvent::Empty),
+        _ => Some(ChildEvent::Completed {
+            handle,
+            kind: CompletionKind::from_raw(tag)?,
+        }),
     }
 }
 

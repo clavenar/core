@@ -1,7 +1,7 @@
 use clv::{ChildReply, ChildStatus, fs, pipe, print};
 use clv_abi::{
-    MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PIPE_CAPACITY, PROGRAM_ECHO, PROGRAM_HELLO,
-    ReplyKind, RequestKind,
+    ChildEvent, CompletionKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PIPE_CAPACITY,
+    PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
 };
 
 use super::split_word;
@@ -130,6 +130,22 @@ impl Children {
             Some(child) => print_reply(child.handle),
             None => print(b"usage: recv <hello|echo>\r\n"),
         }
+    }
+
+    pub(super) fn event(&self) {
+        let (handle, kind) = match clv::event_wait() {
+            Some(ChildEvent::Completed { handle, kind }) => (handle, kind),
+            Some(ChildEvent::Empty) => return print(b"no child event\r\n"),
+            None => return print(b"event wait failed\r\n"),
+        };
+        let Some(child) = self.programs.iter().find(|child| child.handle == handle) else {
+            return print(b"unknown child handle\r\n");
+        };
+        print(child.name);
+        print(match kind {
+            CompletionKind::Exited => b" exited\r\n",
+            CompletionKind::Faulted => b" faulted\r\n",
+        });
     }
 
     pub(super) fn wait(&mut self, name: &[u8]) {
