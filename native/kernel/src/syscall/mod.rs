@@ -1,9 +1,11 @@
 use clv_abi::{
-    GrantKind, OPEN_READ, OPEN_WRITE_TRUNCATE, PATH_MAX_BYTES, PROBE_VALUE, SYS_CHDIR, SYS_CLOSE,
-    SYS_EXIT, SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT,
-    SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
-    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
-    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    GrantKind, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE, PATH_MAX_BYTES,
+    PROBE_VALUE, PROGRAM_HELLO, RequestKind, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD,
+    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PROBE, SYS_READ,
+    SYS_READ_CONSOLE, SYS_READDIR, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_MESSAGE,
+    SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    WAIT_EXITED, WAIT_FAULTED,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -18,6 +20,7 @@ const REG_A0: usize = 10;
 const REG_A1: usize = 11;
 const REG_A2: usize = 12;
 const REG_A3: usize = 13;
+const REG_A4: usize = 14;
 const REG_A7: usize = 17;
 
 pub(crate) enum Outcome {
@@ -34,7 +37,9 @@ pub(crate) fn dispatch(
     let a0 = frame.registers[REG_A0];
     let a1 = frame.registers[REG_A1];
     let a2 = frame.registers[REG_A2];
-    frame.registers[REG_A0] = match frame.registers[REG_A7] {
+    let a3 = frame.registers[REG_A3];
+    let number = frame.registers[REG_A7];
+    frame.registers[REG_A0] = match number {
         SYS_PROBE => {
             write_task(scheduler.current_id());
             uart::write(b" user probe\r\n");
@@ -78,10 +83,23 @@ pub(crate) fn dispatch(
             .spawn(fs, a0, Some((GrantKind::File, a1)), None)
             .unwrap_or(SYSCALL_ERROR),
         SYS_SPAWN_WITH_MESSAGE => {
-            spawn_with_message(scheduler, fs, a0, None, a1, a2).unwrap_or(SYSCALL_ERROR)
+            spawn_with_request(scheduler, fs, a0, None, RequestKind::Echo, a1, a2)
+                .unwrap_or(SYSCALL_ERROR)
         }
         SYS_SPAWN_AT_WITH_MESSAGE => {
-            spawn_with_message(scheduler, fs, a0, Some(a1), a2, frame.registers[REG_A3])
+            // The original scoped call supplied a path to hello and raw bytes to echo.
+            let kind = if a0 == PROGRAM_HELLO {
+                RequestKind::ReadFile
+            } else {
+                RequestKind::Echo
+            };
+            spawn_with_request(scheduler, fs, a0, Some(a1), kind, a2, a3).unwrap_or(SYSCALL_ERROR)
+        }
+        SYS_SPAWN_REQUEST => {
+            let fd = frame.registers[REG_A4];
+            let directory = (fd != NO_DIRECTORY_GRANT).then_some(fd);
+            RequestKind::from_raw(a1)
+                .and_then(|kind| spawn_with_request(scheduler, fs, a0, directory, kind, a2, a3))
                 .unwrap_or(SYSCALL_ERROR)
         }
         SYS_WAIT => match scheduler.wait_child(a0, frame) {
@@ -99,16 +117,26 @@ pub(crate) fn dispatch(
         SYS_MESSAGE_SEND => scheduler
             .send_reply(a1, |bytes| copy_from_user_stack(a0, bytes))
             .unwrap_or(SYSCALL_ERROR),
-        SYS_MESSAGE_RECV if a1 > 0 && in_user_stack(a0, a1) => {
-            match scheduler.receive_message(a2, frame, |bytes| copy_to_user_stack(bytes, a0, a1)) {
+        SYS_MESSAGE_RECV | SYS_REQUEST_RECV if a1 > 0 && in_user_stack(a0, a1) => {
+            let handle = if number == SYS_REQUEST_RECV {
+                NO_CHILD_HANDLE
+            } else {
+                a2
+            };
+            match scheduler
+                .receive_message(handle, frame, |bytes| copy_to_user_stack(bytes, a0, a1))
+            {
                 ReceiveResult::Error => SYSCALL_ERROR,
                 ReceiveResult::Blocked => return Outcome::Wait,
-                ReceiveResult::Empty => {
-                    frame.registers[REG_A1] = 0;
-                    0
-                }
-                ReceiveResult::Received { length, sender } => {
+                ReceiveResult::Ready {
+                    length,
+                    sender,
+                    request_kind,
+                } => {
                     frame.registers[REG_A1] = sender;
+                    if number == SYS_REQUEST_RECV {
+                        frame.registers[REG_A2] = request_kind.map_or(0, |kind| kind as usize);
+                    }
                     length
                 }
             }
@@ -120,15 +148,16 @@ pub(crate) fn dispatch(
     Outcome::Resume
 }
 
-fn spawn_with_message(
+fn spawn_with_request(
     scheduler: &mut Scheduler,
     fs: &mut RamFs,
     program: usize,
     directory_fd: Option<usize>,
+    kind: RequestKind,
     address: usize,
     length: usize,
 ) -> Option<usize> {
-    let request = Message::new(scheduler.current_id(), length, |bytes| {
+    let request = Message::new(scheduler.current_id(), Some(kind), length, |bytes| {
         copy_from_user_stack(address, bytes)
     })?;
     let grant = directory_fd.map(|fd| (GrantKind::Directory, fd));

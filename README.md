@@ -95,18 +95,34 @@ recv hello
 wait hello
 ```
 
-`ask hello hello from shell` launches `hello` with a request and prints the
+`ask hello hello from shell` launches `hello` with an `Echo` request and prints the
 echoed reply `hello from shell`. `ask echo hello from shell` sends the same
 request to `echo`. The request is available to the child when it starts.
 
-`askat hello /notes todo.txt` grants access to `/notes` and asks `hello` to
-read `todo.txt` through that directory handle. The shell prints the first
-63 bytes, reports an empty file, or reports a failed read.
+`askat hello /notes todo.txt` grants access to `/notes` and sends a `ReadFile`
+request for `todo.txt`. The shell prints up to 63 bytes of file data, reports an
+empty file, or reports a failed read.
 
 ```text
 mkdir /notes
 write /notes/todo.txt Hello from notes
 askat hello /notes todo.txt
+wait hello
+```
+
+Put `--echo` or `--read` before the program name to select a request kind
+explicitly. In a fresh QEMU shell, the first two launches below grant the
+same directory and send the same bytes. The first prints `hello.txt` and
+the second prints `Hello from RamFS`. The third prints
+`cannot read requested file` because the child has no directory handle.
+The three waits report exit statuses 0, 0 and 1.
+
+```text
+askat --echo hello / hello.txt
+wait hello
+askat hello / hello.txt
+wait hello
+ask --read hello hello.txt
 wait hello
 ```
 
@@ -245,8 +261,8 @@ Call 21 (`spawn_with_message`) takes a program selector in `a0`, a user stack
 address in `a1`, and a length from 1 to 64 bytes in `a2`. It copies the request
 before making the child runnable and returns a child handle on success or
 -1 on error.
-The child starts with the same empty RamFS state as `spawn` and consumes the
-request with `message_recv`. Exit or fault discards any unread request.
+The child starts with the same empty RamFS state as `spawn`. This call
+assigns request kind `Echo`. Exit or fault discards any unread request.
 
 Call 22 (`spawn_at_with_message`) takes a program selector in `a0`, a
 directory handle in `a1`, a user stack request address in `a2`, and a length
@@ -254,10 +270,8 @@ from 1 to 64 bytes in `a3`. It validates the grant and copies the request
 before scheduling the child. It returns a child handle on success or -1 on
 error.
 
-When launched this way, `hello` resolves the requested path with `open_at`.
-A reply with status byte 0 carries zero to 63 file bytes. Status byte 1 reports a
-failed read and carries just that byte. The child exits with status 0 after
-sending a successful reply and status 1 on failure.
+This call assigns request kind `ReadFile` to `hello` and `Echo` to `echo`,
+matching the original behavior of each program.
 
 Call 23 (`spawn_with_file`) takes a program selector in `a0` and an open
 regular file handle owned by the shell in `a1`. It returns a child handle on
@@ -267,6 +281,29 @@ read-only even if the parent opened the file for writing. Its cursor starts
 at byte zero. Closing the parent's handle or unlinking the name leaves the
 child's handle valid. Writes, directory-relative opens through the file
 handle, and ordinary path lookups by this child return -1.
+
+Call 24 (`spawn_request`) takes a program selector in `a0`, request kind in
+`a1`, user stack payload address in `a2`, byte count in `a3`, and an optional
+directory handle in `a4`. Use `NO_DIRECTORY_GRANT` (`usize::MAX`) for a
+launch without a grant. Handle 0 is valid. The kernel accepts `Echo` (1) and
+`ReadFile` (2) with 1 to 64 payload bytes. It copies the payload and records
+the caller's task ID before the child runs. Success returns a fresh child
+handle. Invalid arguments or a busy child slot return -1.
+
+Call 25 (`request_recv`) lets a launched child receive its request into the
+user stack buffer in `a0` with nonzero capacity in `a1`. It returns the
+byte count in `a0`, the sender's task ID in `a1`, and the request kind in
+`a2`. An empty mailbox returns zero in all three registers. A bad buffer,
+insufficient capacity, or a caller without a child launch returns -1 in
+`a0`. A failed copy preserves the pending request. Calls 20 and 25 consume
+the same request once. The shell collects replies with call 20.
+
+`hello` echoes an `Echo` payload verbatim. For `ReadFile`, it opens the
+payload path through its directory grant using `open_at`. A successful file
+reply starts with status byte 0 followed by up to 63 bytes of file data.
+A missing directory grant or failed read produces the single status byte 1.
+`echo` accepts `Echo` and returns the file error for `ReadFile`. The child exits
+with status 0 after a successful reply and status 1 if the request or send fails.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

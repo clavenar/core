@@ -1,7 +1,7 @@
 use clv::{ChildStatus, fs, print};
 use clv_abi::{
     FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PROGRAM_ECHO,
-    PROGRAM_HELLO,
+    PROGRAM_HELLO, RequestKind,
 };
 
 use super::split_word;
@@ -13,9 +13,11 @@ struct Child {
 }
 
 impl Child {
-    fn collect_file_reply(&mut self, launch: Option<usize>) {
-        let Some(handle) = launch else { return };
+    fn collect_reply(&mut self, handle: usize, kind: RequestKind) {
         self.handle = handle;
+        if kind == RequestKind::Echo {
+            return print_reply(handle);
+        }
         let mut buffer = [0; MESSAGE_MAX_BYTES];
         match clv::receive_message(handle, &mut buffer) {
             Some(([FILE_REPLY_OK], _)) => print(b"empty file\r\n"),
@@ -81,31 +83,34 @@ impl Children {
     }
 
     pub(super) fn ask(&mut self, arguments: &[u8]) {
+        let (kind, arguments) = request_kind(arguments, RequestKind::Echo);
         let (name, text) = split_word(arguments);
         let child = match self.named(name) {
             Some(child) if !text.is_empty() => child,
-            _ => return print(b"usage: ask <hello|echo> <text>\r\n"),
+            _ => return print(b"usage: ask [--read] <hello|echo> <text>\r\n"),
         };
-        let Some(handle) = clv::spawn(child.selector, None, Some(text)) else {
+        let Some(handle) = clv::spawn_request(child.selector, None, kind, text) else {
             print(b"cannot ask ");
             print(child.name);
             print(b"\r\n");
             return;
         };
-        child.handle = handle;
-        print_reply(handle);
+        child.collect_reply(handle, kind);
     }
 
     pub(super) fn ask_at(&mut self, arguments: &[u8]) {
+        let (kind, arguments) = request_kind(arguments, RequestKind::ReadFile);
         let (name, arguments) = split_word(arguments);
-        let (directory, path) = split_word(arguments);
+        let (directory, payload) = split_word(arguments);
         let child = match self.named(name) {
-            Some(child) if child.selector == PROGRAM_HELLO && !path.is_empty() => child,
-            _ => return print(b"usage: askat hello <dir> <path>\r\n"),
+            Some(child) if child.selector == PROGRAM_HELLO && !payload.is_empty() => child,
+            _ => return print(b"usage: askat [--echo] hello <dir> <payload>\r\n"),
         };
-        child.collect_file_reply(spawn_scoped_hello(directory, |fd| {
-            clv::spawn(PROGRAM_HELLO, Some(fd), Some(path))
-        }));
+        if let Some(handle) = spawn_scoped_hello(directory, |fd| {
+            clv::spawn_request(PROGRAM_HELLO, Some(fd), kind, payload)
+        }) {
+            child.collect_reply(handle, kind);
+        }
     }
 
     pub(super) fn ask_file(&mut self, arguments: &[u8]) {
@@ -114,9 +119,10 @@ impl Children {
             Some(child) if child.selector == PROGRAM_HELLO && !path.is_empty() => child,
             _ => return print(b"usage: askfile hello <path>\r\n"),
         };
-        child.collect_file_reply(spawn_scoped_hello(path, |fd| {
-            clv::spawn_with_file(PROGRAM_HELLO, fd)
-        }));
+        if let Some(handle) = spawn_scoped_hello(path, |fd| clv::spawn_with_file(PROGRAM_HELLO, fd))
+        {
+            child.collect_reply(handle, RequestKind::ReadFile);
+        }
     }
 
     pub(super) fn recv(&mut self, name: &[u8]) {
@@ -143,6 +149,14 @@ impl Children {
             value >>= 4;
         }
         clv::write_console(&line);
+    }
+}
+
+fn request_kind(arguments: &[u8], default: RequestKind) -> (RequestKind, &[u8]) {
+    match split_word(arguments) {
+        (b"--echo", rest) => (RequestKind::Echo, rest),
+        (b"--read", rest) => (RequestKind::ReadFile, rest),
+        _ => (default, arguments),
     }
 }
 

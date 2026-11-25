@@ -1,4 +1,6 @@
-use clv_abi::{GrantKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PROGRAM_ECHO, PROGRAM_HELLO};
+use clv_abi::{
+    GrantKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PROGRAM_ECHO, PROGRAM_HELLO, RequestKind,
+};
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::fs::ramfs::{RamFs, TaskFs};
@@ -39,19 +41,24 @@ pub(crate) enum WaitResult {
 pub(crate) enum ReceiveResult {
     Error,
     Blocked,
-    Empty,
-    Received { length: usize, sender: usize },
+    Ready {
+        length: usize,
+        sender: usize,
+        request_kind: Option<RequestKind>,
+    },
 }
 
 pub(crate) struct Message {
     bytes: [u8; MESSAGE_MAX_BYTES],
     length: usize,
     sender: usize,
+    request_kind: Option<RequestKind>,
 }
 
 impl Message {
     pub(crate) fn new(
         sender: usize,
+        request_kind: Option<RequestKind>,
         length: usize,
         copy: impl FnOnce(&mut [u8]) -> bool,
     ) -> Option<Self> {
@@ -66,6 +73,7 @@ impl Message {
             bytes,
             length,
             sender,
+            request_kind,
         })
     }
 }
@@ -227,7 +235,7 @@ impl Scheduler {
         if launch.reply.is_some() {
             return None;
         }
-        launch.reply = Some(Message::new(sender, length, copy)?);
+        launch.reply = Some(Message::new(sender, None, length, copy)?);
         let handle = launch.handle;
         let shell = &mut self.tasks[SHELL_TASK_INDEX];
         if shell.state == TaskState::WaitingForMessage(handle) {
@@ -259,9 +267,10 @@ impl Scheduler {
             if !copy(&message.bytes[..message.length]) {
                 return ReceiveResult::Error;
             }
-            let result = ReceiveResult::Received {
+            let result = ReceiveResult::Ready {
                 length: message.length,
                 sender: message.sender,
+                request_kind: message.request_kind,
             };
             *pending = None;
             return result;
@@ -269,7 +278,11 @@ impl Scheduler {
         if child_running && self.block_shell(frame, TaskState::WaitingForMessage(handle)) {
             ReceiveResult::Blocked
         } else {
-            ReceiveResult::Empty
+            ReceiveResult::Ready {
+                length: 0,
+                sender: 0,
+                request_kind: None,
+            }
         }
     }
 

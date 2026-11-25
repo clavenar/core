@@ -26,6 +26,28 @@ pub const SYS_MESSAGE_RECV: usize = 20;
 pub const SYS_SPAWN_WITH_MESSAGE: usize = 21;
 pub const SYS_SPAWN_AT_WITH_MESSAGE: usize = 22;
 pub const SYS_SPAWN_WITH_FILE: usize = 23;
+pub const SYS_SPAWN_REQUEST: usize = 24;
+pub const SYS_REQUEST_RECV: usize = 25;
+
+/// No RamFS handle has this value. Handle 0 is valid.
+pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum RequestKind {
+    Echo = 1,
+    ReadFile = 2,
+}
+
+impl RequestKind {
+    pub const fn from_raw(value: usize) -> Option<Self> {
+        match value {
+            value if value == Self::Echo as usize => Some(Self::Echo),
+            value if value == Self::ReadFile as usize => Some(Self::ReadFile),
+            _ => None,
+        }
+    }
+}
 
 /// A child receives its RamFS grant handle in `a1` and its kind in `a2`.
 /// A launch without a grant sets `a2` to 0.

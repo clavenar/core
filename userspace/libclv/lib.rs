@@ -6,32 +6,41 @@
 pub mod fs;
 
 use clv_abi::{
-    MESSAGE_MAX_BYTES, SYS_EXIT, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_READ_CONSOLE, SYS_SPAWN,
-    SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_MESSAGE,
+    MESSAGE_MAX_BYTES, NO_DIRECTORY_GRANT, RequestKind, SYS_EXIT, SYS_MESSAGE_RECV,
+    SYS_MESSAGE_SEND, SYS_READ_CONSOLE, SYS_REQUEST_RECV, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_MESSAGE,
     SYS_TIMER_FIRED, SYS_WAIT, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 use core::arch::asm;
 
 #[inline(never)]
-fn ecall(number: usize, mut a0: usize, mut a1: usize, a2: usize, a3: usize) -> (usize, usize) {
-    // SAFETY: The kernel takes the number in a7 and arguments in a0 through a3.
-    // It returns results in a0 and a1 and preserves all other registers.
+fn ecall(
+    number: usize,
+    mut a0: usize,
+    mut a1: usize,
+    mut a2: usize,
+    a3: usize,
+    a4: usize,
+) -> (usize, usize, usize) {
+    // SAFETY: The kernel takes the number in a7 and arguments in a0 through a4.
+    // Results use a0 through a2. The kernel preserves the other registers.
     unsafe {
         asm!(
             "ecall",
             inlateout("a0") a0,
             inlateout("a1") a1,
-            in("a2") a2,
+            inlateout("a2") a2,
             in("a3") a3,
+            in("a4") a4,
             in("a7") number,
             options(nostack),
         );
     }
-    (a0, a1)
+    (a0, a1, a2)
 }
 
 fn syscall(number: usize, a0: usize, a1: usize, a2: usize) -> usize {
-    ecall(number, a0, a1, a2, 0).0
+    ecall(number, a0, a1, a2, 0, 0).0
 }
 
 fn with_stack_bytes<const CAPACITY: usize>(
@@ -89,7 +98,7 @@ pub fn spawn(program: usize, directory: Option<usize>, request: Option<&[u8]>) -
     match request {
         Some(bytes) => {
             with_stack_bytes::<MESSAGE_MAX_BYTES>(bytes, |address, length| match directory {
-                Some(fd) => ecall(SYS_SPAWN_AT_WITH_MESSAGE, program, fd, address, length).0,
+                Some(fd) => ecall(SYS_SPAWN_AT_WITH_MESSAGE, program, fd, address, length, 0).0,
                 None => syscall(SYS_SPAWN_WITH_MESSAGE, program, address, length),
             })
         }
@@ -104,15 +113,34 @@ pub fn spawn_with_file(program: usize, file: usize) -> Option<usize> {
     syscall_result(syscall(SYS_SPAWN_WITH_FILE, program, file, 0))
 }
 
+pub fn spawn_request(
+    program: usize,
+    directory: Option<usize>,
+    kind: RequestKind,
+    payload: &[u8],
+) -> Option<usize> {
+    with_stack_bytes::<MESSAGE_MAX_BYTES>(payload, |address, length| {
+        ecall(
+            SYS_SPAWN_REQUEST,
+            program,
+            kind as usize,
+            address,
+            length,
+            directory.unwrap_or(NO_DIRECTORY_GRANT),
+        )
+        .0
+    })
+}
+
 pub enum ChildStatus {
     Exited(usize),
     Faulted(usize),
 }
 
 pub fn wait(handle: usize) -> Option<ChildStatus> {
-    match ecall(SYS_WAIT, handle, 0, 0, 0) {
-        (WAIT_EXITED, status) => Some(ChildStatus::Exited(status)),
-        (WAIT_FAULTED, cause) => Some(ChildStatus::Faulted(cause)),
+    match ecall(SYS_WAIT, handle, 0, 0, 0, 0) {
+        (WAIT_EXITED, status, _) => Some(ChildStatus::Exited(status)),
+        (WAIT_FAULTED, cause, _) => Some(ChildStatus::Faulted(cause)),
         _ => None,
     }
 }
@@ -125,12 +153,43 @@ pub fn send_message(bytes: &[u8]) -> bool {
 
 /// Returns the received bytes and the sender's task ID.
 pub fn receive_message(handle: usize, buffer: &mut [u8]) -> Option<(&[u8], usize)> {
-    let (count, sender) = ecall(
+    let (count, sender, _) = ecall(
         SYS_MESSAGE_RECV,
         buffer.as_mut_ptr().expose_provenance(),
         buffer.len(),
         handle,
         0,
+        0,
     );
     Some((buffer.get(..count)?, sender))
+}
+
+pub enum LaunchRequest<'a> {
+    Empty,
+    Received {
+        kind: RequestKind,
+        bytes: &'a [u8],
+        sender: usize,
+    },
+}
+
+/// Reads the calling child's launch request. The kernel supplies the sender's task ID.
+pub fn receive_request(buffer: &mut [u8]) -> Option<LaunchRequest<'_>> {
+    let (count, sender, kind) = ecall(
+        SYS_REQUEST_RECV,
+        buffer.as_mut_ptr().expose_provenance(),
+        buffer.len(),
+        0,
+        0,
+        0,
+    );
+    let bytes = buffer.get(..count)?;
+    if bytes.is_empty() {
+        return Some(LaunchRequest::Empty);
+    }
+    Some(LaunchRequest::Received {
+        kind: RequestKind::from_raw(kind)?,
+        bytes,
+        sender,
+    })
 }
