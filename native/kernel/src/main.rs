@@ -31,6 +31,7 @@ const UART_BASE: usize = 0x1000_0000;
 const UART_LINE_STATUS: usize = 5;
 const UART_TX_READY: u8 = 1 << 5;
 const USER_ECALL: usize = 8;
+const INTERRUPT_FLAG: usize = 1 << (usize::BITS - 1);
 const SYS_PROBE: usize = 0;
 const SYS_EXIT: usize = 1;
 const SYS_WRITE_CONSOLE: usize = 2;
@@ -122,7 +123,14 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         return;
     }
     if scause != USER_ECALL {
-        supervisor_trap_fatal(scause, frame.sepc, stval);
+        if scause & INTERRUPT_FLAG != 0 {
+            supervisor_trap_fatal(scause, frame.sepc, stval);
+        }
+        write_task(current);
+        uart_write(b" fault");
+        write_trap_registers(scause, frame.sepc, stval);
+        finish_task(scheduler, frame, b"fault switch ");
+        return;
     }
 
     match frame.registers[REG_A7] {
@@ -136,12 +144,7 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
             uart_write(b" user exit status=");
             uart_write_hex(frame.registers[REG_A0]);
             uart_write(b"\r\n");
-            if !scheduler.exit(frame) {
-                uart_write(b"all tasks exited\r\n");
-                idle();
-            }
-            switch_task(scheduler, current, b"exit switch ");
-            arm_timer();
+            finish_task(scheduler, frame, b"exit switch ");
             return;
         }
         SYS_WRITE_CONSOLE => {
@@ -153,6 +156,16 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
     }
     // ECALL is a 32-bit instruction, including on cores with compressed code.
     frame.sepc += 4;
+}
+
+fn finish_task(scheduler: &mut Scheduler, frame: &mut TrapFrame, reason: &[u8]) {
+    let previous = scheduler.current_id();
+    if !scheduler.stop_current(frame) {
+        uart_write(b"all tasks exited\r\n");
+        idle();
+    }
+    switch_task(scheduler, previous, reason);
+    arm_timer();
 }
 
 fn switch_task(scheduler: &Scheduler, previous: usize, reason: &[u8]) {
@@ -195,14 +208,19 @@ fn write_console(address: usize, length: usize) -> usize {
 // SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.
 #[unsafe(no_mangle)]
 extern "C" fn supervisor_trap_fatal(scause: usize, sepc: usize, stval: usize) -> ! {
-    uart_write(b"fatal trap scause=");
+    uart_write(b"fatal trap");
+    write_trap_registers(scause, sepc, stval);
+    idle();
+}
+
+fn write_trap_registers(scause: usize, sepc: usize, stval: usize) {
+    uart_write(b" scause=");
     uart_write_hex(scause);
     uart_write(b" sepc=");
     uart_write_hex(sepc);
     uart_write(b" stval=");
     uart_write_hex(stval);
     uart_write(b"\r\n");
-    idle();
 }
 
 fn uart_write(bytes: &[u8]) {

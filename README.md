@@ -54,7 +54,7 @@ boot pool fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
-starts a fresh quantum after each timer interrupt and exit switch.
+starts a fresh quantum when the timer fires or a stopped task is replaced.
 
 The user program passes the call number in `a7` and executes `ecall`. Call 0
 prints `task N user probe` and returns 42 in `a0`. Call 3 returns 1 in `a0` once
@@ -73,9 +73,14 @@ schedule. In a successful run, both tasks report
 `user exit status=0x0000000000000000`, then the kernel prints `all tasks exited`
 and idles. Unknown call numbers return -1 in `a0`.
 
-Unexpected traps print `fatal trap` with `scause` (trap cause), `sepc`
+User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).
-To exit QEMU, press `Ctrl+a`, then `x`.
+The kernel removes the faulting task from the schedule and prints
+`fault switch` if another task is runnable. Once the last task stops, the
+kernel prints `all tasks exited` and idles.
+
+Supervisor faults and unexpected interrupts print `fatal trap` and stop
+execution. To exit QEMU, press `Ctrl+a`, then `x`.
 
 Check Rust formatting with `rustfmt` from the stable toolchain.
 

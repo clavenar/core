@@ -65,7 +65,7 @@ impl Scheduler {
         self.switch(frame)
     }
 
-    pub(crate) fn exit(&mut self, frame: &mut TrapFrame) -> bool {
+    pub(crate) fn stop_current(&mut self, frame: &mut TrapFrame) -> bool {
         self.tasks[self.current].runnable = false;
         self.switch(frame)
     }
