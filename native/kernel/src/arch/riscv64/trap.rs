@@ -3,6 +3,7 @@ use core::arch::{asm, global_asm};
 use super::{idle, timer};
 use crate::console::{write_hex, write_task};
 use crate::drivers::uart;
+use crate::fs::ramfs::RamFs;
 use crate::memory::usercopy::SSTATUS_SUM;
 use crate::scheduler::Scheduler;
 use crate::syscall;
@@ -42,7 +43,12 @@ impl TrapFrame {
     }
 }
 
-static mut SCHEDULER: Option<Scheduler> = None;
+struct KernelState {
+    scheduler: Scheduler,
+    ramfs: RamFs,
+}
+
+static mut KERNEL_STATE: Option<KernelState> = None;
 
 unsafe extern "C" {
     fn enter_user(frame: &TrapFrame) -> !;
@@ -61,8 +67,13 @@ pub(crate) fn supervisor_status() -> usize {
 /// space and the supervisor trap vector are active.
 pub(crate) unsafe fn start(scheduler: Scheduler) -> ! {
     let first_frame = *scheduler.current_frame();
-    // SAFETY: No user task has run, and only this hart accesses the scheduler.
-    unsafe { SCHEDULER = Some(scheduler) };
+    // SAFETY: No user task has run, and only this hart accesses the state.
+    unsafe {
+        KERNEL_STATE = Some(KernelState {
+            scheduler,
+            ramfs: RamFs::new(),
+        });
+    }
     arm_timer();
     // SAFETY: The first task's code and stack are mapped in the active space.
     unsafe { enter_user(&first_frame) }
@@ -73,9 +84,10 @@ pub(crate) unsafe fn start(scheduler: Scheduler) -> ! {
 extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: usize) {
     // SAFETY: On the single boot hart this handler runs with supervisor
     // interrupts disabled. Supervisor traps take the fatal path instead.
-    let scheduler = unsafe { &mut *(&raw mut SCHEDULER) }
+    let state = unsafe { &mut *(&raw mut KERNEL_STATE) }
         .as_mut()
-        .expect("scheduler is initialized before user entry");
+        .expect("kernel state is initialized before user entry");
+    let scheduler = &mut state.scheduler;
     let current = scheduler.current_id();
     if scause == timer::INTERRUPT_CAUSE {
         if scheduler.preempt(frame) {
@@ -96,7 +108,7 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         return;
     }
 
-    if let syscall::Outcome::Exit(status) = syscall::dispatch(scheduler, frame) {
+    if let syscall::Outcome::Exit(status) = syscall::dispatch(scheduler, &mut state.ramfs, frame) {
         write_task(current);
         uart::write(b" user exit status=");
         write_hex(status);

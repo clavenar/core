@@ -2,18 +2,22 @@
 #![no_main]
 
 use clv_abi::{
-    SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_TIMER_FIRED,
-    SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    OPEN_READ, OPEN_WRITE_TRUNCATE, SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE,
+    SYS_READDIR, SYS_TIMER_FIRED, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::asm;
 use core::panic::PanicInfo;
+
+const LINE_LIMIT: usize = 64;
+const WRITE_USAGE: &[u8] = b"usage: write <path> <text>\r\n";
 
 // SAFETY: The kernel enters this unique symbol with an aligned user stack.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 extern "C" fn _start() -> ! {
-    let mut line = [0; 64];
+    let mut line = [0; LINE_LIMIT];
     let mut length = 0;
+    let mut overflow = false;
     let mut previous_was_cr = false;
 
     // Let both boot tasks get a turn before drawing the prompt.
@@ -36,18 +40,27 @@ extern "C" fn _start() -> ! {
         match byte {
             b'\r' | b'\n' => {
                 write(b"\r\n");
-                run_command(&line[..length]);
+                if overflow {
+                    write(b"line too long\r\n");
+                } else {
+                    run_command(&line[..length]);
+                }
                 length = 0;
+                overflow = false;
                 write(b"clv> ");
             }
-            8 | 127 if length > 0 => {
+            8 | 127 if length > 0 && !overflow => {
                 length -= 1;
                 write(b"\x08 \x08");
             }
-            b' '..=b'~' if length < line.len() => {
-                line[length] = byte;
-                length += 1;
-                write(&[byte]);
+            b' '..=b'~' if !overflow => {
+                if let Some(slot) = line.get_mut(length) {
+                    *slot = byte;
+                    length += 1;
+                    write(&[byte]);
+                } else {
+                    overflow = true;
+                }
             }
             _ => {}
         }
@@ -56,14 +69,17 @@ extern "C" fn _start() -> ! {
 
 fn run_command(line: &[u8]) {
     match line.trim_ascii() {
-        b"help" => write(b"help  ls  cat <path>  exit\r\n"),
+        b"help" => write(b"help  ls  cat <path>  write <path> <text>  exit\r\n"),
         b"ls" => show(&[b'/'], SYS_READDIR),
         b"cat" => write(b"usage: cat <path>\r\n"),
+        b"write" => write(WRITE_USAGE),
         b"exit" => exit(0),
         b"" => {}
         command => {
             if let Some(path) = command.strip_prefix(b"cat ") {
                 show(path.trim_ascii(), SYS_READ);
+            } else if let Some(arguments) = command.strip_prefix(b"write ") {
+                write_file(arguments.trim_ascii_start());
             } else {
                 write(b"unknown command\r\n");
             }
@@ -72,19 +88,13 @@ fn run_command(line: &[u8]) {
 }
 
 fn show(path: &[u8], operation: usize) {
-    let mut buffer = [0; 64];
-    buffer[..path.len()].copy_from_slice(path);
-    let handle = syscall(
-        SYS_OPEN,
-        buffer.as_mut_ptr().expose_provenance(),
-        path.len(),
-        0,
-    );
+    let handle = open(path, OPEN_READ);
     if handle == SYSCALL_ERROR {
         write(b"cannot open path\r\n");
         return;
     }
 
+    let mut buffer = [0; 64];
     loop {
         let count = syscall(
             operation,
@@ -105,6 +115,46 @@ fn show(path: &[u8], operation: usize) {
         }
     }
     syscall(SYS_CLOSE, handle, 0, 0);
+}
+
+fn write_file(arguments: &[u8]) {
+    let Some(separator) = arguments.iter().position(|&byte| byte == b' ') else {
+        write(WRITE_USAGE);
+        return;
+    };
+    let (path, text) = arguments.split_at(separator);
+    let text = text.trim_ascii_start();
+    let mut buffer = [0; LINE_LIMIT + 2];
+    buffer[..text.len()].copy_from_slice(text);
+    let length = text.len() + 2;
+    buffer[text.len()..length].copy_from_slice(b"\r\n");
+
+    let handle = open(path, OPEN_WRITE_TRUNCATE);
+    if handle == SYSCALL_ERROR {
+        write(b"cannot open path\r\n");
+        return;
+    }
+    let count = syscall(
+        SYS_WRITE,
+        handle,
+        buffer.as_mut_ptr().expose_provenance(),
+        length,
+    );
+    syscall(SYS_CLOSE, handle, 0, 0);
+    if count != length {
+        write(b"cannot write path\r\n");
+    }
+}
+
+fn open(path: &[u8], mode: usize) -> usize {
+    let mut buffer = [0; LINE_LIMIT];
+    buffer[..path.len()].copy_from_slice(path);
+    syscall(
+        SYS_OPEN,
+        buffer.as_mut_ptr().expose_provenance(),
+        path.len(),
+        mode,
+    )
 }
 
 fn write(text: &[u8]) {

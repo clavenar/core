@@ -73,22 +73,28 @@ The hello program uses this call to print `Hello from user mode`.
 Call 4 polls the console. It returns one UART byte in `a0` when input is ready
 and -1 otherwise. At the `clv> ` prompt, type `help` to see the available
 commands. Use `ls` to list the RamFS root, `cat /hello.txt` or
-`cat /about.txt` to read a file, and `exit` to stop the shell.
+`cat /about.txt` to read a file, and `exit` to stop the shell. The command
+`write /note.txt hello` creates or replaces a file with one line of text.
 
-The read-only RamFS contains `/hello.txt` and `/about.txt`. Paths can be
-absolute or relative to the root. Each task has four file handles, and each
-open handle has an independent cursor.
+RamFS starts with read-only `/hello.txt` and `/about.txt` and holds up to four
+writable files of 256 bytes each. Writable files live in RAM until reboot.
+Paths can be absolute or relative to the root. Each task has four file
+handles, and each open handle has an independent cursor.
 
 | Call | Arguments | Result in `a0` |
 | --- | --- | --- |
-| 5 `open` | `a0` path address, `a1` path length up to 64 bytes | Handle |
+| 5 `open` | `a0` path address, `a1` path length up to 64 bytes, `a2` mode | Handle |
 | 6 `read` | `a0` file handle, `a1` destination address, `a2` capacity | Bytes copied, or 0 at EOF |
 | 7 `readdir` | `a0` root directory handle, `a1` destination address, `a2` capacity | One entry name's byte count, or 0 at end |
 | 8 `close` | `a0` handle | 0 |
+| 9 `write` | `a0` writable handle, `a1` source address, `a2` byte count | Bytes written |
 
-File calls return -1 on error. Paths and destination buffers must reside in
-the calling task's stack. Reads and directory listings advance their cursor
-only after a successful copy. Directory entry names are returned as bytes
+Open mode 0 opens a path for reading. Mode 1 opens a writable file for reading
+and writing, creating it if absent and truncating it to zero length otherwise.
+File calls return -1 on error. Paths and data buffers must reside in the
+calling task's stack. Writes validate and copy the entire input before
+changing bytes or the cursor. Reads and directory listings advance their
+cursor only after a successful copy. Directory entries contain the name bytes
 without a trailing newline or NUL.
 
 Call 1 takes an exit status in `a0` and removes the calling task from the

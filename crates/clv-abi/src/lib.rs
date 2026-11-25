@@ -11,6 +11,9 @@ pub const SYS_OPEN: usize = 5;
 pub const SYS_READ: usize = 6;
 pub const SYS_READDIR: usize = 7;
 pub const SYS_CLOSE: usize = 8;
+pub const SYS_WRITE: usize = 9;
 
+pub const OPEN_READ: usize = 0;
+pub const OPEN_WRITE_TRUNCATE: usize = 1;
 pub const SYSCALL_ERROR: usize = usize::MAX;
 pub const PROBE_VALUE: usize = 42;
