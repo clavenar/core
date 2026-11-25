@@ -81,7 +81,6 @@ wait hello
 A child started by `run hello` sends `hello ready` to the shell's mailbox.
 `recv hello` prints the message, waiting if the mailbox is empty and the
 child is still running. A queued reply remains available after exit or fault.
-The next successful launch starts with an empty reply mailbox.
 
 `ask hello hello from shell` launches `hello` with a request and prints the
 echoed reply `hello from shell`. The request is available to the child when
@@ -98,10 +97,12 @@ askat hello /notes todo.txt
 wait hello
 ```
 
-`wait hello` collects the exit status or fault cause of the latest launch.
-The shell waits for a running program and returns immediately if the result is
-already available. A successful wait consumes the result, and a successful
-launch replaces any uncollected result.
+The shell records the handle returned by its latest successful launch for
+`wait hello` and `recv hello`. `wait hello` collects the exit status or fault
+cause once, waiting if the child is still running. The shell can collect
+the status and queued reply in either order. A successful launch invalidates
+the previous handle and discards its uncollected results. A failed launch
+preserves the previous handle and its results.
 
 The user program passes the call number in `a7` and executes `ecall`. Call 0
 prints `task N user probe` and returns 42 in `a0`. Call 3 returns 1 in `a0` once
@@ -184,18 +185,20 @@ schedule. In a successful run, both tasks report
 and idles. Unknown call numbers return -1 in `a0`.
 
 Call 15 (`spawn`) takes a program selector in `a0`. Selector 0 chooses `hello`.
-It returns 0 when the task is ready to run and -1 if the selector is unknown
-or the task is already running.
+It returns a fresh, nonzero child handle in `a0` when the task is ready to run
+and -1 if the selector is unknown or the task is already running. All four
+spawn calls use the same child handle sequence for the current boot. Child
+handles belong to the shell and have their own namespace.
 
-Call 16 (`wait`) takes program selector 0 in `a0`. On success, `a0` contains
+Call 16 (`wait`) takes the child handle in `a0`. On success, `a0` contains
 the result type and `a1` contains the full exit status or fault cause. Result
 type 0 means exit and 1 means fault. The call returns -1 in `a0` for an
-invalid selector, a caller other than the shell, or no pending launch.
+invalid handle, a caller other than the shell, or an already collected status.
 
 Call 18 (`spawn_at`) takes program selector 0 in `a0` and a directory handle
-from the caller in `a1`. It returns 0 on success and -1 on error. The child
-receives its own directory handle in `a1` and a grant flag of 1 in `a2`.
-Ordinary launches start with `a2` set to 0.
+from the caller in `a1`. It returns a child handle on success and -1 on error.
+The child receives its own directory handle in `a1` and a grant flag of 1 in
+`a2`. Ordinary launches start with `a2` set to 0.
 
 Call 19 (`message_send`) takes a user stack address in `a0` and a length from
 1 to 64 bytes in `a1`. A shell-launched `hello` can queue one message for its
@@ -203,22 +206,25 @@ live parent. The call returns the byte count on success and -1 on error. A
 send to a full mailbox preserves its queued message.
 
 Call 20 (`message_recv`) takes a user stack destination in `a0` and its nonzero
-capacity in `a1`. The shell receives replies, and a launched `hello` receives
-its request. The result gives the byte count in `a0` and the sender's task ID
-in `a1`. An empty reply mailbox blocks while the child runs. Other empty
-reads return 0 in both registers. An invalid or undersized buffer returns -1
-and preserves any queued message.
+capacity in `a1`. The shell passes its child handle in `a2` to receive a reply.
+A launched `hello` passes 0 in `a2` to receive its request. The result gives
+the byte count in `a0` and the sender's task ID in `a1`. An empty reply mailbox
+blocks while the child runs. Other empty reads return 0 in both registers. An
+invalid handle or an invalid or undersized buffer returns -1 and preserves any
+queued message.
 
 Call 21 (`spawn_with_message`) takes program selector 0 in `a0`, a user stack
 address in `a1`, and a length from 1 to 64 bytes in `a2`. It copies the request
-before making the child runnable and returns 0 on success or -1 on error.
+before making the child runnable and returns a child handle on success or
+-1 on error.
 The child consumes the request with `message_recv`. Exit or fault discards
 any unread request.
 
 Call 22 (`spawn_at_with_message`) takes program selector 0 in `a0`, a
 directory handle in `a1`, a user stack path address in `a2`, and a path length
 from 1 to 64 bytes in `a3`. It validates the grant and copies the request
-before scheduling the child. It returns 0 on success or -1 on error.
+before scheduling the child. It returns a child handle on success or -1 on
+error.
 
 For this launch, `hello` resolves the requested path with `open_at`. A reply
 with status byte 0 carries zero to 63 file bytes. Status byte 1 reports a

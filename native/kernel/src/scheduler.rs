@@ -1,4 +1,4 @@
-use clv_abi::MESSAGE_MAX_BYTES;
+use clv_abi::{MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, SYSCALL_ERROR};
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::fs::ramfs::{RamFs, TaskFs};
@@ -21,10 +21,11 @@ pub(crate) enum TaskCompletion {
     Faulted(usize),
 }
 
-enum HelloRun {
-    Untracked,
-    Running,
-    Completed(TaskCompletion),
+struct HelloLaunch {
+    handle: usize,
+    request: Option<Message>,
+    reply: Option<Message>,
+    completion: Option<TaskCompletion>,
 }
 
 pub(crate) enum WaitResult {
@@ -78,9 +79,7 @@ struct Task {
 pub(crate) struct Scheduler {
     tasks: [Task; 2],
     hello_start: TrapFrame,
-    hello_run: HelloRun,
-    hello_request: Option<Message>,
-    hello_reply: Option<Message>,
+    hello_launch: Option<HelloLaunch>,
     current: usize,
 }
 
@@ -98,9 +97,7 @@ impl Scheduler {
         });
         Self {
             hello_start: tasks[HELLO_TASK_INDEX].frame,
-            hello_run: HelloRun::Untracked,
-            hello_request: None,
-            hello_reply: None,
+            hello_launch: None,
             tasks,
             current: HELLO_TASK_INDEX,
         }
@@ -146,6 +143,15 @@ impl Scheduler {
         {
             return None;
         }
+        // Keep the previous handle after the shell has collected its status and
+        // reply so this slot never reuses a launch handle during the same boot.
+        let previous = self
+            .hello_launch
+            .as_ref()
+            .map_or(NO_CHILD_HANDLE, |launch| launch.handle);
+        let handle = previous
+            .checked_add(1)
+            .filter(|&handle| handle != SYSCALL_ERROR)?;
         let (task_fs, grant) = match directory_fd {
             Some(fd) => {
                 let (task_fs, child_fd) = self.tasks[self.current].fs.grant_directory(fs, fd)?;
@@ -164,30 +170,29 @@ impl Scheduler {
         }
         task.fs = task_fs;
         task.timer_fired = false;
-        self.hello_request = request;
-        self.hello_reply = None;
-        self.hello_run = HelloRun::Running;
+        self.hello_launch = Some(HelloLaunch {
+            handle,
+            request,
+            reply: None,
+            completion: None,
+        });
         task.state = TaskState::Runnable;
-        Some(0)
+        Some(handle)
     }
 
-    pub(crate) fn wait_hello(&mut self, frame: &mut TrapFrame) -> WaitResult {
-        if self.current != SHELL_TASK_INDEX {
+    pub(crate) fn wait_hello(&mut self, handle: usize, frame: &mut TrapFrame) -> WaitResult {
+        let Some(launch) = self.hello_for_shell(handle) else {
             return WaitResult::NoLaunch;
+        };
+        if let Some(completion) = launch.completion.take() {
+            return WaitResult::Completed(completion);
         }
-        match self.hello_run {
-            HelloRun::Untracked => WaitResult::NoLaunch,
-            HelloRun::Completed(completion) => {
-                self.hello_run = HelloRun::Untracked;
-                WaitResult::Completed(completion)
-            }
-            HelloRun::Running => {
-                if self.block_shell(frame, TaskState::WaitingForHello) {
-                    WaitResult::Blocked
-                } else {
-                    WaitResult::NoLaunch
-                }
-            }
+        if self.tasks[HELLO_TASK_INDEX].state == TaskState::Runnable
+            && self.block_shell(frame, TaskState::WaitingForHello)
+        {
+            WaitResult::Blocked
+        } else {
+            WaitResult::NoLaunch
         }
     }
 
@@ -197,14 +202,17 @@ impl Scheduler {
         copy: impl FnOnce(&mut [u8]) -> bool,
     ) -> Option<usize> {
         if self.current != HELLO_TASK_INDEX
-            || !matches!(self.hello_run, HelloRun::Running)
             || self.tasks[SHELL_TASK_INDEX].state == TaskState::Stopped
-            || self.hello_reply.is_some()
         {
             return None;
         }
 
-        self.hello_reply = Some(Message::new(self.current_id(), length, copy)?);
+        let sender = self.current_id();
+        let launch = self.hello_launch.as_mut()?;
+        if launch.reply.is_some() {
+            return None;
+        }
+        launch.reply = Some(Message::new(sender, length, copy)?);
         let shell = &mut self.tasks[SHELL_TASK_INDEX];
         if shell.state == TaskState::WaitingForMessage {
             shell.state = TaskState::Runnable;
@@ -214,15 +222,19 @@ impl Scheduler {
 
     pub(crate) fn receive_message(
         &mut self,
+        handle: usize,
         frame: &mut TrapFrame,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> ReceiveResult {
         let pending = match self.current {
-            SHELL_TASK_INDEX => &mut self.hello_reply,
-            HELLO_TASK_INDEX if matches!(self.hello_run, HelloRun::Running) => {
-                &mut self.hello_request
+            SHELL_TASK_INDEX => self.hello_for_shell(handle).map(|launch| &mut launch.reply),
+            HELLO_TASK_INDEX if handle == NO_CHILD_HANDLE => {
+                self.hello_launch.as_mut().map(|launch| &mut launch.request)
             }
-            _ => return ReceiveResult::Error,
+            _ => None,
+        };
+        let Some(pending) = pending else {
+            return ReceiveResult::Error;
         };
         if let Some(message) = pending.as_ref() {
             if !copy(&message.bytes[..message.length]) {
@@ -236,7 +248,7 @@ impl Scheduler {
             return result;
         }
         if self.current == SHELL_TASK_INDEX
-            && matches!(self.hello_run, HelloRun::Running)
+            && self.tasks[HELLO_TASK_INDEX].state == TaskState::Runnable
             && self.block_shell(frame, TaskState::WaitingForMessage)
         {
             ReceiveResult::Blocked
@@ -261,20 +273,31 @@ impl Scheduler {
         let task = &mut self.tasks[self.current];
         task.state = TaskState::Stopped;
         task.fs.close_all(fs);
-        if self.current == HELLO_TASK_INDEX && matches!(self.hello_run, HelloRun::Running) {
-            self.hello_request = None;
-            self.hello_run = HelloRun::Completed(completion);
-            let shell = &mut self.tasks[SHELL_TASK_INDEX];
-            if matches!(
-                shell.state,
-                TaskState::WaitingForHello | TaskState::WaitingForMessage
-            ) {
-                shell.state = TaskState::Runnable;
+        if let Some(launch) = &mut self.hello_launch {
+            if self.current == HELLO_TASK_INDEX {
+                launch.request = None;
+                launch.completion = Some(completion);
+                let shell = &mut self.tasks[SHELL_TASK_INDEX];
+                if matches!(
+                    shell.state,
+                    TaskState::WaitingForHello | TaskState::WaitingForMessage
+                ) {
+                    shell.state = TaskState::Runnable;
+                }
+            } else {
+                launch.reply = None;
             }
-        } else if self.current == SHELL_TASK_INDEX {
-            self.hello_reply = None;
         }
         self.switch(frame)
+    }
+
+    fn hello_for_shell(&mut self, handle: usize) -> Option<&mut HelloLaunch> {
+        if self.current != SHELL_TASK_INDEX {
+            return None;
+        }
+        self.hello_launch
+            .as_mut()
+            .filter(|launch| launch.handle == handle)
     }
 
     fn block_shell(&mut self, frame: &mut TrapFrame, state: TaskState) -> bool {

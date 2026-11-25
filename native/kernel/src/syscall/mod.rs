@@ -84,7 +84,7 @@ pub(crate) fn dispatch(
             spawn_with_message(scheduler, fs, Some(a1), a2, frame.registers[REG_A3])
                 .unwrap_or(SYSCALL_ERROR)
         }
-        SYS_WAIT if a0 == PROGRAM_HELLO => match scheduler.wait_hello(frame) {
+        SYS_WAIT => match scheduler.wait_hello(a0, frame) {
             WaitResult::NoLaunch => SYSCALL_ERROR,
             WaitResult::Blocked => return Outcome::Wait,
             WaitResult::Completed(completion) => {
@@ -100,7 +100,7 @@ pub(crate) fn dispatch(
             .send_reply(a1, |bytes| copy_from_user_stack(a0, bytes))
             .unwrap_or(SYSCALL_ERROR),
         SYS_MESSAGE_RECV if a1 > 0 && in_user_stack(a0, a1) => {
-            match scheduler.receive_message(frame, |bytes| copy_to_user_stack(bytes, a0, a1)) {
+            match scheduler.receive_message(a2, frame, |bytes| copy_to_user_stack(bytes, a0, a1)) {
                 ReceiveResult::Error => SYSCALL_ERROR,
                 ReceiveResult::Blocked => return Outcome::Wait,
                 ReceiveResult::Empty => {

@@ -2,9 +2,9 @@
 #![no_main]
 
 use clv_abi::{
-    FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, PROBE_VALUE, SYS_CLOSE, SYS_EXIT,
-    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_OPEN_AT, SYS_PROBE, SYS_READ, SYS_TIMER_FIRED,
-    SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PROBE_VALUE, SYS_CLOSE,
+    SYS_EXIT, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_OPEN_AT, SYS_PROBE, SYS_READ,
+    SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
@@ -23,7 +23,7 @@ global_asm!(
 extern "C" fn reply_or_report_ready(directory: usize, scoped: usize) -> usize {
     let mut buffer = [0; MESSAGE_MAX_BYTES];
     let address = buffer.as_mut_ptr().expose_provenance();
-    let count = syscall(SYS_MESSAGE_RECV, address, buffer.len(), 0);
+    let count = syscall(SYS_MESSAGE_RECV, address, buffer.len(), NO_CHILD_HANDLE);
     if (1..=buffer.len()).contains(&count) {
         if scoped != 0 {
             return reply_with_file(directory, &mut buffer, count);

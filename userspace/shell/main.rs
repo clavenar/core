@@ -2,11 +2,11 @@
 #![no_main]
 
 use clv_abi::{
-    FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, OPEN_READ, OPEN_WRITE_TRUNCATE,
-    PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MKDIR,
-    SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
-    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
-    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ,
+    OPEN_WRITE_TRUNCATE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD,
+    SYS_MESSAGE_RECV, SYS_MKDIR, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR,
+    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
+    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -22,6 +22,7 @@ extern "C" fn _start() -> ! {
     let mut length = 0;
     let mut overflow = false;
     let mut previous_was_cr = false;
+    let mut hello_handle = NO_CHILD_HANDLE;
 
     // Let both boot tasks get a turn before drawing the prompt.
     while syscall(SYS_TIMER_FIRED, 0, 0, 0) == 0 {
@@ -46,7 +47,7 @@ extern "C" fn _start() -> ! {
                 if overflow {
                     write(b"line too long\r\n");
                 } else {
-                    run_command(&line[..length]);
+                    run_command(&line[..length], &mut hello_handle);
                 }
                 length = 0;
                 overflow = false;
@@ -70,7 +71,7 @@ extern "C" fn _start() -> ! {
     }
 }
 
-fn run_command(line: &[u8]) {
+fn run_command(line: &[u8], hello_handle: &mut usize) {
     let (command, arguments) = split_word(line.trim_ascii());
     match command {
         b"help" if arguments.is_empty() => write(
@@ -106,12 +107,12 @@ fn run_command(line: &[u8]) {
             b"usage: rm <path>\r\n",
             b"cannot remove path\r\n",
         ),
-        b"run" => run_hello(arguments),
-        b"ask" => ask_hello(arguments),
-        b"askat" => ask_at_hello(arguments),
-        b"recv" if arguments == b"hello" => recv_hello(),
+        b"run" => run_hello(arguments, hello_handle),
+        b"ask" => ask_hello(arguments, hello_handle),
+        b"askat" => ask_at_hello(arguments, hello_handle),
+        b"recv" if arguments == b"hello" => recv_hello(*hello_handle),
         b"recv" => write(b"usage: recv hello\r\n"),
-        b"wait" if arguments == b"hello" => wait_hello(),
+        b"wait" if arguments == b"hello" => wait_hello(*hello_handle),
         b"wait" => write(b"usage: wait hello\r\n"),
         b"exit" if arguments.is_empty() => exit(0),
         b"" => {}
@@ -153,51 +154,53 @@ fn pwd() {
     write(b"\r\n");
 }
 
-fn run_hello(arguments: &[u8]) {
+fn run_hello(arguments: &[u8], hello_handle: &mut usize) {
     let (program, directory) = split_word(arguments);
     if program != b"hello" {
         write(b"usage: run hello [dir]\r\n");
         return;
     }
     if directory.is_empty() {
-        if syscall(SYS_SPAWN, PROGRAM_HELLO, 0, 0) == SYSCALL_ERROR {
+        let handle = syscall(SYS_SPAWN, PROGRAM_HELLO, 0, 0);
+        if handle == SYSCALL_ERROR {
             write(b"hello is already running\r\n");
+        } else {
+            *hello_handle = handle;
         }
-        return;
+    } else if let Some(handle) = run_scoped_hello(directory, None) {
+        *hello_handle = handle;
     }
-
-    run_scoped_hello(directory, None);
 }
 
-fn run_scoped_hello(directory: &[u8], request: Option<&[u8]>) -> bool {
-    let handle = call_path(SYS_OPEN, directory, OPEN_READ);
-    if handle == SYSCALL_ERROR {
+fn run_scoped_hello(directory: &[u8], request: Option<&[u8]>) -> Option<usize> {
+    let directory_handle = call_path(SYS_OPEN, directory, OPEN_READ);
+    if directory_handle == SYSCALL_ERROR {
         write(b"cannot open path\r\n");
-        return false;
+        return None;
     }
-    let result = match request {
+    let handle = match request {
         Some(path) => {
             ecall(
                 SYS_SPAWN_AT_WITH_MESSAGE,
                 PROGRAM_HELLO,
-                handle,
+                directory_handle,
                 path.as_ptr().expose_provenance(),
                 path.len(),
             )
             .0
         }
-        None => syscall(SYS_SPAWN_AT, PROGRAM_HELLO, handle, 0),
+        None => syscall(SYS_SPAWN_AT, PROGRAM_HELLO, directory_handle, 0),
     };
-    syscall(SYS_CLOSE, handle, 0, 0);
-    if result == SYSCALL_ERROR {
+    syscall(SYS_CLOSE, directory_handle, 0, 0);
+    if handle == SYSCALL_ERROR {
         write(b"cannot run scoped hello\r\n");
-        return false;
+        return None;
     }
-    true
+    Some(handle)
 }
 
-fn wait_hello() {
-    let (kind, mut value) = ecall(SYS_WAIT, PROGRAM_HELLO, 0, 0, 0);
+fn wait_hello(handle: usize) {
+    let (kind, mut value) = ecall(SYS_WAIT, handle, 0, 0, 0);
     match kind {
         WAIT_EXITED => write(b"hello exited 0x"),
         WAIT_FAULTED => write(b"hello fault scause=0x"),
@@ -215,29 +218,34 @@ fn wait_hello() {
     write_stack(&line);
 }
 
-fn ask_hello(arguments: &[u8]) {
+fn ask_hello(arguments: &[u8], hello_handle: &mut usize) {
     let (program, text) = split_word(arguments);
     if program != b"hello" || text.is_empty() {
         write(b"usage: ask hello <text>\r\n");
         return;
     }
     // The text is a slice of the command line on the user stack.
-    let result = syscall(
+    let handle = syscall(
         SYS_SPAWN_WITH_MESSAGE,
         PROGRAM_HELLO,
         text.as_ptr().expose_provenance(),
         text.len(),
     );
-    if result == SYSCALL_ERROR {
+    if handle == SYSCALL_ERROR {
         write(b"cannot ask hello\r\n");
         return;
     }
-    recv_hello();
+    *hello_handle = handle;
+    recv_hello(handle);
 }
 
-fn recv_hello() {
+fn recv_hello(handle: usize) {
+    if handle == NO_CHILD_HANDLE {
+        write(b"no message\r\n");
+        return;
+    }
     let mut buffer = [0; MESSAGE_MAX_BYTES];
-    match receive_message(&mut buffer) {
+    match receive_message(handle, &mut buffer) {
         Some([]) => write(b"no message\r\n"),
         Some(message) => {
             write_stack(message);
@@ -247,19 +255,20 @@ fn recv_hello() {
     }
 }
 
-fn ask_at_hello(arguments: &[u8]) {
+fn ask_at_hello(arguments: &[u8], hello_handle: &mut usize) {
     let (program, arguments) = split_word(arguments);
     let (directory, path) = split_word(arguments);
     if program != b"hello" || directory.is_empty() || path.is_empty() {
         write(b"usage: askat hello <dir> <path>\r\n");
         return;
     }
-    if !run_scoped_hello(directory, Some(path)) {
+    let Some(handle) = run_scoped_hello(directory, Some(path)) else {
         return;
-    }
+    };
+    *hello_handle = handle;
 
     let mut buffer = [0; MESSAGE_MAX_BYTES];
-    match receive_message(&mut buffer) {
+    match receive_message(handle, &mut buffer) {
         Some([FILE_REPLY_OK]) => write(b"empty file\r\n"),
         Some([FILE_REPLY_OK, contents @ ..]) => {
             write_stack(contents);
@@ -273,12 +282,12 @@ fn ask_at_hello(arguments: &[u8]) {
     }
 }
 
-fn receive_message(buffer: &mut [u8]) -> Option<&[u8]> {
+fn receive_message(handle: usize, buffer: &mut [u8]) -> Option<&[u8]> {
     let count = syscall(
         SYS_MESSAGE_RECV,
         buffer.as_mut_ptr().expose_provenance(),
         buffer.len(),
-        0,
+        handle,
     );
     buffer.get(..count)
 }
