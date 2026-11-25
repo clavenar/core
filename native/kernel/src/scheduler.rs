@@ -1,3 +1,5 @@
+use clv_abi::MESSAGE_MAX_BYTES;
+
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::memory::sv39::{AddressSpace, USER_STACK_TOP};
@@ -9,6 +11,7 @@ const SHELL_TASK_INDEX: usize = 1;
 enum TaskState {
     Runnable,
     WaitingForHello,
+    WaitingForMessage,
     Stopped,
 }
 
@@ -30,6 +33,19 @@ pub(crate) enum WaitResult {
     Completed(TaskCompletion),
 }
 
+pub(crate) enum ReceiveResult {
+    Error,
+    Blocked,
+    Empty,
+    Received { length: usize, sender: usize },
+}
+
+struct Message {
+    bytes: [u8; MESSAGE_MAX_BYTES],
+    length: usize,
+    sender: usize,
+}
+
 struct Task {
     frame: TrapFrame,
     address_space: AddressSpace,
@@ -42,6 +58,7 @@ pub(crate) struct Scheduler {
     tasks: [Task; 2],
     hello_start: TrapFrame,
     hello_run: HelloRun,
+    hello_message: Option<Message>,
     current: usize,
 }
 
@@ -60,6 +77,7 @@ impl Scheduler {
         Self {
             hello_start: tasks[HELLO_TASK_INDEX].frame,
             hello_run: HelloRun::Untracked,
+            hello_message: None,
             tasks,
             current: HELLO_TASK_INDEX,
         }
@@ -122,6 +140,7 @@ impl Scheduler {
         task.timer_fired = false;
         task.state = TaskState::Runnable;
         self.hello_run = HelloRun::Running;
+        self.hello_message = None;
         Some(0)
     }
 
@@ -136,15 +155,70 @@ impl Scheduler {
                 WaitResult::Completed(completion)
             }
             HelloRun::Running => {
-                // Retry the ECALL after the child completes.
-                self.tasks[SHELL_TASK_INDEX].frame = *frame;
-                if self.switch(frame) {
-                    self.tasks[SHELL_TASK_INDEX].state = TaskState::WaitingForHello;
+                if self.block_shell(frame, TaskState::WaitingForHello) {
                     WaitResult::Blocked
                 } else {
                     WaitResult::NoLaunch
                 }
             }
+        }
+    }
+
+    pub(crate) fn send_hello_message(
+        &mut self,
+        length: usize,
+        copy: impl FnOnce(&mut [u8]) -> bool,
+    ) -> Option<usize> {
+        if self.current != HELLO_TASK_INDEX
+            || !matches!(self.hello_run, HelloRun::Running)
+            || self.tasks[SHELL_TASK_INDEX].state == TaskState::Stopped
+            || self.hello_message.is_some()
+            || length == 0
+        {
+            return None;
+        }
+
+        let mut bytes = [0; MESSAGE_MAX_BYTES];
+        if !copy(bytes.get_mut(..length)?) {
+            return None;
+        }
+        self.hello_message = Some(Message {
+            bytes,
+            length,
+            sender: self.current_id(),
+        });
+        let shell = &mut self.tasks[SHELL_TASK_INDEX];
+        if shell.state == TaskState::WaitingForMessage {
+            shell.state = TaskState::Runnable;
+        }
+        Some(length)
+    }
+
+    pub(crate) fn receive_hello_message(
+        &mut self,
+        frame: &mut TrapFrame,
+        copy: impl FnOnce(&[u8]) -> bool,
+    ) -> ReceiveResult {
+        if self.current != SHELL_TASK_INDEX {
+            return ReceiveResult::Error;
+        }
+        if let Some(message) = &self.hello_message {
+            if !copy(&message.bytes[..message.length]) {
+                return ReceiveResult::Error;
+            }
+            let result = ReceiveResult::Received {
+                length: message.length,
+                sender: message.sender,
+            };
+            self.hello_message = None;
+            return result;
+        }
+        if matches!(self.hello_run, HelloRun::Running)
+            && self.block_shell(frame, TaskState::WaitingForMessage)
+        {
+            ReceiveResult::Blocked
+        } else {
+            ReceiveResult::Empty
         }
     }
 
@@ -167,11 +241,26 @@ impl Scheduler {
         if self.current == HELLO_TASK_INDEX && matches!(self.hello_run, HelloRun::Running) {
             self.hello_run = HelloRun::Completed(completion);
             let shell = &mut self.tasks[SHELL_TASK_INDEX];
-            if shell.state == TaskState::WaitingForHello {
+            if matches!(
+                shell.state,
+                TaskState::WaitingForHello | TaskState::WaitingForMessage
+            ) {
                 shell.state = TaskState::Runnable;
             }
+        } else if self.current == SHELL_TASK_INDEX {
+            self.hello_message = None;
         }
         self.switch(frame)
+    }
+
+    fn block_shell(&mut self, frame: &mut TrapFrame, state: TaskState) -> bool {
+        // Keep the ECALL's PC so the shell retries its syscall after waking.
+        self.tasks[SHELL_TASK_INDEX].frame = *frame;
+        if !self.switch(frame) {
+            return false;
+        }
+        self.tasks[SHELL_TASK_INDEX].state = state;
+        true
     }
 
     fn switch(&mut self, frame: &mut TrapFrame) -> bool {

@@ -35,6 +35,7 @@ _start:
     ld t1, 8(sp)
     bne t1, s1, .Luser_failed
 
+    call {send_hello_message}
     beqz s3, .Lprint_message
     mv a0, s2
     call {print_granted_hello}

@@ -1,16 +1,16 @@
 use clv_abi::{
     OPEN_READ, OPEN_WRITE_TRUNCATE, PROBE_VALUE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT,
-    SYS_GETCWD, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
-    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PROBE,
+    SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT, SYS_TIMER_FIRED,
+    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::console::write_task;
 use crate::drivers::uart;
 use crate::fs::ramfs::{RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
-use crate::memory::usercopy::{copy_from_user_stack, copy_to_user_stack};
-use crate::scheduler::{Scheduler, TaskCompletion, WaitResult};
+use crate::memory::usercopy::{copy_from_user_stack, copy_to_user_stack, in_user_stack};
+use crate::scheduler::{ReceiveResult, Scheduler, TaskCompletion, WaitResult};
 
 const CONSOLE_WRITE_LIMIT: usize = 128;
 const PATH_LIMIT: usize = 64;
@@ -87,6 +87,24 @@ pub(crate) fn dispatch(
                 kind
             }
         },
+        SYS_MESSAGE_SEND => scheduler
+            .send_hello_message(a1, |bytes| copy_from_user_stack(a0, bytes))
+            .unwrap_or(SYSCALL_ERROR),
+        SYS_MESSAGE_RECV if a1 > 0 && in_user_stack(a0, a1) => {
+            match scheduler.receive_hello_message(frame, |bytes| copy_to_user_stack(bytes, a0, a1))
+            {
+                ReceiveResult::Error => SYSCALL_ERROR,
+                ReceiveResult::Blocked => return Outcome::Wait,
+                ReceiveResult::Empty => {
+                    frame.registers[REG_A1] = 0;
+                    0
+                }
+                ReceiveResult::Received { length, sender } => {
+                    frame.registers[REG_A1] = sender;
+                    length
+                }
+            }
+        }
         _ => SYSCALL_ERROR,
     };
     // ECALL is a 32-bit instruction, including on cores with compressed code.

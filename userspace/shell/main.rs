@@ -2,10 +2,10 @@
 #![no_main]
 
 use clv_abi::{
-    OPEN_READ, OPEN_WRITE_TRUNCATE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT, SYS_GETCWD,
-    SYS_MKDIR, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN,
-    SYS_SPAWN_AT, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE,
-    SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    MESSAGE_MAX_BYTES, OPEN_READ, OPEN_WRITE_TRUNCATE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE,
+    SYS_EXIT, SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MKDIR, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE,
+    SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -73,7 +73,7 @@ fn run_command(line: &[u8]) {
     let (command, arguments) = split_word(line.trim_ascii());
     match command {
         b"help" if arguments.is_empty() => write(
-            b"help  pwd  cd <path>  ls [path]  mkdir <path>  rmdir <path>  cat <path>  write <path> <text>  rm <path>  run hello [dir]  wait hello  exit\r\n",
+            b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\nrun hello [dir]  recv hello  wait hello\r\n",
         ),
         b"pwd" if arguments.is_empty() => pwd(),
         b"cd" => run_path_command(
@@ -106,6 +106,8 @@ fn run_command(line: &[u8]) {
             b"cannot remove path\r\n",
         ),
         b"run" => run_hello(arguments),
+        b"recv" if arguments == b"hello" => recv_hello(),
+        b"recv" => write(b"usage: recv hello\r\n"),
         b"wait" if arguments == b"hello" => wait_hello(),
         b"wait" => write(b"usage: wait hello\r\n"),
         b"exit" if arguments.is_empty() => exit(0),
@@ -190,6 +192,24 @@ fn wait_hello() {
         value >>= 4;
     }
     write_stack(&line);
+}
+
+fn recv_hello() {
+    let mut buffer = [0; MESSAGE_MAX_BYTES];
+    let count = syscall(
+        SYS_MESSAGE_RECV,
+        buffer.as_mut_ptr().expose_provenance(),
+        buffer.len(),
+        0,
+    );
+    match buffer.get(..count) {
+        Some([]) => write(b"no message\r\n"),
+        Some(message) => {
+            write_stack(message);
+            write(b"\r\n");
+        }
+        None => write(b"recv failed\r\n"),
+    }
 }
 
 fn show(path: &[u8], operation: usize) {

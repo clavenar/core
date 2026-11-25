@@ -2,8 +2,8 @@
 #![no_main]
 
 use clv_abi::{
-    PROBE_VALUE, SYS_CLOSE, SYS_EXIT, SYS_OPEN_AT, SYS_PROBE, SYS_READ, SYS_TIMER_FIRED,
-    SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    PROBE_VALUE, SYS_CLOSE, SYS_EXIT, SYS_MESSAGE_SEND, SYS_OPEN_AT, SYS_PROBE, SYS_READ,
+    SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
@@ -15,8 +15,19 @@ global_asm!(
     console_call = const SYS_WRITE_CONSOLE,
     timer_call = const SYS_TIMER_FIRED,
     probe_value = const PROBE_VALUE,
+    send_hello_message = sym send_hello_message,
     print_granted_hello = sym print_granted_hello,
 );
+
+extern "C" fn send_hello_message() {
+    let mut message = *b"hello ready";
+    syscall(
+        SYS_MESSAGE_SEND,
+        message.as_mut_ptr().expose_provenance(),
+        message.len(),
+        0,
+    );
+}
 
 extern "C" fn print_granted_hello(directory: usize) -> usize {
     let mut buffer = [0; 128];

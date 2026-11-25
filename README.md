@@ -73,8 +73,14 @@ granted directory.
 mkdir /notes
 write /notes/hello.txt Hello from notes
 run hello /notes
+recv hello
 wait hello
 ```
+
+A launched `hello` sends `hello ready` to its parent's mailbox. `recv hello`
+prints the message, waiting if the mailbox is empty and the child is still
+running. A queued message remains available after exit or fault. The next
+successful launch starts with an empty mailbox.
 
 `wait hello` collects the exit status or fault cause of the latest `run hello`.
 The shell waits for a running program and returns immediately if the result is
@@ -174,6 +180,17 @@ Call 18 (`spawn_at`) takes program selector 0 in `a0` and a directory handle
 from the caller in `a1`. It returns 0 on success and -1 on error. The child
 receives its own directory handle in `a1` and a grant flag of 1 in `a2`.
 Ordinary launches start with `a2` set to 0.
+
+Call 19 (`message_send`) takes a user stack address in `a0` and a length from
+1 to 64 bytes in `a1`. A shell-launched `hello` can queue one message for its
+live parent. The call returns the byte count on success and -1 on error. A
+send to a full mailbox preserves its queued message.
+
+Call 20 (`message_recv`) takes a user stack destination in `a0` and its nonzero
+capacity in `a1`. The shell receives the byte count in `a0` and the sender's
+task ID in `a1`. An empty mailbox blocks while the launched child runs and
+returns 0 in both registers otherwise. An invalid or undersized buffer
+returns -1 and preserves any queued message.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

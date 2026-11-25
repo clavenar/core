@@ -36,7 +36,7 @@ pub(crate) fn copy_to_user_stack(source: &[u8], destination: usize, capacity: us
     true
 }
 
-fn in_user_stack(address: usize, length: usize) -> bool {
+pub(crate) fn in_user_stack(address: usize, length: usize) -> bool {
     length == 0
         || (address >= USER_STACK_BASE
             && address
