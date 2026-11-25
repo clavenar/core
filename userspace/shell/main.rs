@@ -74,6 +74,7 @@ fn run_command(line: &[u8], children: &mut Children) {
             b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\n\
               run hello [dir]  run echo\r\n\
               ask <hello|echo> <text>  askat hello <dir> <path>\r\n\
+              askfile hello <path>\r\n\
               recv <hello|echo>  wait <hello|echo>\r\n",
         ),
         b"pwd" if arguments.is_empty() => files::pwd(),
@@ -87,6 +88,7 @@ fn run_command(line: &[u8], children: &mut Children) {
         b"run" => children.run(arguments),
         b"ask" => children.ask(arguments),
         b"askat" => children.ask_at(arguments),
+        b"askfile" => children.ask_file(arguments),
         b"recv" => children.recv(arguments),
         b"wait" => children.wait(arguments),
         b"exit" if arguments.is_empty() => clv::exit(0),

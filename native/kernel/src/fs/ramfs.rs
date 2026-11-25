@@ -97,7 +97,7 @@ impl WritableFile {
             contents: [0; WRITABLE_FILE_CAPACITY],
             length: 0,
             linked: true,
-            open_handles: 1,
+            open_handles: 0,
         })
     }
 }
@@ -135,7 +135,6 @@ impl RamFs {
                         file.contents.fill(0);
                         file.length = 0;
                     }
-                    file.open_handles += 1;
                     Some(node)
                 }
                 _ => None,
@@ -305,6 +304,15 @@ impl RamFs {
                 })
             })
             .map(Node::WritableFile)
+    }
+
+    fn retain(&mut self, node: Node) {
+        if let Node::WritableFile(index) = node {
+            let file = self.writable[index]
+                .as_mut()
+                .expect("open handle refers to a writable file");
+            file.open_handles += 1;
+        }
     }
 
     fn release(&mut self, node: Node) {

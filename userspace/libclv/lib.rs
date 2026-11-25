@@ -7,8 +7,8 @@ pub mod fs;
 
 use clv_abi::{
     MESSAGE_MAX_BYTES, SYS_EXIT, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_READ_CONSOLE, SYS_SPAWN,
-    SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_WAIT,
-    SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_MESSAGE,
+    SYS_TIMER_FIRED, SYS_WAIT, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 use core::arch::asm;
 
@@ -98,6 +98,10 @@ pub fn spawn(program: usize, directory: Option<usize>, request: Option<&[u8]>) -
             None => syscall(SYS_SPAWN, program, 0, 0),
         }),
     }
+}
+
+pub fn spawn_with_file(program: usize, file: usize) -> Option<usize> {
+    syscall_result(syscall(SYS_SPAWN_WITH_FILE, program, file, 0))
 }
 
 pub enum ChildStatus {

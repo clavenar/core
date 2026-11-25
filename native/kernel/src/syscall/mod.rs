@@ -1,9 +1,9 @@
 use clv_abi::{
-    OPEN_READ, OPEN_WRITE_TRUNCATE, PATH_MAX_BYTES, PROBE_VALUE, SYS_CHDIR, SYS_CLOSE, SYS_EXIT,
-    SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PROBE,
-    SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
-    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
-    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    GrantKind, OPEN_READ, OPEN_WRITE_TRUNCATE, PATH_MAX_BYTES, PROBE_VALUE, SYS_CHDIR, SYS_CLOSE,
+    SYS_EXIT, SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT,
+    SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
+    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -72,7 +72,10 @@ pub(crate) fn dispatch(
         }
         SYS_SPAWN => scheduler.spawn(fs, a0, None, None).unwrap_or(SYSCALL_ERROR),
         SYS_SPAWN_AT => scheduler
-            .spawn(fs, a0, Some(a1), None)
+            .spawn(fs, a0, Some((GrantKind::Directory, a1)), None)
+            .unwrap_or(SYSCALL_ERROR),
+        SYS_SPAWN_WITH_FILE => scheduler
+            .spawn(fs, a0, Some((GrantKind::File, a1)), None)
             .unwrap_or(SYSCALL_ERROR),
         SYS_SPAWN_WITH_MESSAGE => {
             spawn_with_message(scheduler, fs, a0, None, a1, a2).unwrap_or(SYSCALL_ERROR)
@@ -128,7 +131,8 @@ fn spawn_with_message(
     let request = Message::new(scheduler.current_id(), length, |bytes| {
         copy_from_user_stack(address, bytes)
     })?;
-    scheduler.spawn(fs, program, directory_fd, Some(request))
+    let grant = directory_fd.map(|fd| (GrantKind::Directory, fd));
+    scheduler.spawn(fs, program, grant, Some(request))
 }
 
 fn open_file(

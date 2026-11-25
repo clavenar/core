@@ -109,6 +109,19 @@ askat hello /notes todo.txt
 wait hello
 ```
 
+`askfile hello <path>` grants `hello` read access to one file. The shell opens
+the file, launches the child and closes its own handle. The child reads directly
+from its handle and replies with up to 63 bytes. A directory is rejected at launch.
+
+```text
+mkdir /notes
+write /notes/report approved
+askfile hello /notes/report
+wait hello
+```
+
+The shell prints `approved` and reports that `hello` exited with status 0.
+
 The shell records the latest successful launch handle for each program.
 `wait hello` and `wait echo` collect the selected child's exit status or
 fault cause once, waiting if the child is still running. `recv hello` and
@@ -148,7 +161,7 @@ current directory, initially `/`. Within a path, `.` keeps the directory
 reached so far and `..` moves to its parent, staying at `/` when already
 there. Creating a file or directory requires an existing parent. Each task
 can hold four live handles, each with an independent cursor. Every open or
-directory grant receives an opaque ID unique within the current boot. The
+grant receives an opaque ID unique within the current boot. The
 kernel accepts that ID from the owning task until the handle closes or the
 task stops.
 
@@ -200,7 +213,7 @@ prints `all tasks exited` and idles. Unknown call numbers return -1 in `a0`.
 Call 15 (`spawn`) takes a program selector in `a0`. Selector 0 chooses
 `hello` and selector 1 chooses `echo`.
 It returns a fresh, nonzero child handle in `a0` when the task is ready to run
-and -1 if the selector is unknown or the task is already running. All four
+and -1 if the selector is unknown or the task is already running. All
 spawn calls use the same child handle sequence for the current boot. Child
 handles belong to the shell and have their own namespace.
 
@@ -211,7 +224,7 @@ invalid handle, a caller other than the shell, or an already collected status.
 
 Call 18 (`spawn_at`) takes a program selector in `a0` and a directory handle
 from the caller in `a1`. It returns a child handle on success and -1 on error.
-The child receives its own directory handle in `a1` and a grant flag of 1 in
+The child receives its own directory handle in `a1` and a grant kind of 1 in
 `a2`. Ordinary launches start with `a2` set to 0.
 
 Call 19 (`message_send`) takes a user stack address in `a0` and a length from
@@ -244,6 +257,15 @@ When launched this way, `hello` resolves the requested path with `open_at`.
 A reply with status byte 0 carries zero to 63 file bytes. Status byte 1 reports a
 failed read and carries just that byte. The child exits with status 0 after
 sending a successful reply and status 1 on failure.
+
+Call 23 (`spawn_with_file`) takes a program selector in `a0` and an open
+regular file handle owned by the shell in `a1`. It returns a child handle on
+success or -1 on error. The child starts with no working directory. Its sole
+RamFS handle arrives in `a1`, with grant kind 2 in `a2`. The handle is
+read-only even if the parent opened the file for writing. Its cursor starts
+at byte zero. Closing the parent's handle or unlinking the name leaves the
+child's handle valid. Writes, directory-relative opens through the file
+handle, and ordinary path lookups by this child return -1.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

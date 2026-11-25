@@ -1,3 +1,5 @@
+use clv_abi::GrantKind;
+
 use super::{DirectoryId, Node, PathBase, RamFs};
 
 const HANDLE_COUNT: usize = 4;
@@ -20,6 +22,7 @@ impl Handle {
         let id = fs.next_handle_id;
         let next = id.checked_add(1)?;
         let node = open(fs)?;
+        fs.retain(node);
         fs.next_handle_id = next;
         Some(Self {
             id,
@@ -31,7 +34,7 @@ impl Handle {
 }
 
 pub(crate) struct TaskFs {
-    // A scoped task resolves paths through its directory handles.
+    // Only an unscoped task starts with a working directory.
     cwd: Option<DirectoryId>,
     slots: [Option<Handle>; HANDLE_COUNT],
 }
@@ -44,9 +47,21 @@ impl TaskFs {
         }
     }
 
-    pub(crate) fn grant_directory(&self, fs: &mut RamFs, fd: usize) -> Option<(Self, usize)> {
-        let directory = self.directory_for_handle(fd)?;
-        let handle = Handle::allocate(fs, false, |_| Some(Node::Directory(directory)))?;
+    pub(crate) fn grant(
+        &self,
+        fs: &mut RamFs,
+        fd: usize,
+        kind: GrantKind,
+    ) -> Option<(Self, usize)> {
+        let node = self.node_for_handle(fd)?;
+        let node_kind = match node {
+            Node::Directory(_) => GrantKind::Directory,
+            Node::BootFile(_) | Node::WritableFile(_) => GrantKind::File,
+        };
+        if node_kind != kind {
+            return None;
+        }
+        let handle = Handle::allocate(fs, false, |_| Some(node))?;
         let child_fd = handle.id;
         let mut slots = [const { None }; HANDLE_COUNT];
         slots[0] = Some(handle);
@@ -63,16 +78,15 @@ impl TaskFs {
         directory_fd: usize,
         path: &[u8],
     ) -> Option<usize> {
-        let directory = self.directory_for_handle(directory_fd)?;
+        let Node::Directory(directory) = self.node_for_handle(directory_fd)? else {
+            return None;
+        };
         self.open_path(fs, PathBase::Confined(directory), path, false)
     }
 
-    fn directory_for_handle(&self, fd: usize) -> Option<DirectoryId> {
+    fn node_for_handle(&self, fd: usize) -> Option<Node> {
         let slot = self.handle_slot(fd)?;
-        let Node::Directory(directory) = self.slots[slot].as_ref()?.node else {
-            return None;
-        };
-        Some(directory)
+        Some(self.slots[slot].as_ref()?.node)
     }
 
     fn handle_slot(&self, fd: usize) -> Option<usize> {

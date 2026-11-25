@@ -1,4 +1,4 @@
-use clv_abi::{MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PROGRAM_ECHO, PROGRAM_HELLO};
+use clv_abi::{GrantKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PROGRAM_ECHO, PROGRAM_HELLO};
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::fs::ramfs::{RamFs, TaskFs};
@@ -146,7 +146,7 @@ impl Scheduler {
         &mut self,
         fs: &mut RamFs,
         program: usize,
-        directory_fd: Option<usize>,
+        grant: Option<(GrantKind, usize)>,
         request: Option<Message>,
     ) -> Option<usize> {
         let index = match program {
@@ -160,23 +160,26 @@ impl Scheduler {
         // The maximum value is reserved for syscall errors.
         let handle = self.next_child_handle;
         let next_handle = handle.checked_add(1)?;
-        let (task_fs, grant) = match directory_fd {
-            Some(fd) => {
-                let (task_fs, child_fd) = self.tasks[self.current].fs.grant_directory(fs, fd)?;
-                (task_fs, Some(child_fd))
+        let mut frame = TrapFrame::new_user(
+            self.tasks[index].entry,
+            USER_STACK_TOP,
+            index + 1,
+            self.initial_status,
+        );
+        let task_fs = match grant {
+            Some((kind, fd)) => {
+                let (task_fs, child_fd) = self.tasks[self.current].fs.grant(fs, fd, kind)?;
+                frame.set_startup_args(child_fd, kind as usize);
+                task_fs
             }
-            None => (TaskFs::new(), None),
+            None => TaskFs::new(),
         };
 
         let task = &mut self.tasks[index];
         // SAFETY: This slot is stopped and its private stack frame is mapped
         // writable in the shared supervisor identity map.
         unsafe { task.address_space.clear_user_stack() };
-        task.frame =
-            TrapFrame::new_user(task.entry, USER_STACK_TOP, index + 1, self.initial_status);
-        if let Some(fd) = grant {
-            task.frame.set_startup_args(fd, 1);
-        }
+        task.frame = frame;
         task.fs = task_fs;
         task.timer_fired = false;
         task.launch = Some(ChildLaunch {

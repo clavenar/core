@@ -3,8 +3,8 @@
 
 use clv::fs;
 use clv_abi::{
-    FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PROBE_VALUE, SYS_EXIT,
-    SYS_PROBE, SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    FILE_REPLY_ERROR, FILE_REPLY_OK, GrantKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PROBE_VALUE,
+    SYS_EXIT, SYS_PROBE, SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -20,14 +20,17 @@ global_asm!(
     print_granted_hello = sym print_granted_hello,
 );
 
-extern "C" fn reply_or_report_ready(directory: usize, scoped: usize) -> usize {
+extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize) -> usize {
     let mut buffer = [0; MESSAGE_MAX_BYTES];
+    if grant_kind == GrantKind::File as usize {
+        return reply_with_file(Some(handle), &mut buffer);
+    }
     if let Some((message, _)) = clv::receive_message(NO_CHILD_HANDLE, &mut buffer)
         && !message.is_empty()
     {
-        if scoped != 0 {
-            let path_length = message.len();
-            return reply_with_file(directory, &mut buffer, path_length);
+        if grant_kind == GrantKind::Directory as usize {
+            let file = fs::open_at(handle, message);
+            return reply_with_file(file, &mut buffer);
         }
         return usize::from(!clv::send_message(message));
     }
@@ -37,12 +40,8 @@ extern "C" fn reply_or_report_ready(directory: usize, scoped: usize) -> usize {
     SYSCALL_ERROR
 }
 
-fn reply_with_file(
-    directory: usize,
-    buffer: &mut [u8; MESSAGE_MAX_BYTES],
-    path_length: usize,
-) -> usize {
-    let count = fs::open_at(directory, &buffer[..path_length]).and_then(|handle| {
+fn reply_with_file(file: Option<usize>, buffer: &mut [u8; MESSAGE_MAX_BYTES]) -> usize {
+    let count = file.and_then(|handle| {
         let count = fs::read(handle, &mut buffer[1..]).map(<[u8]>::len);
         fs::close(handle);
         count

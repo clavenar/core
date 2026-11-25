@@ -25,6 +25,15 @@ pub const SYS_MESSAGE_SEND: usize = 19;
 pub const SYS_MESSAGE_RECV: usize = 20;
 pub const SYS_SPAWN_WITH_MESSAGE: usize = 21;
 pub const SYS_SPAWN_AT_WITH_MESSAGE: usize = 22;
+pub const SYS_SPAWN_WITH_FILE: usize = 23;
+
+/// A scoped child receives its handle in a1 and its kind in a2. Unscoped launches set a2 to 0.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum GrantKind {
+    Directory = 1,
+    File = 2,
+}
 
 pub const PATH_MAX_BYTES: usize = 64;
 pub const MESSAGE_MAX_BYTES: usize = 64;

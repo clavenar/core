@@ -12,6 +12,26 @@ struct Child {
     handle: usize,
 }
 
+impl Child {
+    fn collect_file_reply(&mut self, launch: Option<usize>) {
+        let Some(handle) = launch else { return };
+        self.handle = handle;
+        let mut buffer = [0; MESSAGE_MAX_BYTES];
+        match clv::receive_message(handle, &mut buffer) {
+            Some(([FILE_REPLY_OK], _)) => print(b"empty file\r\n"),
+            Some(([FILE_REPLY_OK, contents @ ..], _)) => {
+                clv::write_console(contents);
+                if !contents.ends_with(b"\n") {
+                    print(b"\r\n");
+                }
+            }
+            Some(([FILE_REPLY_ERROR], _)) => print(b"cannot read requested file\r\n"),
+            Some(([], _)) => print(b"no message\r\n"),
+            _ => print(b"recv failed\r\n"),
+        }
+    }
+}
+
 pub(super) struct Children {
     programs: [Child; 2],
 }
@@ -50,7 +70,9 @@ impl Children {
                 }
             }
             Some(child) if child.selector == PROGRAM_HELLO => {
-                if let Some(handle) = spawn_scoped_hello(directory, None) {
+                if let Some(handle) =
+                    spawn_scoped_hello(directory, |fd| clv::spawn(PROGRAM_HELLO, Some(fd), None))
+                {
                     child.handle = handle;
                 }
             }
@@ -81,23 +103,20 @@ impl Children {
             Some(child) if child.selector == PROGRAM_HELLO && !path.is_empty() => child,
             _ => return print(b"usage: askat hello <dir> <path>\r\n"),
         };
-        let Some(handle) = spawn_scoped_hello(directory, Some(path)) else {
-            return;
+        child.collect_file_reply(spawn_scoped_hello(directory, |fd| {
+            clv::spawn(PROGRAM_HELLO, Some(fd), Some(path))
+        }));
+    }
+
+    pub(super) fn ask_file(&mut self, arguments: &[u8]) {
+        let (name, path) = split_word(arguments);
+        let child = match self.named(name) {
+            Some(child) if child.selector == PROGRAM_HELLO && !path.is_empty() => child,
+            _ => return print(b"usage: askfile hello <path>\r\n"),
         };
-        child.handle = handle;
-        let mut buffer = [0; MESSAGE_MAX_BYTES];
-        match clv::receive_message(handle, &mut buffer) {
-            Some(([FILE_REPLY_OK], _)) => print(b"empty file\r\n"),
-            Some(([FILE_REPLY_OK, contents @ ..], _)) => {
-                clv::write_console(contents);
-                if !contents.ends_with(b"\n") {
-                    print(b"\r\n");
-                }
-            }
-            Some(([FILE_REPLY_ERROR], _)) => print(b"cannot read requested file\r\n"),
-            Some(([], _)) => print(b"no message\r\n"),
-            _ => print(b"recv failed\r\n"),
-        }
+        child.collect_file_reply(spawn_scoped_hello(path, |fd| {
+            clv::spawn_with_file(PROGRAM_HELLO, fd)
+        }));
     }
 
     pub(super) fn recv(&mut self, name: &[u8]) {
@@ -127,13 +146,13 @@ impl Children {
     }
 }
 
-fn spawn_scoped_hello(directory: &[u8], request: Option<&[u8]>) -> Option<usize> {
-    let Some(directory_handle) = fs::open(directory, OPEN_READ) else {
+fn spawn_scoped_hello(path: &[u8], spawn: impl FnOnce(usize) -> Option<usize>) -> Option<usize> {
+    let Some(fd) = fs::open(path, OPEN_READ) else {
         print(b"cannot open path\r\n");
         return None;
     };
-    let handle = clv::spawn(PROGRAM_HELLO, Some(directory_handle), request);
-    fs::close(directory_handle);
+    let handle = spawn(fd);
+    fs::close(fd);
     if handle.is_none() {
         print(b"cannot run scoped hello\r\n");
     }
