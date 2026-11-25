@@ -45,6 +45,9 @@ pub const SYS_GOAL_CLOSE: usize = 36;
 pub const SYS_GOAL_CANCEL: usize = 37;
 pub const SYS_AGENT_RUN: usize = 38;
 pub const SYS_AGENT_STATUS: usize = 39;
+pub const SYS_AGENT_SUSPEND: usize = 40;
+pub const SYS_AGENT_RESUME: usize = 41;
+pub const SYS_AGENT_RUN_SUSPENDED: usize = 42;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;

@@ -82,12 +82,24 @@ impl Children {
         }
     }
 
-    pub(super) fn run_agent(&mut self, goal: usize, name: &[u8]) -> Option<agent::AgentLaunch> {
+    pub(super) fn run_agent(
+        &mut self,
+        goal: usize,
+        arguments: &[u8],
+    ) -> Option<agent::AgentLaunch> {
+        let (option, rest) = split_word(arguments);
+        let suspended = option == b"--suspended";
+        let name = if suspended { rest } else { arguments };
         let Some(child) = self.named(name) else {
-            print(b"usage: agent run <hello|echo>\r\n");
+            print(b"usage: agent run [--suspended] <hello|echo>\r\n");
             return None;
         };
-        let Some(launch) = agent::run(goal, child.selector) else {
+        let run = if suspended {
+            agent::run_suspended
+        } else {
+            agent::run
+        };
+        let Some(launch) = run(goal, child.selector) else {
             print(b"cannot start agent\r\n");
             return None;
         };

@@ -54,12 +54,13 @@ pub(super) fn agent_command(
     current: &mut Option<CurrentGoal>,
     children: &mut Children,
 ) {
+    let agent_handle = current.as_ref().and_then(|goal| goal.agent);
     match split_word(arguments) {
-        (b"run", name) => {
+        (b"run", arguments) => {
             let Some(goal) = current else {
                 return print(b"no current goal\r\n");
             };
-            if let Some(launch) = children.run_agent(goal.handle, name) {
+            if let Some(launch) = children.run_agent(goal.handle, arguments) {
                 goal.agent = Some(launch.agent);
                 print_line(&[
                     b"agent=",
@@ -70,16 +71,35 @@ pub(super) fn agent_command(
             }
         }
         (b"status", b"") => {
-            if let Some(handle) = current.as_ref().and_then(|goal| goal.agent)
+            if let Some(handle) = agent_handle
                 && let Some(snapshot) = agent::status(handle)
             {
                 print_line(&[b"agent=", &hex(handle), b" goal=", &hex(snapshot.goal)]);
-                print_status(snapshot.status);
+                match snapshot.status {
+                    GoalStatus::Running { child } if snapshot.suspended => {
+                        print_handle(b"Suspended child=", child)
+                    }
+                    status => print_status(status),
+                }
             } else {
                 print(b"no current agent\r\n");
             }
         }
-        _ => print(b"usage: agent run <hello|echo> | status\r\n"),
+        (action @ (b"suspend" | b"resume"), b"") => {
+            let suspending = action == b"suspend";
+            let control = if suspending {
+                agent::suspend
+            } else {
+                agent::resume
+            };
+            match agent_handle.and_then(control) {
+                Some(agent::ControlResult::Applied) if suspending => print(b"agent suspended\r\n"),
+                Some(agent::ControlResult::Applied) => print(b"agent resumed\r\n"),
+                Some(agent::ControlResult::AlreadyFinished) => print(b"agent already finished\r\n"),
+                None => print(b"no current agent\r\n"),
+            }
+        }
+        _ => print(b"usage: agent run [--suspended] <hello|echo> | status | suspend | resume\r\n"),
     }
 }
 

@@ -1,5 +1,5 @@
 use clv_abi::TaskCompletion;
-use clv_abi::agent::AgentStatus;
+use clv_abi::agent::{AgentStatus, ControlResult};
 use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
 
 use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
@@ -73,15 +73,39 @@ impl Scheduler {
             .map(|goal| goal.status)
     }
 
-    pub(crate) fn agent_status(&self, handle: usize) -> Option<AgentStatus> {
+    fn goal_for_agent(&self, handle: usize) -> Option<&Goal> {
         let goal = self.goal.as_ref()?;
-        if self.current != SHELL_TASK_INDEX || goal.agent != Some(handle) {
-            return None;
-        }
+        (self.current == SHELL_TASK_INDEX && goal.agent == Some(handle)).then_some(goal)
+    }
+
+    pub(crate) fn agent_status(&self, handle: usize) -> Option<AgentStatus> {
+        let goal = self.goal_for_agent(handle)?;
+        let suspended = match goal.running_child() {
+            Some(child) => self.tasks[self.launch_index(child)?].state == TaskState::Suspended,
+            None => false,
+        };
         Some(AgentStatus {
             goal: goal.handle,
             status: goal.status,
+            suspended,
         })
+    }
+
+    pub(crate) fn set_agent_suspended(
+        &mut self,
+        handle: usize,
+        suspended: bool,
+    ) -> Option<ControlResult> {
+        let Some(child) = self.goal_for_agent(handle)?.running_child() else {
+            return Some(ControlResult::AlreadyFinished);
+        };
+        let index = self.launch_index(child)?;
+        let state = &mut self.tasks[index].state;
+        if !matches!(state, TaskState::Runnable | TaskState::Suspended) {
+            return None;
+        }
+        *state = TaskState::for_agent(suspended);
+        Some(ControlResult::Applied)
     }
 
     pub(crate) fn close_goal(&mut self, handle: usize) -> Option<CloseResult> {

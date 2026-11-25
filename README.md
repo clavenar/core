@@ -151,6 +151,28 @@ and goal handles, followed by `Completed` with the original child handle and
 exit status 0. Closing the goal releases the agent. Plain `run` and `goal run`
 launch ordinary children.
 
+`agent suspend` pauses a live agent. `agent resume` continues its child from
+the same instruction with its saved registers and stack. To see the paused
+state with the stock `echo`, start it suspended at its entry point.
+
+```text
+goal create
+agent run --suspended echo
+agent status
+event
+agent resume
+wait echo
+agent status
+goal close
+```
+
+On a fresh boot, the first status prints `Suspended child=<handle>` and
+`event` immediately prints `no child event`. After resume, the wait reports
+exit status 0 and the final status prints `Completed` with the same child
+handle. While an agent is suspended, its goal is `Running`, `goal close`
+reports `goal busy`, and `goal cancel` stops the suspended child. If the child
+finishes before you type `agent suspend`, the shell prints `agent already finished`.
+
 You can cancel a ready goal directly at the shell prompt.
 
 ```text
@@ -323,14 +345,15 @@ Call 15 (`spawn`) takes a program selector in `a0`. Selector 0 chooses
 `hello` and selector 1 chooses `echo`. The child starts with no RamFS
 handles or working directory. The call returns a fresh, nonzero child handle
 in `a0` when the task is ready to run and -1 if the selector is unknown or
-the task is already running. Child launches, goals and agents draw distinct
+the program slot is occupied. Child launches, goals and agents draw distinct
 handles from one boot-wide sequence. RamFS allocates its handles independently.
 
 Call 16 (`wait`) takes the child handle in `a0`. On success, `a0` contains
 the result type. For exit (0) or fault (1), `a1` holds the full exit status
 or fault cause. For cancellation (2), `a1` is zero. The call returns -1 in
 `a0` for an invalid handle, a caller other than the shell, or an already
-collected status.
+collected status. Waiting on a suspended child returns -1 immediately. The
+shell can collect its result after it finishes or is cancelled.
 
 Call 18 (`spawn_at`) takes a program selector in `a0` and a directory handle
 from the caller in `a1`. It returns a child handle on success and -1 on error.
@@ -413,11 +436,11 @@ Call 27 (`reply_recv`) takes a user stack destination in `a0`, its capacity
 in `a1`, and a shell-owned child handle in `a2`. It waits for a reply or child
 completion. On delivery it returns the byte count in `a0`, the kernel-recorded
 sender in `a1`, and the child's reply kind in `a2`. A zero-capacity buffer
-can receive a zero-byte reply. After completion an empty mailbox returns
-zero in all three registers. An invalid handle, invalid buffer or insufficient
-capacity returns -1 and leaves the reply available for retry. The shell uses
-the reply kind to display the result and collects exit status separately with
-`wait`.
+can receive a zero-byte reply. During suspension or after completion an empty
+mailbox returns zero in all three registers. An invalid handle, invalid buffer
+or insufficient capacity returns -1 and leaves the reply available for retry.
+The shell uses the reply kind to display the result and collects exit status
+separately with `wait`.
 
 Calls 20 and 27 consume the same reply once. Call 20 returns `Echo` bytes
 verbatim. For `FileData` it returns the legacy status byte 0 followed by up
@@ -462,12 +485,12 @@ at a time. The boot greeting has no parent launch and produces no event.
 Other callers receive -1 in `a0`.
 
 With an empty queue, the call sleeps while a launched child can still run.
-When no child is outstanding or all remaining children are blocked writing
-to full pipes, the call returns zero in both registers. The shell can then
-drain or close a pipe and retry. Reading an event preserves the child's
-reply, buffered pipe data and wait result. Collecting any of those first
-also leaves the event available. A successful relaunch
-discards the previous handle's unread event. A failed launch preserves it.
+If every outstanding child is suspended or blocked writing to a full pipe,
+or there are no outstanding children, it returns zero in both registers.
+The shell can resume an agent, drain or close a pipe, and retry. Reading an
+event preserves the child's reply, buffered pipe data and wait result.
+Collecting any of those first also leaves the event available. A successful
+relaunch discards the previous handle's unread event. A failed launch preserves it.
 
 | Call | Arguments | Result in `a0` |
 | --- | --- | --- |
@@ -478,17 +501,22 @@ discards the previous handle's unread event. A failed launch preserves it.
 | 37 `goal_cancel` | `a0` goal handle | 0 for a new or repeated cancellation, 1 if the goal already completed or failed |
 | 38 `agent_run` | `a0` goal handle, `a1` program selector | Fresh agent handle, with its child launch handle in `a1` |
 | 39 `agent_status` | `a0` agent handle | State tag, with the original child in `a1`, detail in `a2` and owning goal in `a3` |
+| 40 `agent_suspend` | `a0` agent handle | 0 when suspended, 1 if the agent already finished |
+| 41 `agent_resume` | `a0` agent handle | 0 when runnable, 1 if the agent already finished |
+| 42 `agent_run_suspended` | `a0` goal handle, `a1` program selector | Fresh agent handle, with its suspended child launch handle in `a1` |
 
 Only the shell can use these calls. A stale or invalid handle or a call
-from another task returns -1 in `a0`. Both run calls require a ready goal.
+from another task returns -1 in `a0`. All three run calls require a ready goal.
 They return -1 if the selector is unknown, the program is busy or the kernel
 cannot allocate the handles. A ready goal stays ready on failure.
 
-The kernel binds the child to the goal before making it runnable.
-`agent_run` also creates and binds the agent in that operation. The child
+The kernel binds the child to the goal before its first instruction.
+Both agent run calls also create and bind the agent in that operation. The child
 starts with an empty RamFS handle table and mailbox and uses the ordinary
-reply, event and wait calls. `agent_status` uses tags 1–5 below and always
-returns the original child handle on success.
+reply, event and wait calls. `agent_status` uses tags 1–5 below and tag 6
+for a suspended child (`a2` is zero). It always returns the original child
+handle on success. `goal_status` reports tag 1 throughout a live child's
+suspension.
 
 | `goal_status` tag | State | `a1` | `a2` |
 | --- | --- | --- | --- |
@@ -499,6 +527,10 @@ returns the original child handle on success.
 | 4 | Failed | Child handle | Fault cause |
 | 5 | Cancelled | Original child handle, or 0 if cancelled while ready | 0 |
 
+Repeating suspend or resume on a live agent already in the requested state
+succeeds. A paused child keeps its slot and any queued reply. Suspension and
+resumption produce no completion event.
+
 `goal_cancel` targets the goal's original launch handle. A running child's
 slot becomes available for a new launch immediately. The kernel queues one
 event for the cancelled child. Repeating cancellation returns 0 even after
@@ -507,10 +539,10 @@ another launch reuses the slot. Cancelling a ready goal produces no event.
 Goal and agent status reads are repeatable and survive reuse of the child's
 program slot. Closing the goal releases its agent identity. The child's pending
 reply, event and wait status remain available under the usual launch rules.
-If the shell exits or faults, the kernel cancels the goal's running child
-by its original launch handle and releases the goal and its agent before
-scheduling another task. Children launched outside the goal can still run to
-completion, including a newer launch in the same program slot.
+If the shell exits or faults, the kernel cancels the goal's live child by its
+original launch handle, even when suspended. It releases the goal and its agent
+before scheduling another task. Children launched outside the goal can still
+run to completion, including a newer launch in the same program slot.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

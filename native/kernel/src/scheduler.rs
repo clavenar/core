@@ -22,6 +22,7 @@ const ECHO_TASK_INDEX: usize = 2;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TaskState {
     Runnable,
+    Suspended,
     WaitingForChild(usize),
     WaitingForEvent,
     WaitingForMessage(usize),
@@ -31,6 +32,14 @@ enum TaskState {
 }
 
 impl TaskState {
+    fn for_agent(suspended: bool) -> Self {
+        if suspended {
+            Self::Suspended
+        } else {
+            Self::Runnable
+        }
+    }
+
     fn wake_from(&mut self, wait: Self) {
         if *self == wait {
             *self = Self::Runnable;
@@ -178,7 +187,7 @@ impl Scheduler {
         scope: LaunchScope,
         request: Option<Message>,
     ) -> Option<usize> {
-        self.start_child(fs, program, scope, request, None)
+        self.start_child(fs, program, scope, request, None, TaskState::Runnable)
     }
 
     pub(crate) fn run_agent(
@@ -186,9 +195,17 @@ impl Scheduler {
         fs: &mut RamFs,
         goal: usize,
         program: usize,
+        suspended: bool,
     ) -> Option<AgentLaunch> {
         let agent = self.next_handle;
-        let child = self.start_child(fs, program, LaunchScope::Goal(goal), None, Some(agent))?;
+        let child = self.start_child(
+            fs,
+            program,
+            LaunchScope::Goal(goal),
+            None,
+            Some(agent),
+            TaskState::for_agent(suspended),
+        )?;
         Some(AgentLaunch { agent, child })
     }
 
@@ -199,6 +216,7 @@ impl Scheduler {
         scope: LaunchScope,
         request: Option<Message>,
         agent: Option<usize>,
+        initial_state: TaskState,
     ) -> Option<usize> {
         let index = match program {
             PROGRAM_HELLO => HELLO_TASK_INDEX,
@@ -260,7 +278,7 @@ impl Scheduler {
             completion: None,
             event: None,
         });
-        task.state = TaskState::Runnable;
+        task.state = initial_state;
         self.next_handle = next_handle;
         Some(handle)
     }
