@@ -1,56 +1,39 @@
 use core::arch::asm;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) const INTERRUPT_CAUSE: usize = (1 << (usize::BITS - 1)) | 5;
 
 const SBI_TIME: usize = 0x5449_4d45;
 const SBI_SET_TIMER: usize = 0;
 const SIE_STIE: usize = 1 << 5;
-const DELAY_TICKS: u64 = 25_000;
+const QUANTUM_TICKS: u64 = 25_000;
+static ARMED: AtomicBool = AtomicBool::new(false);
 
-const UNARMED: u8 = 0;
-const ARMED: u8 = 1;
-const FIRED: u8 = 2;
-static STATE: AtomicU8 = AtomicU8::new(UNARMED);
-
-/// Arms the boot hart's timer once from the user trap handler.
-pub(crate) fn arm_once() -> bool {
-    if STATE.load(Ordering::Relaxed) != UNARMED {
-        return true;
-    }
-
+/// Starts a fresh quantum on the boot hart.
+pub(crate) fn arm() -> bool {
     let now: u64;
     // SAFETY: OpenSBI exposes the time counter to the supervisor on QEMU virt.
     unsafe { asm!("rdtime {now}", now = out(reg) now, options(nomem, nostack)) };
-    if !set_deadline(now.saturating_add(DELAY_TICKS)) {
+    if !set_deadline(now.saturating_add(QUANTUM_TICKS)) {
         return false;
     }
 
-    STATE.store(ARMED, Ordering::Relaxed);
+    ARMED.store(true, Ordering::Relaxed);
     // SAFETY: The user trap frame is installed and global supervisor
     // interrupts stay disabled until execution returns to user mode.
     unsafe { asm!("csrs sie, {mask}", mask = in(reg) SIE_STIE, options(nostack)) };
     true
 }
 
-pub(crate) fn complete() {
-    cancel();
-    STATE.store(FIRED, Ordering::Relaxed);
-}
-
 pub(crate) fn cancel() {
-    if STATE.load(Ordering::Relaxed) != ARMED {
+    if !ARMED.load(Ordering::Relaxed) {
         return;
     }
     // SAFETY: Only the supervisor timer source is masked.
     unsafe { asm!("csrc sie, {mask}", mask = in(reg) SIE_STIE, options(nostack)) };
     // The interrupt stays masked even if firmware cannot clear the deadline.
     let _ = set_deadline(u64::MAX);
-    STATE.store(UNARMED, Ordering::Relaxed);
-}
-
-pub(crate) fn fired() -> bool {
-    STATE.load(Ordering::Relaxed) == FIRED
+    ARMED.store(false, Ordering::Relaxed);
 }
 
 fn set_deadline(deadline: u64) -> bool {

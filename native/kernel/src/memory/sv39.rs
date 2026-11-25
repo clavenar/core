@@ -3,6 +3,9 @@ use core::arch::asm;
 use super::frame::{FRAME_SIZE, Frame, FrameAllocator};
 use super::user_image::USER_TEXT_BASE;
 
+pub(crate) const USER_STACK_BASE: usize = USER_TEXT_BASE + FRAME_SIZE;
+pub(crate) const USER_STACK_TOP: usize = USER_STACK_BASE + FRAME_SIZE;
+
 const PAGE_SHIFT: usize = 12;
 const VPN_BITS: usize = 9;
 const PTE_PPN_SHIFT: usize = 10;
@@ -20,94 +23,115 @@ unsafe extern "C" {
     static __text_start: u8;
     static __rodata_start: u8;
     static __writable_start: u8;
-    static __user_stack_start: u8;
     static __kernel_end: u8;
 }
 
-/// Installs the boot address space.
-///
-/// # Safety
-///
-/// Address translation must be off when called on the boot hart. The caller
-/// must supply a fresh root frame, an allocated code frame within the boot
-/// pool, and the QEMU virt UART base. The root and code frame must remain
-/// reserved while this address space is active.
-pub(crate) unsafe fn enable_identity_map(
-    root: &mut Frame,
-    frames: &mut FrameAllocator<'_>,
+pub(crate) struct BootMappings {
+    text: usize,
+    uart: usize,
     user_code: usize,
-    uart_base: usize,
-) -> bool {
-    let (
-        Some(kernel_middle),
-        Some(kernel_leaves),
-        Some(low_middle),
-        Some(uart_leaves),
-        Some(user_leaves),
-    ) = (
-        frames.allocate_zeroed(),
-        frames.allocate_zeroed(),
-        frames.allocate_zeroed(),
-        frames.allocate_zeroed(),
-        frames.allocate_zeroed(),
-    )
-    else {
-        return false;
-    };
+    kernel_middle: usize,
+    uart_leaves: usize,
+}
 
-    // The linker symbols mark page boundaries. Only their addresses are used.
-    let text = (&raw const __text_start).addr();
-    let rodata = (&raw const __rodata_start).addr();
-    let writable = (&raw const __writable_start).addr();
-    let user_stack = (&raw const __user_stack_start).addr();
-    let end = (&raw const __kernel_end).addr();
+impl BootMappings {
+    pub(crate) fn new(
+        frames: &mut FrameAllocator<'_>,
+        user_code: &Frame,
+        uart: usize,
+    ) -> Option<Self> {
+        let kernel_middle = frames.allocate_zeroed()?;
+        let kernel_leaves = frames.allocate_zeroed()?;
+        let uart_leaves = frames.allocate_zeroed()?;
 
-    // The kernel fits in one aligned 2 MiB region. UART and user code share
-    // the low root entry on QEMU virt and have separate leaf tables.
-    map_range(kernel_leaves, text, rodata, READ | EXECUTE);
-    map_range(kernel_leaves, rodata, writable, READ);
-    // The loaded code gets only the user RX mapping, with no writable alias.
-    map_range(kernel_leaves, writable, user_code, READ | WRITE | DIRTY);
-    map_range(
-        kernel_leaves,
-        user_code + FRAME_SIZE,
-        user_stack,
-        READ | WRITE | DIRTY,
-    );
-    map_range(kernel_leaves, user_stack, end, READ | WRITE | DIRTY | USER);
-    map_range(
-        uart_leaves,
-        uart_base,
-        uart_base + FRAME_SIZE,
-        READ | WRITE | DIRTY,
-    );
-    user_leaves.words_mut()[vpn_index(USER_TEXT_BASE, 0)] =
-        pte(user_code, VALID | ACCESSED | READ | EXECUTE | USER);
+        // The linker symbols mark page boundaries. Only their addresses are used.
+        let text = (&raw const __text_start).addr();
+        let rodata = (&raw const __rodata_start).addr();
+        let writable = (&raw const __writable_start).addr();
+        let end = (&raw const __kernel_end).addr();
+        let user_code = user_code.physical_address();
 
-    kernel_middle.words_mut()[vpn_index(text, 1)] = pte(kernel_leaves.physical_address(), VALID);
-    low_middle.words_mut()[vpn_index(uart_base, 1)] = pte(uart_leaves.physical_address(), VALID);
-    low_middle.words_mut()[vpn_index(USER_TEXT_BASE, 1)] =
-        pte(user_leaves.physical_address(), VALID);
-    root.words_mut()[vpn_index(text, 2)] = pte(kernel_middle.physical_address(), VALID);
-    root.words_mut()[vpn_index(uart_base, 2)] = pte(low_middle.physical_address(), VALID);
-
-    let satp = SATP_SV39 | (root.physical_address() >> PAGE_SHIFT);
-    let active: usize;
-    // SAFETY: The map covers the running code, stack, trap vector, and all
-    // kernel data at their current addresses. The fences order table writes
-    // and synchronize address translation on this hart.
-    unsafe {
-        asm!(
-            "sfence.vma zero, zero",
-            "csrw satp, {satp}",
-            "sfence.vma zero, zero",
-            "csrr {active}, satp",
-            satp = in(reg) satp,
-            active = lateout(reg) active,
-            options(nostack),
+        map_range(kernel_leaves, text, rodata, READ | EXECUTE);
+        map_range(kernel_leaves, rodata, writable, READ);
+        // The loaded code gets only the user RX mapping, with no writable alias.
+        map_range(kernel_leaves, writable, user_code, READ | WRITE | DIRTY);
+        map_range(
+            kernel_leaves,
+            user_code + FRAME_SIZE,
+            end,
+            READ | WRITE | DIRTY,
         );
+        map_range(uart_leaves, uart, uart + FRAME_SIZE, READ | WRITE | DIRTY);
+        kernel_middle.words_mut()[vpn_index(text, 1)] =
+            pte(kernel_leaves.physical_address(), VALID);
+
+        Some(Self {
+            text,
+            uart,
+            user_code,
+            kernel_middle: kernel_middle.physical_address(),
+            uart_leaves: uart_leaves.physical_address(),
+        })
     }
-    active == satp
+
+    pub(crate) fn task_address_space(
+        &self,
+        frames: &mut FrameAllocator<'_>,
+    ) -> Option<AddressSpace> {
+        let root = frames.allocate_zeroed()?;
+        let low_middle = frames.allocate_zeroed()?;
+        let user_leaves = frames.allocate_zeroed()?;
+        let user_stack = frames.allocate_zeroed()?;
+
+        // The two user pages share a leaf table. The UART uses a separate
+        // leaf table under the same low root entry on QEMU virt.
+        let entries = user_leaves.words_mut();
+        entries[vpn_index(USER_TEXT_BASE, 0)] =
+            pte(self.user_code, VALID | ACCESSED | READ | EXECUTE | USER);
+        entries[vpn_index(USER_STACK_BASE, 0)] = pte(
+            user_stack.physical_address(),
+            VALID | ACCESSED | READ | WRITE | DIRTY | USER,
+        );
+
+        low_middle.words_mut()[vpn_index(self.uart, 1)] = pte(self.uart_leaves, VALID);
+        low_middle.words_mut()[vpn_index(USER_TEXT_BASE, 1)] =
+            pte(user_leaves.physical_address(), VALID);
+        root.words_mut()[vpn_index(self.text, 2)] = pte(self.kernel_middle, VALID);
+        root.words_mut()[vpn_index(self.uart, 2)] = pte(low_middle.physical_address(), VALID);
+        Some(AddressSpace {
+            root: root.physical_address(),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AddressSpace {
+    root: usize,
+}
+
+impl AddressSpace {
+    pub(crate) fn root_address(self) -> usize {
+        self.root
+    }
+
+    pub(crate) fn activate(self) -> bool {
+        let satp = SATP_SV39 | (self.root >> PAGE_SHIFT);
+        let active: usize;
+        // SAFETY: Both address spaces keep the same supervisor mappings and
+        // their tables stay reserved. ASID zero is reused after a full fence.
+        unsafe {
+            asm!(
+                "sfence.vma zero, zero",
+                "csrw satp, {satp}",
+                "sfence.vma zero, zero",
+                "csrr {active}, satp",
+                satp = in(reg) satp,
+                active = lateout(reg) active,
+                options(nostack),
+            );
+        }
+        active == satp
+    }
 }
 
 fn map_range(table: &mut Frame, start: usize, end: usize, access: u64) {

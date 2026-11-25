@@ -1,11 +1,8 @@
 use core::arch::asm;
 
-pub(crate) const SSTATUS_SUM: usize = 1 << 18;
+use super::sv39::{USER_STACK_BASE, USER_STACK_TOP};
 
-unsafe extern "C" {
-    static __user_stack_start: u8;
-    static __user_stack_top: u8;
-}
+pub(crate) const SSTATUS_SUM: usize = 1 << 18;
 
 pub(crate) fn copy_from_user_stack(source: usize, destination: &mut [u8]) -> bool {
     if destination.is_empty() {
@@ -15,12 +12,11 @@ pub(crate) fn copy_from_user_stack(source: usize, destination: &mut [u8]) -> boo
     let Some(end) = source.checked_add(destination.len()) else {
         return false;
     };
-    if source < (&raw const __user_stack_start).addr() || end > (&raw const __user_stack_top).addr()
-    {
+    if source < USER_STACK_BASE || end > USER_STACK_TOP {
         return false;
     }
 
-    // SAFETY: The validated source range is wholly within the boot user
+    // SAFETY: The validated source range is wholly within the current task's
     // stack mapping. The destination is writable supervisor memory, and
     // the boot hart keeps interrupts disabled. SUM is cleared before return.
     unsafe {

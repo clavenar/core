@@ -2,6 +2,7 @@
 #![no_main]
 
 mod memory;
+mod scheduler;
 #[path = "arch/riscv64/timer.rs"]
 mod timer;
 
@@ -12,6 +13,7 @@ use memory::frame::FrameAllocator;
 use memory::sv39;
 use memory::user_image;
 use memory::usercopy::{SSTATUS_SUM, copy_from_user_stack};
+use scheduler::{Scheduler, TrapFrame};
 
 global_asm!(include_str!("arch/riscv64/boot.S"));
 global_asm!(
@@ -21,7 +23,6 @@ global_asm!(
     sstatus_offset = const core::mem::offset_of!(TrapFrame, sstatus),
     sum_mask = const SSTATUS_SUM,
 );
-global_asm!(include_str!("arch/riscv64/user.S"));
 
 // Make Cargo rebuild the kernel when the linker script changes.
 const _: &str = include_str!("../../linker/riscv64.ld");
@@ -41,16 +42,14 @@ const REG_A0: usize = 10;
 const REG_A1: usize = 11;
 const REG_A7: usize = 17;
 const USER_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"));
+// Clear SUM, FS, VS, SPP, SPIE and SIE for a new user context.
+const USER_STATUS_CLEAR: usize =
+    SSTATUS_SUM | (3 << 13) | (3 << 9) | (1 << 8) | (1 << 5) | (1 << 1);
 
-#[repr(C, align(16))]
-struct TrapFrame {
-    registers: [usize; 32],
-    sepc: usize,
-    sstatus: usize,
-}
+static mut SCHEDULER: Option<Scheduler> = None;
 
 unsafe extern "C" {
-    fn enter_user(entry: usize) -> !;
+    fn enter_user(frame: &TrapFrame) -> !;
 }
 
 // SAFETY: The boot stub calls this symbol with a RISC-V ABI-aligned stack.
@@ -65,40 +64,61 @@ extern "C" fn kernel_main() -> ! {
 
     // SAFETY: The single boot hart claims the frame pool here once.
     let mut frames = unsafe { FrameAllocator::from_boot_pool() };
-    let frame = frames.allocate_zeroed().expect("boot frame pool is empty");
-    uart_write(b"boot frame=");
-    uart_write_hex(frame.physical_address());
-    uart_write(b"\r\n");
-
     let user_code = frames.allocate_zeroed().expect("boot frame pool is empty");
     let Some(entry) = user_image::load(USER_ELF, user_code.bytes_mut()) else {
         uart_write(b"User ELF load failed\r\n");
         idle();
     };
+    let mappings = sv39::BootMappings::new(&mut frames, user_code, UART_BASE)
+        .expect("boot frame pool cannot hold supervisor mappings");
+    let spaces = [
+        mappings
+            .task_address_space(&mut frames)
+            .expect("no frames for task 1"),
+        mappings
+            .task_address_space(&mut frames)
+            .expect("no frames for task 2"),
+    ];
+    let sstatus: usize;
+    // SAFETY: The boot hart is in supervisor mode.
+    unsafe { asm!("csrr {status}, sstatus", status = out(reg) sstatus, options(nomem, nostack)) };
+    let scheduler = Scheduler::new(spaces, entry, sstatus & !USER_STATUS_CLEAR);
+    let first_frame = *scheduler.current_frame();
+
+    uart_write(b"boot frame=");
+    uart_write_hex(scheduler.address_space().root_address());
+    uart_write(b"\r\n");
     uart_write(b"User ELF loaded entry=");
     uart_write_hex(entry);
     uart_write(b"\r\n");
-
-    // SAFETY: This is the first address-space switch on the boot hart.
-    if !unsafe {
-        sv39::enable_identity_map(frame, &mut frames, user_code.physical_address(), UART_BASE)
-    } {
+    if !scheduler.address_space().activate() {
         uart_write(b"Sv39 paging setup failed\r\n");
         idle();
     }
     uart_write(b"Sv39 paging enabled\r\n");
-    // SAFETY: The user code and stack pages are mapped and the supervisor
+    // SAFETY: Only the boot hart can enter the scheduler. No user task has run.
+    unsafe { SCHEDULER = Some(scheduler) };
+    arm_timer();
+    // SAFETY: The frame names the first task's mapped code and stack, and the
     // trap vector is installed.
-    unsafe { enter_user(entry) }
+    unsafe { enter_user(&first_frame) }
 }
 
 // SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.
 #[unsafe(no_mangle)]
 extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: usize) {
+    // SAFETY: On the single boot hart this handler runs with supervisor
+    // interrupts disabled. Supervisor traps take the fatal path instead.
+    let scheduler = unsafe { &mut *(&raw mut SCHEDULER) }
+        .as_mut()
+        .expect("scheduler is initialized before user entry");
+    let current = scheduler.current_id();
     if scause == timer::INTERRUPT_CAUSE {
-        timer::complete();
-        uart_write(b"user timer interrupt\r\n");
-        // Resume at the interrupted user instruction.
+        if scheduler.preempt(frame) {
+            switch_task(scheduler, current, b"timer switch ");
+        }
+        arm_timer();
+        // The frame now contains the selected task's interrupted instruction.
         return;
     }
     if scause != USER_ECALL {
@@ -107,29 +127,56 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
 
     match frame.registers[REG_A7] {
         SYS_PROBE => {
-            uart_write(b"user probe\r\n");
-            frame.registers[REG_A0] = if timer::arm_once() {
-                PROBE_VALUE
-            } else {
-                uart_write(b"SBI timer setup failed\r\n");
-                SYSCALL_ERROR
-            };
+            write_task(current);
+            uart_write(b" user probe\r\n");
+            frame.registers[REG_A0] = PROBE_VALUE;
         }
         SYS_EXIT => {
-            uart_write(b"user exit status=");
+            write_task(current);
+            uart_write(b" user exit status=");
             uart_write_hex(frame.registers[REG_A0]);
             uart_write(b"\r\n");
-            idle();
+            if !scheduler.exit(frame) {
+                uart_write(b"all tasks exited\r\n");
+                idle();
+            }
+            switch_task(scheduler, current, b"exit switch ");
+            arm_timer();
+            return;
         }
         SYS_WRITE_CONSOLE => {
             frame.registers[REG_A0] =
                 write_console(frame.registers[REG_A0], frame.registers[REG_A1]);
         }
-        SYS_TIMER_FIRED => frame.registers[REG_A0] = usize::from(timer::fired()),
+        SYS_TIMER_FIRED => frame.registers[REG_A0] = usize::from(scheduler.timer_fired()),
         _ => frame.registers[REG_A0] = SYSCALL_ERROR,
     }
     // ECALL is a 32-bit instruction, including on cores with compressed code.
     frame.sepc += 4;
+}
+
+fn switch_task(scheduler: &Scheduler, previous: usize, reason: &[u8]) {
+    if !scheduler.address_space().activate() {
+        uart_write(b"Sv39 task switch failed\r\n");
+        idle();
+    }
+    uart_write(reason);
+    write_task(previous);
+    uart_write(b" -> ");
+    write_task(scheduler.current_id());
+    uart_write(b"\r\n");
+}
+
+fn arm_timer() {
+    if !timer::arm() {
+        uart_write(b"SBI timer setup failed\r\n");
+        idle();
+    }
+}
+
+fn write_task(id: usize) {
+    uart_write(b"task ");
+    uart_write_byte(b'0' + id as u8);
 }
 
 fn write_console(address: usize, length: usize) -> usize {

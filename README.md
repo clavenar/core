@@ -37,7 +37,7 @@ qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
 
 After the OpenSBI banner, the kernel prints `Clavenar kernel booted` with the
 version from `native/kernel/Cargo.toml`. It prints `boot frame=0x...` with the
-physical address of the Sv39 root table.
+physical address of task 1's Sv39 root table.
 
 The build links [the hello program](userspace/hello/) as a separate RV64 ELF and
 embeds it in the kernel. The loader accepts a static, little-endian ELF64
@@ -45,21 +45,22 @@ executable with one read/execute segment of at most 4 KiB at `0x00400000`. Boot
 reports the validated entry address as `User ELF loaded entry=0x...`, or prints
 `User ELF load failed` and idles if loading fails.
 
-The kernel activates paging, prints `Sv39 paging enabled`, and enters user
-mode at the ELF entry point. The kernel and UART use supervisor-only 4 KiB
-mappings. The application has a read/execute code page and a read/write,
-non-executable stack page. The kernel, stacks, and 16-frame boot pool fit
-within one aligned 2 MiB physical region.
+The kernel activates paging, prints `Sv39 paging enabled`, and starts two
+tasks at the ELF entry point. Each receives its task ID in `a0`. Both tasks
+share the read/execute code page and supervisor-only kernel and UART mappings.
+Each task has its own Sv39 root and read/write, non-executable stack mapped
+at virtual address `0x00401000`. The kernel, supervisor stack, and 16-frame
+boot pool fit within one aligned 2 MiB physical region.
+
+OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
+shows which task was interrupted and which task will run next. The kernel
+starts a fresh quantum after each timer interrupt and exit switch.
 
 The user program passes the call number in `a7` and executes `ecall`. Call 0
-prints `user probe`, arms a one-shot timer through OpenSBI on the first call,
-and returns 42 in `a0`. A timer setup failure returns -1.
-
-The interrupt handler disarms the timer, prints `user timer interrupt` once,
-and resumes at the interrupted user instruction. Call 3 returns 1 in `a0` once
-the interrupt has fired and 0 while it is pending or unarmed. The hello
-program waits for the interrupt, then checks its saved registers and stack
-contents.
+prints `task N user probe` and returns 42 in `a0`. Call 3 returns 1 in `a0` once
+the calling task has received a timer interrupt and 0 until then. The hello
+program stores its task ID on its stack before waiting for the interrupt. It
+checks that value and its saved registers after resuming.
 
 Call 2 writes to the console. It takes a user stack address in `a0` and a byte
 count in `a1`. The kernel accepts up to 128 bytes, copies the full range before
@@ -67,9 +68,10 @@ writing, and returns the byte count in `a0`. An empty write returns 0. An
 oversized write or a range outside the user stack returns -1 without output.
 The hello program uses this call to print `Hello from user mode`.
 
-Call 1 takes an exit status in `a0`. A successful run prints
-`user exit status=0x0000000000000000` and idles. Unknown call numbers return -1
-in `a0`.
+Call 1 takes an exit status in `a0` and removes the calling task from the
+schedule. In a successful run, both tasks report
+`user exit status=0x0000000000000000`, then the kernel prints `all tasks exited`
+and idles. Unknown call numbers return -1 in `a0`.
 
 Unexpected traps print `fatal trap` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

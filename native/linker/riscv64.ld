@@ -45,12 +45,6 @@ SECTIONS
         KEEP(*(.frame_pool))
     } :data
 
-    .user_stack ALIGN(0x1000) (NOLOAD) : {
-        __user_stack_start = .;
-        . += 4K;
-        __user_stack_top = .;
-    } :data
-
     __kernel_end = .;
     ASSERT((__text_start & 0x1fffff) == 0 && __kernel_end - __text_start <= 0x200000,
            "boot kernel must fit in one aligned 2 MiB region")

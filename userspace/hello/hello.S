@@ -11,6 +11,8 @@
     .type _start, @function
 _start:
     addi sp, sp, -16
+    mv s1, a0
+    sd s1, 8(sp)
     li s0, 0x123
     li t1, 0x456
     sd s0, 0(sp)
@@ -35,6 +37,8 @@ _start:
     bne s0, t0, .Luser_failed
     ld t1, 0(sp)
     bne t1, t0, .Luser_failed
+    ld t1, 8(sp)
+    bne t1, s1, .Luser_failed
 
     # Copy the message into the user stack for the console syscall.
     addi sp, sp, -32

@@ -25,11 +25,12 @@ supervisor_trap_entry:
     csrr a2, stval
     call supervisor_user_trap
 
+.Lrestore_user:
     ld t0, {sepc_offset}(sp)
     csrw sepc, t0
     ld t0, {sstatus_offset}(sp)
     csrw sstatus, t0
-    addi t0, sp, {frame_size}
+    lla t0, __stack_top
     csrw sscratch, t0
     .irp reg, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
     ld x\reg, (8 * \reg)(sp)
@@ -47,3 +48,12 @@ supervisor_trap_entry:
     csrr a2, stval
     tail supervisor_trap_fatal
     .size supervisor_trap_entry, . - supervisor_trap_entry
+
+    .balign 4
+    .globl enter_user
+    .type enter_user, @function
+enter_user:
+    fence.i
+    mv sp, a0
+    j .Lrestore_user
+    .size enter_user, . - enter_user
