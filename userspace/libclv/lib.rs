@@ -3,6 +3,7 @@
 //! Native RV64 user calls. Paths and outgoing messages are staged on the stack.
 //! Receive buffers and direct file and console I/O use the caller's stack buffers.
 
+pub mod agent;
 pub mod fs;
 pub mod goal;
 pub mod pipe;
@@ -22,24 +23,24 @@ fn ecall(
     mut a0: usize,
     mut a1: usize,
     mut a2: usize,
-    a3: usize,
+    mut a3: usize,
     a4: usize,
-) -> (usize, usize, usize) {
+) -> (usize, usize, usize, usize) {
     // SAFETY: The kernel takes the number in a7 and arguments in a0 through a4.
-    // Results use a0 through a2. The kernel preserves the other registers.
+    // Results use a0 through a3. The kernel preserves the other registers.
     unsafe {
         asm!(
             "ecall",
             inlateout("a0") a0,
             inlateout("a1") a1,
             inlateout("a2") a2,
-            in("a3") a3,
+            inlateout("a3") a3,
             in("a4") a4,
             in("a7") number,
             options(nostack),
         );
     }
-    (a0, a1, a2)
+    (a0, a1, a2, a3)
 }
 
 fn syscall(number: usize, a0: usize, a1: usize, a2: usize) -> usize {
@@ -162,7 +163,7 @@ pub fn spawn_request(
 pub use clv_abi::TaskCompletion as ChildStatus;
 
 pub fn wait(handle: usize) -> Option<ChildStatus> {
-    let (tag, value, _) = ecall(SYS_WAIT, handle, 0, 0, 0, 0);
+    let (tag, value, ..) = ecall(SYS_WAIT, handle, 0, 0, 0, 0);
     Some(match CompletionKind::from_raw(tag)? {
         CompletionKind::Exited => ChildStatus::Exited(value),
         CompletionKind::Faulted => ChildStatus::Faulted(value),
@@ -172,7 +173,7 @@ pub fn wait(handle: usize) -> Option<ChildStatus> {
 
 /// Takes the oldest child notification. Its full result is available through `wait`.
 pub fn event_wait() -> Option<ChildEvent> {
-    let (handle, tag, _) = ecall(SYS_EVENT_WAIT, 0, 0, 0, 0, 0);
+    let (handle, tag, ..) = ecall(SYS_EVENT_WAIT, 0, 0, 0, 0, 0);
     match handle {
         SYSCALL_ERROR => None,
         NO_CHILD_HANDLE => Some(ChildEvent::Empty),
@@ -197,7 +198,7 @@ pub fn send_reply(kind: ReplyKind, bytes: &[u8]) -> bool {
 }
 
 fn receive(number: usize, handle: usize, buffer: &mut [u8]) -> Option<(&[u8], usize, usize)> {
-    let (count, sender, tag) = ecall(
+    let (count, sender, tag, _) = ecall(
         number,
         buffer.as_mut_ptr().expose_provenance(),
         buffer.len(),

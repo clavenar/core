@@ -2,6 +2,7 @@
 
 //! Syscall numbers and register values for the Clavenar boot user ABI.
 
+pub mod agent;
 pub mod goal;
 
 pub const SYS_PROBE: usize = 0;
@@ -42,6 +43,8 @@ pub const SYS_GOAL_RUN: usize = 34;
 pub const SYS_GOAL_STATUS: usize = 35;
 pub const SYS_GOAL_CLOSE: usize = 36;
 pub const SYS_GOAL_CANCEL: usize = 37;
+pub const SYS_AGENT_RUN: usize = 38;
+pub const SYS_AGENT_STATUS: usize = 39;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;

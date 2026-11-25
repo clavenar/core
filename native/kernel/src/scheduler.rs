@@ -2,6 +2,7 @@ mod goal;
 mod pipe;
 
 use self::goal::Goal;
+use clv_abi::agent::AgentLaunch;
 use clv_abi::{
     ChildEvent, CompletionKind, GrantKind, PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
     TaskCompletion,
@@ -103,7 +104,7 @@ pub(crate) struct Scheduler {
     tasks: [Task; TASK_COUNT],
     initial_status: usize,
     goal: Option<Goal>,
-    // Child launches and goals share a boot-unique handle sequence.
+    // Child launches, goals and agents share a boot-unique handle sequence.
     next_handle: usize,
     next_event_sequence: usize,
     current: usize,
@@ -177,6 +178,28 @@ impl Scheduler {
         scope: LaunchScope,
         request: Option<Message>,
     ) -> Option<usize> {
+        self.start_child(fs, program, scope, request, None)
+    }
+
+    pub(crate) fn run_agent(
+        &mut self,
+        fs: &mut RamFs,
+        goal: usize,
+        program: usize,
+    ) -> Option<AgentLaunch> {
+        let agent = self.next_handle;
+        let child = self.start_child(fs, program, LaunchScope::Goal(goal), None, Some(agent))?;
+        Some(AgentLaunch { agent, child })
+    }
+
+    fn start_child(
+        &mut self,
+        fs: &mut RamFs,
+        program: usize,
+        scope: LaunchScope,
+        request: Option<Message>,
+        agent: Option<usize>,
+    ) -> Option<usize> {
         let index = match program {
             PROGRAM_HELLO => HELLO_TASK_INDEX,
             PROGRAM_ECHO => ECHO_TASK_INDEX,
@@ -185,8 +208,11 @@ impl Scheduler {
         if self.current != SHELL_TASK_INDEX || self.tasks[index].state != TaskState::Stopped {
             return None;
         }
-        // The maximum value is reserved for syscall errors.
-        let handle = self.next_handle;
+        // An agent takes the first handle of the pair. Commit the sequence only on success.
+        let handle = match agent {
+            Some(agent) => agent.checked_add(1)?,
+            None => self.next_handle,
+        };
         let next_handle = handle.checked_add(1)?;
         let mut frame = TrapFrame::new_user(
             self.tasks[index].entry,
@@ -209,8 +235,8 @@ impl Scheduler {
             None => (TaskFs::empty(), None),
         };
 
-        if let LaunchScope::Goal(goal_handle) = scope {
-            self.goal.as_mut()?.start(goal_handle, handle)?;
+        if let LaunchScope::Goal(goal) = scope {
+            self.goal.as_mut()?.start(goal, handle, agent)?;
         }
         let task = &mut self.tasks[index];
         // SAFETY: This slot is stopped and its private stack frame is mapped

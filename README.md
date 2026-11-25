@@ -108,11 +108,11 @@ The first two events report both children in completion order. The echo reply
 is still available, both waits report status 0, and the last `event` prints
 `no child event`.
 
-The shell can own one goal and run one ordinary child in it. `goal create`
-prints the new goal handle. `goal run hello` or `goal run echo` prints the
-child's launch handle. `goal status` reports `Ready`, `Running`, `Completed`,
-`Failed`, or `Cancelled`. The kernel keeps the original child handle and
-outcome until the shell closes the goal or the shell itself stops.
+The shell can own one goal at a time. Each goal can launch one child.
+`goal create` prints the new goal handle. `goal run hello` or `goal run echo`
+prints the ordinary child's launch handle. `goal status` reports `Ready`,
+`Running`, `Completed`, `Failed`, or `Cancelled`. The kernel keeps the original
+child handle and outcome until the shell closes the goal or the shell itself stops.
 
 ```text
 goal create
@@ -130,6 +130,26 @@ same program slot and exits with status 1 because `echo` rejects file-read
 requests. `goal status` still prints `Completed`, the handle from `goal run`
 and exit status 0. A running goal returns `goal busy` on close. Closing a
 ready or finished goal makes the slot available for a fresh goal.
+
+`agent run <hello|echo>` creates an agent in a ready goal and prints two
+handles. The agent handle identifies the record read by `agent status`.
+The child handle identifies replies, completion events and the wait result.
+The shell remembers both handles for you. Try this at the QEMU prompt.
+
+```text
+goal create
+agent run echo
+wait echo
+ask --read echo hello.txt
+wait echo
+agent status
+goal close
+```
+
+The two waits report exit statuses 0 and 1. `agent status` prints the agent
+and goal handles, followed by `Completed` with the original child handle and
+exit status 0. Closing the goal releases the agent. Plain `run` and `goal run`
+launch ordinary children.
 
 You can cancel a ready goal directly at the shell prompt.
 
@@ -303,8 +323,8 @@ Call 15 (`spawn`) takes a program selector in `a0`. Selector 0 chooses
 `hello` and selector 1 chooses `echo`. The child starts with no RamFS
 handles or working directory. The call returns a fresh, nonzero child handle
 in `a0` when the task is ready to run and -1 if the selector is unknown or
-the task is already running. Child launches and goals draw distinct handles
-from one boot-wide sequence. RamFS allocates its handles independently.
+the task is already running. Child launches, goals and agents draw distinct
+handles from one boot-wide sequence. RamFS allocates its handles independently.
 
 Call 16 (`wait`) takes the child handle in `a0`. On success, `a0` contains
 the result type. For exit (0) or fault (1), `a1` holds the full exit status
@@ -456,12 +476,19 @@ discards the previous handle's unread event. A failed launch preserves it.
 | 35 `goal_status` | `a0` goal handle | State tag, with the original child handle in `a1` and detail in `a2` |
 | 36 `goal_close` | `a0` goal handle | 0 on release, 1 while running |
 | 37 `goal_cancel` | `a0` goal handle | 0 for a new or repeated cancellation, 1 if the goal already completed or failed |
+| 38 `agent_run` | `a0` goal handle, `a1` program selector | Fresh agent handle, with its child launch handle in `a1` |
+| 39 `agent_status` | `a0` agent handle | State tag, with the original child in `a1`, detail in `a2` and owning goal in `a3` |
 
-Only the shell can use these calls. A stale or invalid goal handle or a call
-from another task returns -1 in `a0`. A new goal starts ready. A successful
-run binds the launch before making the child runnable. It starts with the
-same empty RamFS handle table, empty mailbox and ordinary reply, event and
-wait behavior as a plain `run`. A failed run preserves the goal's state.
+Only the shell can use these calls. A stale or invalid handle or a call
+from another task returns -1 in `a0`. Both run calls require a ready goal.
+They return -1 if the selector is unknown, the program is busy or the kernel
+cannot allocate the handles. A ready goal stays ready on failure.
+
+The kernel binds the child to the goal before making it runnable.
+`agent_run` also creates and binds the agent in that operation. The child
+starts with an empty RamFS handle table and mailbox and uses the ordinary
+reply, event and wait calls. `agent_status` uses tags 1–5 below and always
+returns the original child handle on success.
 
 | `goal_status` tag | State | `a1` | `a2` |
 | --- | --- | --- | --- |
@@ -476,14 +503,14 @@ wait behavior as a plain `run`. A failed run preserves the goal's state.
 slot becomes available for a new launch immediately. The kernel queues one
 event for the cancelled child. Repeating cancellation returns 0 even after
 another launch reuses the slot. Cancelling a ready goal produces no event.
-Only a ready goal accepts a new launch.
 
-Status reads are repeatable. Closing a finished goal leaves the child's
-pending reply, event and wait status available under the usual launch rules.
+Goal and agent status reads are repeatable and survive reuse of the child's
+program slot. Closing the goal releases its agent identity. The child's pending
+reply, event and wait status remain available under the usual launch rules.
 If the shell exits or faults, the kernel cancels the goal's running child
-by its original launch handle and releases the goal before scheduling another
-task. Children launched outside the goal can still run to completion, including
-a newer launch in the same program slot.
+by its original launch handle and releases the goal and its agent before
+scheduling another task. Children launched outside the goal can still run to
+completion, including a newer launch in the same program slot.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

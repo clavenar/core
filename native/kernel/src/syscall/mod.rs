@@ -1,13 +1,15 @@
+use clv_abi::goal::GoalStatus;
 use clv_abi::{
     ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE,
-    PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, ReplyKind, RequestKind, SYS_CHDIR, SYS_CLOSE,
-    SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
-    SYS_GOAL_RUN, SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN,
-    SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ,
-    SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR,
-    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
-    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, ReplyKind, RequestKind, SYS_AGENT_RUN,
+    SYS_AGENT_STATUS, SYS_CHDIR, SYS_CLOSE, SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_CANCEL,
+    SYS_GOAL_CLOSE, SYS_GOAL_CREATE, SYS_GOAL_RUN, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
+    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
+    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
+    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_PIPE,
+    SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE,
+    SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -100,21 +102,25 @@ pub(crate) fn dispatch(
         SYS_GOAL_RUN => scheduler
             .spawn(fs, a1, LaunchScope::Goal(a0), None)
             .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_STATUS => match scheduler.goal_status(a0) {
-            Some(status) => {
-                let (state, child, value) = status.registers();
-                frame.registers[REG_A1] = child;
-                frame.registers[REG_A2] = value;
-                state
-            }
-            None => SYSCALL_ERROR,
-        },
+        SYS_GOAL_STATUS => scheduler
+            .goal_status(a0)
+            .map_or(SYSCALL_ERROR, |status| write_status(frame, status)),
         SYS_GOAL_CLOSE => scheduler
             .close_goal(a0)
             .map_or(SYSCALL_ERROR, |result| result as usize),
         SYS_GOAL_CANCEL => scheduler
             .cancel_goal(a0, fs)
             .map_or(SYSCALL_ERROR, |result| result as usize),
+        SYS_AGENT_RUN => scheduler
+            .run_agent(fs, a0, a1)
+            .map_or(SYSCALL_ERROR, |launch| {
+                frame.registers[REG_A1] = launch.child;
+                launch.agent
+            }),
+        SYS_AGENT_STATUS => scheduler.agent_status(a0).map_or(SYSCALL_ERROR, |agent| {
+            frame.registers[REG_A3] = agent.goal;
+            write_status(frame, agent.status)
+        }),
         SYS_PIPE_READ | SYS_PIPE_WRITE if stack.contains(a1, a2) => {
             let result = if number == SYS_PIPE_READ {
                 scheduler.read_pipe(a0, a2, frame, |bytes| stack.copy_to_user(bytes, a1, a2))
@@ -215,6 +221,13 @@ pub(crate) fn dispatch(
     // ECALL is a 32-bit instruction, including on cores with compressed code.
     frame.sepc += 4;
     Outcome::Resume
+}
+
+fn write_status(frame: &mut TrapFrame, status: GoalStatus) -> usize {
+    let (state, child, value) = status.registers();
+    frame.registers[REG_A1] = child;
+    frame.registers[REG_A2] = value;
+    state
 }
 
 fn spawn_with_request(

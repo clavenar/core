@@ -1,4 +1,5 @@
 use clv_abi::TaskCompletion;
+use clv_abi::agent::AgentStatus;
 use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
 
 use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
@@ -6,14 +7,21 @@ use crate::fs::ramfs::RamFs;
 
 pub(super) struct Goal {
     handle: usize,
+    agent: Option<usize>,
     status: GoalStatus,
 }
 
 impl Goal {
-    pub(super) fn start(&mut self, handle: usize, child: usize) -> Option<()> {
+    pub(super) fn start(
+        &mut self,
+        handle: usize,
+        child: usize,
+        agent: Option<usize>,
+    ) -> Option<()> {
         if self.handle != handle || self.status != GoalStatus::Ready {
             return None;
         }
+        self.agent = agent;
         self.status = GoalStatus::Running { child };
         Some(())
     }
@@ -49,6 +57,7 @@ impl Scheduler {
         self.next_handle = handle.checked_add(1)?;
         self.goal = Some(Goal {
             handle,
+            agent: None,
             status: GoalStatus::Ready,
         });
         Some(handle)
@@ -62,6 +71,17 @@ impl Scheduler {
             .as_ref()
             .filter(|goal| goal.handle == handle)
             .map(|goal| goal.status)
+    }
+
+    pub(crate) fn agent_status(&self, handle: usize) -> Option<AgentStatus> {
+        let goal = self.goal.as_ref()?;
+        if self.current != SHELL_TASK_INDEX || goal.agent != Some(handle) {
+            return None;
+        }
+        Some(AgentStatus {
+            goal: goal.handle,
+            status: goal.status,
+        })
     }
 
     pub(crate) fn close_goal(&mut self, handle: usize) -> Option<CloseResult> {

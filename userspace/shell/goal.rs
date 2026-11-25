@@ -1,30 +1,43 @@
 use clv::goal::{self, CancelResult, CloseResult, GoalStatus};
-use clv::print;
+use clv::{agent, print};
 use clv_abi::CompletionKind;
 
 use super::{children::Children, hex, print_handle, print_line, split_word};
 
-pub(super) fn command(arguments: &[u8], current: &mut Option<usize>, children: &mut Children) {
+pub(super) struct CurrentGoal {
+    handle: usize,
+    agent: Option<usize>,
+}
+
+pub(super) fn command(
+    arguments: &[u8],
+    current: &mut Option<CurrentGoal>,
+    children: &mut Children,
+) {
+    let handle = current.as_ref().map(|goal| goal.handle);
     match split_word(arguments) {
         (b"create", b"") => match goal::create() {
             Some(handle) => {
-                *current = Some(handle);
+                *current = Some(CurrentGoal {
+                    handle,
+                    agent: None,
+                });
                 print_handle(b"goal created ", handle);
             }
             None if current.is_some() => print(b"goal already open\r\n"),
             None => print(b"cannot create goal\r\n"),
         },
-        (b"run", name) => children.run_in_goal(*current, name),
-        (b"status", b"") => match current.and_then(goal::status) {
+        (b"run", name) => children.run_in_goal(handle, name),
+        (b"status", b"") => match handle.and_then(goal::status) {
             Some(status) => print_status(status),
             None => print(b"no current goal\r\n"),
         },
-        (b"cancel", b"") => match current.and_then(goal::cancel) {
+        (b"cancel", b"") => match handle.and_then(goal::cancel) {
             Some(CancelResult::Cancelled) => print(b"goal cancelled\r\n"),
             Some(CancelResult::AlreadyFinished) => print(b"goal already finished\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        (b"close", b"") => match current.and_then(goal::close) {
+        (b"close", b"") => match handle.and_then(goal::close) {
             Some(CloseResult::Closed) => {
                 *current = None;
                 print(b"goal closed\r\n");
@@ -33,6 +46,40 @@ pub(super) fn command(arguments: &[u8], current: &mut Option<usize>, children: &
             None => print(b"no current goal\r\n"),
         },
         _ => print(b"usage: goal create | run <hello|echo> | status | cancel | close\r\n"),
+    }
+}
+
+pub(super) fn agent_command(
+    arguments: &[u8],
+    current: &mut Option<CurrentGoal>,
+    children: &mut Children,
+) {
+    match split_word(arguments) {
+        (b"run", name) => {
+            let Some(goal) = current else {
+                return print(b"no current goal\r\n");
+            };
+            if let Some(launch) = children.run_agent(goal.handle, name) {
+                goal.agent = Some(launch.agent);
+                print_line(&[
+                    b"agent=",
+                    &hex(launch.agent),
+                    b" child=",
+                    &hex(launch.child),
+                ]);
+            }
+        }
+        (b"status", b"") => {
+            if let Some(handle) = current.as_ref().and_then(|goal| goal.agent)
+                && let Some(snapshot) = agent::status(handle)
+            {
+                print_line(&[b"agent=", &hex(handle), b" goal=", &hex(snapshot.goal)]);
+                print_status(snapshot.status);
+            } else {
+                print(b"no current agent\r\n");
+            }
+        }
+        _ => print(b"usage: agent run <hello|echo> | status\r\n"),
     }
 }
 

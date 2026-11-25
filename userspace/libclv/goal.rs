@@ -13,7 +13,7 @@ pub fn run(goal: usize, program: usize) -> Option<usize> {
 }
 
 pub fn status(goal: usize) -> Option<GoalStatus> {
-    let (state, child, value) = ecall(SYS_GOAL_STATUS, goal, 0, 0, 0, 0);
+    let (state, child, value, _) = ecall(SYS_GOAL_STATUS, goal, 0, 0, 0, 0);
     GoalStatus::from_registers(state, child, value)
 }
 

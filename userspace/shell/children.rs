@@ -1,4 +1,4 @@
-use clv::{ChildReply, ChildStatus, fs, pipe, print};
+use clv::{ChildReply, ChildStatus, agent, fs, pipe, print};
 use clv_abi::{
     ChildEvent, CompletionKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PIPE_CAPACITY,
     PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
@@ -80,6 +80,19 @@ impl Children {
         } else {
             print(b"cannot start goal child\r\n");
         }
+    }
+
+    pub(super) fn run_agent(&mut self, goal: usize, name: &[u8]) -> Option<agent::AgentLaunch> {
+        let Some(child) = self.named(name) else {
+            print(b"usage: agent run <hello|echo>\r\n");
+            return None;
+        };
+        let Some(launch) = agent::run(goal, child.selector) else {
+            print(b"cannot start agent\r\n");
+            return None;
+        };
+        child.handle = launch.child;
+        Some(launch)
     }
 
     pub(super) fn ask(&mut self, arguments: &[u8]) {

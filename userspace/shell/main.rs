@@ -69,7 +69,7 @@ extern "C" fn _start() -> ! {
     }
 }
 
-fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<usize>) {
+fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<goal::CurrentGoal>) {
     let (command, arguments) = split_word(line.trim_ascii());
     match command {
         b"help" if arguments.is_empty() => print(
@@ -78,7 +78,8 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<u
               ask [--read] <hello|echo> <text>  askat [--echo] hello <dir> <payload>\r\n\
               askfile [--stream] hello <path>\r\n\
               recv <hello|echo>  wait <hello|echo>  event\r\n\
-              goal create  goal run <hello|echo>  goal status  goal cancel  goal close\r\n",
+              goal create  goal run <hello|echo>  goal status  goal cancel  goal close\r\n\
+              agent run <hello|echo>  agent status\r\n",
         ),
         b"pwd" if arguments.is_empty() => files::pwd(),
         b"cd" => files::cd(arguments),
@@ -97,6 +98,7 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<u
         b"event" if arguments.is_empty() => children.event(),
         b"event" => print(b"usage: event\r\n"),
         b"goal" => goal::command(arguments, current_goal, children),
+        b"agent" => goal::agent_command(arguments, current_goal, children),
         b"exit" if arguments.is_empty() => clv::exit(0),
         b"" => {}
         _ => print(b"unknown command\r\n"),
