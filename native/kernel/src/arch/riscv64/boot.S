@@ -4,6 +4,7 @@
     .type _start, @function
 _start:
     csrci sstatus, 2  # Clear SIE.
+    csrw sscratch, zero
     lla sp, __stack_top
     lla t0, supervisor_trap_entry
     csrw stvec, t0

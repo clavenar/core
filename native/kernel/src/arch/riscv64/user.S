@@ -13,6 +13,9 @@ enter_user:
     mv \reg, zero
     .endr
     lla sp, __user_stack_top
+    lla t0, __stack_top
+    csrw sscratch, t0
+    mv t0, zero
     sret
     .size enter_user, . - enter_user
 
@@ -21,8 +24,25 @@ enter_user:
     .type user_entry, @function
 user_entry:
     addi sp, sp, -16
-    sd zero, 0(sp)
-    ld a0, 0(sp)
+    li s0, 0x123
+    li t1, 0x456
+    sd s0, 0(sp)
+    li a7, {probe_call}
+    ecall
+    li t0, {probe_value}
+    bne a0, t0, .Luser_failed
+    li t0, 0x456
+    bne t1, t0, .Luser_failed
+    li t0, 0x123
+    bne s0, t0, .Luser_failed
+    ld t1, 0(sp)
+    bne t1, t0, .Luser_failed
+    li a0, 0
+    j .Luser_exit
+.Luser_failed:
+    li a0, 1
+.Luser_exit:
+    li a7, {exit_call}
     ecall
 1:
     j 1b

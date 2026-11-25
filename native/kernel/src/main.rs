@@ -10,8 +10,18 @@ use memory::frame::FrameAllocator;
 use memory::sv39;
 
 global_asm!(include_str!("arch/riscv64/boot.S"));
-global_asm!(include_str!("arch/riscv64/trap.S"));
-global_asm!(include_str!("arch/riscv64/user.S"));
+global_asm!(
+    include_str!("arch/riscv64/trap.S"),
+    frame_size = const size_of::<TrapFrame>(),
+    sepc_offset = const core::mem::offset_of!(TrapFrame, sepc),
+    sstatus_offset = const core::mem::offset_of!(TrapFrame, sstatus),
+);
+global_asm!(
+    include_str!("arch/riscv64/user.S"),
+    probe_call = const SYS_PROBE,
+    probe_value = const PROBE_VALUE,
+    exit_call = const SYS_EXIT,
+);
 
 // Make Cargo rebuild the kernel when the linker script changes.
 const _: &str = include_str!("../../linker/riscv64.ld");
@@ -20,6 +30,18 @@ const UART_BASE: usize = 0x1000_0000;
 const UART_LINE_STATUS: usize = 5;
 const UART_TX_READY: u8 = 1 << 5;
 const USER_ECALL: usize = 8;
+const SYS_PROBE: usize = 0;
+const SYS_EXIT: usize = 1;
+const PROBE_VALUE: usize = 42;
+const REG_A0: usize = 10;
+const REG_A7: usize = 17;
+
+#[repr(C, align(16))]
+struct TrapFrame {
+    registers: [usize; 32],
+    sepc: usize,
+    sstatus: usize,
+}
 
 unsafe extern "C" {
     fn enter_user() -> !;
@@ -55,13 +77,32 @@ extern "C" fn kernel_main() -> ! {
 
 // SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.
 #[unsafe(no_mangle)]
-extern "C" fn supervisor_trap(scause: usize, sepc: usize, stval: usize) -> ! {
-    if scause == USER_ECALL {
-        uart_write(b"user ecall");
-    } else {
-        uart_write(b"fatal trap");
+extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: usize) {
+    if scause != USER_ECALL {
+        supervisor_trap_fatal(scause, frame.sepc, stval);
     }
-    uart_write(b" scause=");
+
+    match frame.registers[REG_A7] {
+        SYS_PROBE => {
+            uart_write(b"user probe\r\n");
+            frame.registers[REG_A0] = PROBE_VALUE;
+        }
+        SYS_EXIT => {
+            uart_write(b"user exit status=");
+            uart_write_hex(frame.registers[REG_A0]);
+            uart_write(b"\r\n");
+            idle();
+        }
+        _ => frame.registers[REG_A0] = usize::MAX,
+    }
+    // ECALL is a 32-bit instruction, including on cores with compressed code.
+    frame.sepc += 4;
+}
+
+// SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.
+#[unsafe(no_mangle)]
+extern "C" fn supervisor_trap_fatal(scause: usize, sepc: usize, stval: usize) -> ! {
+    uart_write(b"fatal trap scause=");
     uart_write_hex(scause);
     uart_write(b" sepc=");
     uart_write_hex(sepc);

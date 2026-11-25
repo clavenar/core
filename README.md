@@ -43,11 +43,15 @@ after activating the identity map. The kernel and UART use supervisor-only
 a read/write, non-executable stack page. The image, stacks, and 16-frame boot
 pool fit within one aligned 2 MiB region.
 
-The kernel enters user mode, where the program uses its stack and executes
-`ecall`. The trap handler switches to the supervisor stack, prints a
-`user ecall` line with `scause=0x0000000000000008`, and idles. Other traps print
-`fatal trap`. Both lines include `scause` (trap cause), `sepc` (instruction
-address), and `stval` (additional information, when provided).
+The kernel enters user mode and runs the embedded program. The program passes
+the call number in `a7` and executes `ecall`. Call 0 prints `user probe` and
+returns 42 in `a0`. The program checks the result, its saved registers, and
+its stack contents. It then uses call 1 to pass an exit status in `a0`. A
+successful run prints `user exit status=0x0000000000000000` and idles. Unknown
+call numbers return -1 in `a0`.
+
+Unexpected traps print `fatal trap` with `scause` (trap cause), `sepc`
+(instruction address), and `stval` (additional information, when provided).
 To exit QEMU, press `Ctrl+a`, then `x`.
 
 Check Rust formatting with `rustfmt` from the stable toolchain.
