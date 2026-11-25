@@ -23,6 +23,7 @@ pub const SYS_OPEN_AT: usize = 17;
 pub const SYS_SPAWN_AT: usize = 18;
 pub const SYS_MESSAGE_SEND: usize = 19;
 pub const SYS_MESSAGE_RECV: usize = 20;
+pub const SYS_SPAWN_WITH_MESSAGE: usize = 21;
 
 pub const MESSAGE_MAX_BYTES: usize = 64;
 pub const PROGRAM_HELLO: usize = 0;

@@ -2,8 +2,8 @@
 #![no_main]
 
 use clv_abi::{
-    PROBE_VALUE, SYS_CLOSE, SYS_EXIT, SYS_MESSAGE_SEND, SYS_OPEN_AT, SYS_PROBE, SYS_READ,
-    SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    MESSAGE_MAX_BYTES, PROBE_VALUE, SYS_CLOSE, SYS_EXIT, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND,
+    SYS_OPEN_AT, SYS_PROBE, SYS_READ, SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
@@ -15,18 +15,23 @@ global_asm!(
     console_call = const SYS_WRITE_CONSOLE,
     timer_call = const SYS_TIMER_FIRED,
     probe_value = const PROBE_VALUE,
-    send_hello_message = sym send_hello_message,
+    reply_or_report_ready = sym reply_or_report_ready,
     print_granted_hello = sym print_granted_hello,
 );
 
-extern "C" fn send_hello_message() {
-    let mut message = *b"hello ready";
-    syscall(
-        SYS_MESSAGE_SEND,
-        message.as_mut_ptr().expose_provenance(),
-        message.len(),
-        0,
-    );
+extern "C" fn reply_or_report_ready() -> usize {
+    let mut buffer = [0; MESSAGE_MAX_BYTES];
+    let address = buffer.as_mut_ptr().expose_provenance();
+    let count = syscall(SYS_MESSAGE_RECV, address, buffer.len(), 0);
+    if (1..=buffer.len()).contains(&count) {
+        return usize::from(syscall(SYS_MESSAGE_SEND, address, count, 0) != count);
+    }
+
+    let ready = b"hello ready";
+    buffer[..ready.len()].copy_from_slice(ready);
+    syscall(SYS_MESSAGE_SEND, address, ready.len(), 0);
+    // Continue with the ordinary greeting or granted file.
+    SYSCALL_ERROR
 }
 
 extern "C" fn print_granted_hello(directory: usize) -> usize {
@@ -56,12 +61,12 @@ extern "C" fn print_granted_hello(directory: usize) -> usize {
 }
 
 fn syscall(number: usize, mut a0: usize, a1: usize, a2: usize) -> usize {
-    // SAFETY: The calls here return their result in a0 and preserve other registers.
+    // SAFETY: Clavenar returns results in a0 and a1 and preserves other registers.
     unsafe {
         asm!(
             "ecall",
             inlateout("a0") a0,
-            in("a1") a1,
+            inlateout("a1") a1 => _,
             in("a2") a2,
             in("a7") number,
             options(nostack),

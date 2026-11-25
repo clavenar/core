@@ -1,8 +1,9 @@
 use clv_abi::{
     OPEN_READ, OPEN_WRITE_TRUNCATE, PROBE_VALUE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE, SYS_EXIT,
     SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PROBE,
-    SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT, SYS_TIMER_FIRED,
-    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE,
+    SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -10,7 +11,9 @@ use crate::console::write_task;
 use crate::drivers::uart;
 use crate::fs::ramfs::{RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
 use crate::memory::usercopy::{copy_from_user_stack, copy_to_user_stack, in_user_stack};
-use crate::scheduler::{ReceiveResult, Scheduler, TaskCompletion, WaitResult};
+use crate::scheduler::{
+    HelloLaunch, Message, ReceiveResult, Scheduler, TaskCompletion, WaitResult,
+};
 
 const CONSOLE_WRITE_LIMIT: usize = 128;
 const PATH_LIMIT: usize = 64;
@@ -69,11 +72,18 @@ pub(crate) fn dispatch(
         SYS_RMDIR => {
             with_user_path(a0, a1, |path| scheduler.rmdir(fs, path)).unwrap_or(SYSCALL_ERROR)
         }
-        SYS_SPAWN if a0 == PROGRAM_HELLO => {
-            scheduler.spawn_hello(fs, None).unwrap_or(SYSCALL_ERROR)
-        }
-        SYS_SPAWN_AT if a0 == PROGRAM_HELLO => {
-            scheduler.spawn_hello(fs, Some(a1)).unwrap_or(SYSCALL_ERROR)
+        SYS_SPAWN if a0 == PROGRAM_HELLO => scheduler
+            .spawn_hello(fs, HelloLaunch::Ordinary)
+            .unwrap_or(SYSCALL_ERROR),
+        SYS_SPAWN_AT if a0 == PROGRAM_HELLO => scheduler
+            .spawn_hello(fs, HelloLaunch::Directory(a1))
+            .unwrap_or(SYSCALL_ERROR),
+        SYS_SPAWN_WITH_MESSAGE if a0 == PROGRAM_HELLO => {
+            Message::new(scheduler.current_id(), a2, |bytes| {
+                copy_from_user_stack(a1, bytes)
+            })
+            .and_then(|request| scheduler.spawn_hello(fs, HelloLaunch::Request(request)))
+            .unwrap_or(SYSCALL_ERROR)
         }
         SYS_WAIT if a0 == PROGRAM_HELLO => match scheduler.wait_hello(frame) {
             WaitResult::NoLaunch => SYSCALL_ERROR,
@@ -88,11 +98,10 @@ pub(crate) fn dispatch(
             }
         },
         SYS_MESSAGE_SEND => scheduler
-            .send_hello_message(a1, |bytes| copy_from_user_stack(a0, bytes))
+            .send_reply(a1, |bytes| copy_from_user_stack(a0, bytes))
             .unwrap_or(SYSCALL_ERROR),
         SYS_MESSAGE_RECV if a1 > 0 && in_user_stack(a0, a1) => {
-            match scheduler.receive_hello_message(frame, |bytes| copy_to_user_stack(bytes, a0, a1))
-            {
+            match scheduler.receive_message(frame, |bytes| copy_to_user_stack(bytes, a0, a1)) {
                 ReceiveResult::Error => SYSCALL_ERROR,
                 ReceiveResult::Blocked => return Outcome::Wait,
                 ReceiveResult::Empty => {

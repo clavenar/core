@@ -78,12 +78,16 @@ recv hello
 wait hello
 ```
 
-A launched `hello` sends `hello ready` to its parent's mailbox. `recv hello`
-prints the message, waiting if the mailbox is empty and the child is still
-running. A queued message remains available after exit or fault. The next
-successful launch starts with an empty mailbox.
+A child started by `run hello` sends `hello ready` to the shell's mailbox.
+`recv hello` prints the message, waiting if the mailbox is empty and the
+child is still running. A queued reply remains available after exit or fault.
+The next successful launch starts with an empty reply mailbox.
 
-`wait hello` collects the exit status or fault cause of the latest `run hello`.
+`ask hello hello from shell` launches `hello` with a request and prints the
+echoed reply `hello from shell`. The request is available to the child when
+it starts.
+
+`wait hello` collects the exit status or fault cause of the latest launch.
 The shell waits for a running program and returns immediately if the result is
 already available. A successful wait consumes the result, and a successful
 launch replaces any uncollected result.
@@ -188,10 +192,17 @@ live parent. The call returns the byte count on success and -1 on error. A
 send to a full mailbox preserves its queued message.
 
 Call 20 (`message_recv`) takes a user stack destination in `a0` and its nonzero
-capacity in `a1`. The shell receives the byte count in `a0` and the sender's
-task ID in `a1`. An empty mailbox blocks while the launched child runs and
-returns 0 in both registers otherwise. An invalid or undersized buffer
-returns -1 and preserves any queued message.
+capacity in `a1`. The shell receives replies, and a launched `hello` receives
+its request. The result gives the byte count in `a0` and the sender's task ID
+in `a1`. An empty reply mailbox blocks while the child runs. Other empty
+reads return 0 in both registers. An invalid or undersized buffer returns -1
+and preserves any queued message.
+
+Call 21 (`spawn_with_message`) takes program selector 0 in `a0`, a user stack
+address in `a1`, and a length from 1 to 64 bytes in `a2`. It copies the request
+before making the child runnable and returns 0 on success or -1 on error.
+The child consumes the request with `message_recv`. Exit or fault discards
+any unread request.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`
 (instruction address), and `stval` (additional information, when provided).

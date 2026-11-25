@@ -40,10 +40,37 @@ pub(crate) enum ReceiveResult {
     Received { length: usize, sender: usize },
 }
 
-struct Message {
+pub(crate) enum HelloLaunch {
+    Ordinary,
+    Directory(usize),
+    Request(Message),
+}
+
+pub(crate) struct Message {
     bytes: [u8; MESSAGE_MAX_BYTES],
     length: usize,
     sender: usize,
+}
+
+impl Message {
+    pub(crate) fn new(
+        sender: usize,
+        length: usize,
+        copy: impl FnOnce(&mut [u8]) -> bool,
+    ) -> Option<Self> {
+        if length == 0 {
+            return None;
+        }
+        let mut bytes = [0; MESSAGE_MAX_BYTES];
+        if !copy(bytes.get_mut(..length)?) {
+            return None;
+        }
+        Some(Self {
+            bytes,
+            length,
+            sender,
+        })
+    }
 }
 
 struct Task {
@@ -58,7 +85,8 @@ pub(crate) struct Scheduler {
     tasks: [Task; 2],
     hello_start: TrapFrame,
     hello_run: HelloRun,
-    hello_message: Option<Message>,
+    hello_request: Option<Message>,
+    hello_reply: Option<Message>,
     current: usize,
 }
 
@@ -77,7 +105,8 @@ impl Scheduler {
         Self {
             hello_start: tasks[HELLO_TASK_INDEX].frame,
             hello_run: HelloRun::Untracked,
-            hello_message: None,
+            hello_request: None,
+            hello_reply: None,
             tasks,
             current: HELLO_TASK_INDEX,
         }
@@ -112,20 +141,19 @@ impl Scheduler {
         fs.rmdir(&self.tasks[self.current].fs, path, live_task_fs)
     }
 
-    pub(crate) fn spawn_hello(
-        &mut self,
-        fs: &mut RamFs,
-        directory_fd: Option<usize>,
-    ) -> Option<usize> {
-        if self.tasks[HELLO_TASK_INDEX].state != TaskState::Stopped {
+    pub(crate) fn spawn_hello(&mut self, fs: &mut RamFs, launch: HelloLaunch) -> Option<usize> {
+        if self.current != SHELL_TASK_INDEX
+            || self.tasks[HELLO_TASK_INDEX].state != TaskState::Stopped
+        {
             return None;
         }
-        let (task_fs, grant) = match directory_fd {
-            Some(fd) => {
+        let (task_fs, grant, request) = match launch {
+            HelloLaunch::Ordinary => (TaskFs::new(), None, None),
+            HelloLaunch::Directory(fd) => {
                 let (task_fs, child_fd) = self.tasks[self.current].fs.grant_directory(fs, fd)?;
-                (task_fs, Some(child_fd))
+                (task_fs, Some(child_fd), None)
             }
-            None => (TaskFs::new(), None),
+            HelloLaunch::Request(message) => (TaskFs::new(), None, Some(message)),
         };
 
         let task = &mut self.tasks[HELLO_TASK_INDEX];
@@ -138,9 +166,10 @@ impl Scheduler {
         }
         task.fs = task_fs;
         task.timer_fired = false;
-        task.state = TaskState::Runnable;
+        self.hello_request = request;
+        self.hello_reply = None;
         self.hello_run = HelloRun::Running;
-        self.hello_message = None;
+        task.state = TaskState::Runnable;
         Some(0)
     }
 
@@ -164,7 +193,7 @@ impl Scheduler {
         }
     }
 
-    pub(crate) fn send_hello_message(
+    pub(crate) fn send_reply(
         &mut self,
         length: usize,
         copy: impl FnOnce(&mut [u8]) -> bool,
@@ -172,21 +201,12 @@ impl Scheduler {
         if self.current != HELLO_TASK_INDEX
             || !matches!(self.hello_run, HelloRun::Running)
             || self.tasks[SHELL_TASK_INDEX].state == TaskState::Stopped
-            || self.hello_message.is_some()
-            || length == 0
+            || self.hello_reply.is_some()
         {
             return None;
         }
 
-        let mut bytes = [0; MESSAGE_MAX_BYTES];
-        if !copy(bytes.get_mut(..length)?) {
-            return None;
-        }
-        self.hello_message = Some(Message {
-            bytes,
-            length,
-            sender: self.current_id(),
-        });
+        self.hello_reply = Some(Message::new(self.current_id(), length, copy)?);
         let shell = &mut self.tasks[SHELL_TASK_INDEX];
         if shell.state == TaskState::WaitingForMessage {
             shell.state = TaskState::Runnable;
@@ -194,15 +214,19 @@ impl Scheduler {
         Some(length)
     }
 
-    pub(crate) fn receive_hello_message(
+    pub(crate) fn receive_message(
         &mut self,
         frame: &mut TrapFrame,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> ReceiveResult {
-        if self.current != SHELL_TASK_INDEX {
-            return ReceiveResult::Error;
-        }
-        if let Some(message) = &self.hello_message {
+        let pending = match self.current {
+            SHELL_TASK_INDEX => &mut self.hello_reply,
+            HELLO_TASK_INDEX if matches!(self.hello_run, HelloRun::Running) => {
+                &mut self.hello_request
+            }
+            _ => return ReceiveResult::Error,
+        };
+        if let Some(message) = pending.as_ref() {
             if !copy(&message.bytes[..message.length]) {
                 return ReceiveResult::Error;
             }
@@ -210,10 +234,11 @@ impl Scheduler {
                 length: message.length,
                 sender: message.sender,
             };
-            self.hello_message = None;
+            *pending = None;
             return result;
         }
-        if matches!(self.hello_run, HelloRun::Running)
+        if self.current == SHELL_TASK_INDEX
+            && matches!(self.hello_run, HelloRun::Running)
             && self.block_shell(frame, TaskState::WaitingForMessage)
         {
             ReceiveResult::Blocked
@@ -239,6 +264,7 @@ impl Scheduler {
         task.state = TaskState::Stopped;
         task.fs.close_all(fs);
         if self.current == HELLO_TASK_INDEX && matches!(self.hello_run, HelloRun::Running) {
+            self.hello_request = None;
             self.hello_run = HelloRun::Completed(completion);
             let shell = &mut self.tasks[SHELL_TASK_INDEX];
             if matches!(
@@ -248,7 +274,7 @@ impl Scheduler {
                 shell.state = TaskState::Runnable;
             }
         } else if self.current == SHELL_TASK_INDEX {
-            self.hello_message = None;
+            self.hello_reply = None;
         }
         self.switch(frame)
     }

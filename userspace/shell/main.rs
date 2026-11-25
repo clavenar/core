@@ -4,8 +4,8 @@
 use clv_abi::{
     MESSAGE_MAX_BYTES, OPEN_READ, OPEN_WRITE_TRUNCATE, PROGRAM_HELLO, SYS_CHDIR, SYS_CLOSE,
     SYS_EXIT, SYS_GETCWD, SYS_MESSAGE_RECV, SYS_MKDIR, SYS_OPEN, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
-    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
+    SYS_READDIR, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
+    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR, WAIT_EXITED, WAIT_FAULTED,
 };
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -73,7 +73,7 @@ fn run_command(line: &[u8]) {
     let (command, arguments) = split_word(line.trim_ascii());
     match command {
         b"help" if arguments.is_empty() => write(
-            b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\nrun hello [dir]  recv hello  wait hello\r\n",
+            b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\nrun hello [dir]  ask hello <text>  recv hello  wait hello\r\n",
         ),
         b"pwd" if arguments.is_empty() => pwd(),
         b"cd" => run_path_command(
@@ -106,6 +106,7 @@ fn run_command(line: &[u8]) {
             b"cannot remove path\r\n",
         ),
         b"run" => run_hello(arguments),
+        b"ask" => ask_hello(arguments),
         b"recv" if arguments == b"hello" => recv_hello(),
         b"recv" => write(b"usage: recv hello\r\n"),
         b"wait" if arguments == b"hello" => wait_hello(),
@@ -192,6 +193,26 @@ fn wait_hello() {
         value >>= 4;
     }
     write_stack(&line);
+}
+
+fn ask_hello(arguments: &[u8]) {
+    let (program, text) = split_word(arguments);
+    if program != b"hello" || text.is_empty() {
+        write(b"usage: ask hello <text>\r\n");
+        return;
+    }
+    // The text is a slice of the command line on the user stack.
+    let result = syscall(
+        SYS_SPAWN_WITH_MESSAGE,
+        PROGRAM_HELLO,
+        text.as_ptr().expose_provenance(),
+        text.len(),
+    );
+    if result == SYSCALL_ERROR {
+        write(b"cannot ask hello\r\n");
+        return;
+    }
+    recv_hello();
 }
 
 fn recv_hello() {
