@@ -62,17 +62,18 @@ OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
 starts a fresh quantum when the timer fires or a stopped task is replaced.
 
-At the shell prompt, `run hello` and `run echo` start the selected program
-in its own task slot with an empty handle table and working directory `/`.
-The shell stays interactive while either child runs. Every launch starts
-with a cleared stack and fresh registers and timer state. Exit or fault
-frees the slot.
+Only the boot shell starts with a RamFS working directory (`/`). The initial
+`hello` task and children launched without a grant (`run hello`, `run echo`,
+or `ask`) start with an empty RamFS handle table. Children access RamFS through
+explicit file or directory grants. In a child, `open`, `mkdir`, `unlink`,
+`rmdir`, `chdir`, and `getcwd` return -1.
+
+The shell stays interactive after `run`. Every launch starts with a cleared
+stack and fresh registers and timer state. Exit or fault frees the slot.
 
 `run hello <directory>` grants the child a read-only directory handle. The
-child starts with that single handle and resolves paths through `open_at`.
-Ordinary path calls (`open`, `mkdir`, `unlink`, `rmdir`, `chdir`, and `getcwd`)
-return -1 for a scoped launch. The program prints `hello.txt` from the
-granted directory.
+child starts with that single handle and uses `open_at` to read and print
+`hello.txt` from the granted directory.
 
 ```text
 mkdir /notes
@@ -155,15 +156,14 @@ to remove the empty directory. Use `exit` to stop the shell.
 
 RamFS starts with read-only `/hello.txt` and `/about.txt` and holds up to four
 directories besides the root and four writable files of 256 bytes each.
-Directories and writable files live in RAM until reboot. For ordinary path
-lookups, absolute paths start at `/` and relative paths start at the task's
-current directory, initially `/`. Within a path, `.` keeps the directory
-reached so far and `..` moves to its parent, staying at `/` when already
-there. Creating a file or directory requires an existing parent. Each task
-can hold four live handles, each with an independent cursor. Every open or
-grant receives an opaque ID unique within the current boot. The
-kernel accepts that ID from the owning task until the handle closes or the
-task stops.
+Directories and writable files live in RAM until reboot. In the shell,
+absolute paths start at `/` and relative paths start at its current directory.
+Within a path, `.` keeps the directory reached so far and `..` moves to its
+parent, staying at `/` when already there. Creating a file or directory
+requires an existing parent. Each task can hold four live handles, each with
+an independent cursor. Every open or grant receives an opaque ID unique within
+the current boot. The kernel accepts that ID from the owning task until the
+handle closes or the task stops.
 
 | Call | Arguments | Result in `a0` |
 | --- | --- | --- |
@@ -211,11 +211,12 @@ schedule. A task that exits successfully reports
 prints `all tasks exited` and idles. Unknown call numbers return -1 in `a0`.
 
 Call 15 (`spawn`) takes a program selector in `a0`. Selector 0 chooses
-`hello` and selector 1 chooses `echo`.
-It returns a fresh, nonzero child handle in `a0` when the task is ready to run
-and -1 if the selector is unknown or the task is already running. All
-spawn calls use the same child handle sequence for the current boot. Child
-handles belong to the shell and have their own namespace.
+`hello` and selector 1 chooses `echo`. The child starts with no RamFS
+handles or working directory. The call returns a fresh, nonzero child handle
+in `a0` when the task is ready to run and -1 if the selector is unknown or
+the task is already running. All spawn calls use the same child handle sequence
+for the current boot. Child handles belong to the shell and have their own
+namespace.
 
 Call 16 (`wait`) takes the child handle in `a0`. On success, `a0` contains
 the result type and `a1` contains the full exit status or fault cause. Result
@@ -225,7 +226,7 @@ invalid handle, a caller other than the shell, or an already collected status.
 Call 18 (`spawn_at`) takes a program selector in `a0` and a directory handle
 from the caller in `a1`. It returns a child handle on success and -1 on error.
 The child receives its own directory handle in `a1` and a grant kind of 1 in
-`a2`. Ordinary launches start with `a2` set to 0.
+`a2`. Launches without a grant set `a2` to 0.
 
 Call 19 (`message_send`) takes a user stack address in `a0` and a length from
 1 to 64 bytes in `a1`. A shell-launched child can queue one message for its
@@ -244,8 +245,8 @@ Call 21 (`spawn_with_message`) takes a program selector in `a0`, a user stack
 address in `a1`, and a length from 1 to 64 bytes in `a2`. It copies the request
 before making the child runnable and returns a child handle on success or
 -1 on error.
-The child consumes the request with `message_recv`. Exit or fault discards
-any unread request.
+The child starts with the same empty RamFS state as `spawn` and consumes the
+request with `message_recv`. Exit or fault discards any unread request.
 
 Call 22 (`spawn_at_with_message`) takes a program selector in `a0`, a
 directory handle in `a1`, a user stack request address in `a2`, and a length

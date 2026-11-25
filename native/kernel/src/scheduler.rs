@@ -95,7 +95,11 @@ impl Scheduler {
                 entry,
                 frame: TrapFrame::new_user(entry, USER_STACK_TOP, index + 1, sstatus),
                 address_space,
-                fs: TaskFs::new(),
+                fs: if index == SHELL_TASK_INDEX {
+                    TaskFs::at_root()
+                } else {
+                    TaskFs::empty()
+                },
                 state: if index == ECHO_TASK_INDEX {
                     TaskState::Stopped
                 } else {
@@ -172,7 +176,7 @@ impl Scheduler {
                 frame.set_startup_args(child_fd, kind as usize);
                 task_fs
             }
-            None => TaskFs::new(),
+            None => TaskFs::empty(),
         };
 
         let task = &mut self.tasks[index];

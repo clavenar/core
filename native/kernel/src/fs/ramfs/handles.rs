@@ -34,16 +34,23 @@ impl Handle {
 }
 
 pub(crate) struct TaskFs {
-    // Only an unscoped task starts with a working directory.
+    // Ordinary path lookups require a working directory.
     cwd: Option<DirectoryId>,
     slots: [Option<Handle>; HANDLE_COUNT],
 }
 
 impl TaskFs {
-    pub(crate) const fn new() -> Self {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            cwd: None,
+            slots: [const { None }; HANDLE_COUNT],
+        }
+    }
+
+    pub(crate) const fn at_root() -> Self {
         Self {
             cwd: Some(DirectoryId::Root),
-            slots: [const { None }; HANDLE_COUNT],
+            ..Self::empty()
         }
     }
 
@@ -63,9 +70,9 @@ impl TaskFs {
         }
         let handle = Handle::allocate(fs, false, |_| Some(node))?;
         let child_fd = handle.id;
-        let mut slots = [const { None }; HANDLE_COUNT];
-        slots[0] = Some(handle);
-        Some((Self { cwd: None, slots }, child_fd))
+        let mut child = Self::empty();
+        child.slots[0] = Some(handle);
+        Some((child, child_fd))
     }
 
     pub(crate) fn open(&mut self, fs: &mut RamFs, path: &[u8], writable: bool) -> Option<usize> {
