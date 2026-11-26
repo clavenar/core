@@ -6,7 +6,8 @@ use clv_abi::audit::{
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
     CancelResult, CloseResult, CommitResult, CreateOptions, DiscardResult, FileRecipient, GoalDiff,
-    GoalStatus, PublicationError, ReadLimits, RenameReview, ReviewToken,
+    GoalStatus, PublicationError, ReadLimits, RenameReview, ReviewToken, TimedRenameReview,
+    TimedReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -17,8 +18,8 @@ use clv_abi::{
     SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
     SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT,
     SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS,
+    SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -180,6 +181,15 @@ pub fn review_with_status(goal: usize, buffer: &mut [u8]) -> Option<(GoalDiff<'_
     Some((diff, RenameReview::from_registers(token, status)?))
 }
 
+/// Returns the same review with the absolute guest deadline of a passing token.
+pub fn review_with_deadline(
+    goal: usize,
+    buffer: &mut [u8],
+) -> Option<(GoalDiff<'_>, TimedRenameReview)> {
+    let (diff, token, detail) = read_diff(SYS_GOAL_REVIEW_WITH_DEADLINE, goal, buffer)?;
+    Some((diff, TimedRenameReview::from_registers(token, detail)?))
+}
+
 fn read_diff(
     number: usize,
     goal: usize,
@@ -209,6 +219,7 @@ pub fn commit(goal: usize, token: ReviewToken) -> Option<CommitResult> {
         n if n == CommitResult::PostconditionFailed as usize => {
             Some(CommitResult::PostconditionFailed)
         }
+        n if n == CommitResult::ReviewExpired as usize => Some(CommitResult::ReviewExpired),
         _ => None,
     }
 }

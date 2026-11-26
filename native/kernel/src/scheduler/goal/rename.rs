@@ -1,15 +1,24 @@
 use clv_abi::audit::{RenameDenial, RenameRecord};
 use clv_abi::goal::{
-    CommitResult, DiscardResult, GoalStatus, PublicationError, RenameReview, ReviewToken,
+    CommitResult, DiscardResult, GoalStatus, PublicationError, ReviewToken, TimedRenameReview,
+    TimedReviewToken,
 };
 use clv_abi::{LaunchParent, PATH_MAX_BYTES};
 
 use super::{Goal, Scheduler};
+use crate::arch::monotonic_nanos;
 use crate::fs::ramfs::{PreservedFile, RamFs, StagedRename, TaskFs};
+
+const REVIEW_LIFETIME_NS: u64 = 60 * 1_000_000_000;
+
+fn review_is_live(review: TimedReviewToken, now_ns: u64) -> bool {
+    let issued_at_ns = review.deadline_ns - REVIEW_LIFETIME_NS;
+    (issued_at_ns..review.deadline_ns).contains(&now_ns)
+}
 
 pub(super) struct PendingRename {
     change: StagedRename,
-    token: Option<ReviewToken>,
+    review_token: Option<TimedReviewToken>,
     from_file_grant: bool,
 }
 
@@ -19,21 +28,30 @@ impl PendingRename {
         fs: &RamFs,
         preserved_file: Option<&PreservedFile>,
         next_handle: &mut usize,
-    ) -> Result<ReviewToken, PublicationError> {
+    ) -> Result<TimedReviewToken, PublicationError> {
         if let Err(reason) = self.change.check(fs, preserved_file) {
-            self.token = None;
+            self.review_token = None;
             return Err(reason);
         }
-        if let Some(token) = self.token {
-            return Ok(token);
+        let now_ns = monotonic_nanos();
+        if let Some(review) = self
+            .review_token
+            .filter(|&review| review_is_live(review, now_ns))
+        {
+            return Ok(review);
         }
+        self.review_token = None;
+        let deadline_ns = now_ns
+            .checked_add(REVIEW_LIFETIME_NS)
+            .ok_or(PublicationError::Unavailable)?;
         let token = ReviewToken::new(*next_handle).ok_or(PublicationError::Unavailable)?;
         *next_handle = token
             .get()
             .checked_add(1)
             .ok_or(PublicationError::Unavailable)?;
-        self.token = Some(token);
-        Ok(token)
+        let review = TimedReviewToken { token, deadline_ns };
+        self.review_token = Some(review);
+        Ok(review)
     }
 }
 
@@ -56,7 +74,7 @@ impl Goal {
         let change = task_fs.stage_rename(fs, fd, name, from_file_grant.then_some(self.handle))?;
         self.rename = Some(PendingRename {
             change,
-            token: None,
+            review_token: None,
             from_file_grant,
         });
         Ok(())
@@ -147,12 +165,12 @@ impl Scheduler {
         review: bool,
         fs: &RamFs,
         deliver: impl FnOnce(&[u8]) -> bool,
-    ) -> Option<(usize, usize, RenameReview)> {
+    ) -> Option<(usize, usize, TimedRenameReview)> {
         let goal = self.shell_goal(handle)?;
         let can_review = review && matches!(goal.status(), GoalStatus::Completed { .. });
         let goal = self.goal.as_mut()?;
         let Some(pending) = &mut goal.rename else {
-            return deliver(&[]).then_some((0, 0, RenameReview::Preview));
+            return deliver(&[]).then_some((0, 0, TimedRenameReview::Preview));
         };
         let (names, source_len) = pending.change.diff();
         let count = names.len();
@@ -161,11 +179,11 @@ impl Scheduler {
         }
         let result = if can_review {
             match pending.review(fs, goal.preserved_file.as_ref(), &mut self.next_handle) {
-                Ok(token) => RenameReview::Ready(token),
-                Err(reason) => RenameReview::Blocked(reason),
+                Ok(review) => TimedRenameReview::Ready(review),
+                Err(reason) => TimedRenameReview::Blocked(reason),
             }
         } else {
-            RenameReview::Preview
+            TimedRenameReview::Preview
         };
         Some((count, source_len, result))
     }
@@ -190,10 +208,12 @@ impl Scheduler {
         }
         let goal = self.goal.as_mut()?;
         let pending = goal.rename.as_mut()?;
-        if pending.token != Some(token) {
-            return None;
+        let review = pending
+            .review_token
+            .take_if(|review| review.token == token)?;
+        if !review_is_live(review, monotonic_nanos()) {
+            return Some(CommitResult::ReviewExpired);
         }
-        pending.token = None;
         match pending.change.publish(fs, goal.preserved_file.as_ref()) {
             Ok(()) => {
                 goal.release_transaction(fs);

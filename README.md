@@ -879,8 +879,9 @@ successfully, or exiting the owner releases the pending change.
 
 After a goal completes successfully, run `goal diff` to review the staged
 rename. When RamFS validates the change, the shell prints `ready to commit`
-and saves its single-use token. Entering `goal commit` authorizes that exact
-rename and checks it again. At a fresh QEMU prompt, use
+with the deadline on the guest clock and saves its single-use token. Enter
+`goal commit` within 60 guest seconds to authorize that exact rename and
+check it again. At a fresh QEMU prompt, use
 `echo` to bring the goal to a successful completion.
 
 ```text
@@ -918,6 +919,51 @@ Commit reports `commit conflict`. The directory still lists `draft.txt`, and
 so even a public write in another directory invalidates the proposal. You can
 inspect the frozen diff after a conflict. Start a fresh goal to stage and
 review a rename against the updated filesystem.
+
+### Let a rename review expire
+
+At a fresh QEMU prompt, create a goal and review the same rename twice.
+
+```text
+write /draft.txt hello
+goal create --preserve-file /draft.txt
+goal stage-rename /draft.txt final.txt
+goal run echo
+wait echo
+goal diff
+goal diff
+```
+
+Both reviews show the same absolute deadline, in seconds on the guest's
+monotonic clock. Leave QEMU running at the prompt for at least 61 seconds
+after the first review, then enter
+
+```text
+goal commit
+cat /draft.txt
+goal diff
+goal commit
+cat /final.txt
+goal close
+```
+
+The first commit reports `review expired` and `draft.txt` still contains
+`hello`. The next diff checks the staged rename again and shows a later
+deadline. Commit promptly and `final.txt` contains `hello`.
+
+To check an edit after expiry, repeat the first block from a fresh boot and
+leave QEMU running for the same interval. Then enter
+
+```text
+write /draft.txt revised
+goal diff
+goal discard
+cat /draft.txt
+goal close
+```
+
+The diff shows the staged rename and `conflict`. The owner can discard it,
+and `draft.txt` contains `revised`.
 
 ### Preserve a goal's input file
 
@@ -1447,12 +1493,13 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 66 `goal_stage_rename` | `a0` goal handle, `a1` owner's file handle, `a2` new basename address, `a3` length (1–64 bytes) | 0 when staged, or -1 on rejection |
 | 67 `goal_diff` | `a0` goal handle, `a1` stack destination, `a2` capacity in bytes | Total bytes copied in `a0`, source path length in `a1`. An empty diff returns zero in both registers. Failure returns -1 in `a0`. |
 | 68 `goal_review` | Same arguments as call 67 | Same diff and lengths as call 67, with a token or zero in `a2` and review status in `a3` |
-| 69 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, 2 on a failed file postcondition, or -1 for an invalid caller, goal, token, or unavailable revision |
+| 69 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, 2 on a failed file postcondition, 3 for an expired matching token, or -1 for an invalid caller, goal, token, or unavailable revision |
 | 70 `goal_create_preserving_file` | `a0` owner's file handle, `a1` stack address of the six call 48 argument words in order (little-endian RV64), `a2` length in bytes (48) | Fresh goal handle, or -1 on rejection |
 | 71 `goal_grant_file_for_rename` | `a0` goal handle, `a1` owner's file handle | 0 when the ready goal receives the grant, or -1 on rejection |
 | 72 `agent_stage_rename` | `a0` granted file handle, `a1` new basename address, `a2` length (1–64 bytes) | 0 when the calling agent stages the rename, or -1 on rejection |
 | 73 `goal_rename_audit` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes | Retained staging decision count (0–4), with overwritten count in `a1`, or -1 on failure |
 | 74 `goal_discard` | `a0` goal handle | 0 when a pending rename was discarded, 1 when the diff was already empty, or -1 for an invalid caller or goal |
+| 75 `goal_review_with_deadline` | Same arguments as call 68 | Same diff, lengths and token. With a nonzero token, `a3` holds the absolute guest deadline in nanoseconds. With a zero token, `a3` holds the call 68 review status. |
 
 Calls 66 and 67 are restricted to the goal owner. Call 66 requires a linked
 writable RamFS file and an empty staging slot. It rejects an occupied name,
@@ -1463,12 +1510,15 @@ A stack buffer of `RENAME_DIFF_MAX_BYTES` suffices for any diff. An empty
 diff also accepts zero capacity. A short buffer or an invalid nonempty
 destination range fails before copying any bytes.
 
-Call 68 copies the frozen diff to the owning shell. Once the goal has
+Calls 68 and 75 copy the frozen diff to the owning shell. Once the goal has
 completed successfully and the full diff has been delivered, RamFS checks
 the original revision, source identity at its original name, and vacant
 destination. For a goal created with call 70, RamFS also compares the source's
 identity, length and contents with the saved input. A conflict takes precedence
 over a failed postcondition.
+
+Call 68 returns the following status codes. Call 75 uses the same codes for a
+preview or blocked review and returns the deadline for a passing review.
 
 | Status in `a3` | Meaning | Token in `a2` |
 | --- | --- | --- |
@@ -1476,16 +1526,21 @@ over a failed postcondition.
 | 1 | Ready to commit. The checks passed. | Nonzero, single-use |
 | 2 | Conflict. The base revision, original source or destination has changed. | 0 |
 | 3 | Postcondition failed. The staged file differs from the preserved input. | 0 |
-| 4 | Review unavailable. The kernel cannot prepare publication or allocate a token. | 0 |
+| 4 | Review unavailable. The kernel cannot prepare publication, represent the deadline or allocate a token. | 0 |
 
-Repeated passing reviews return the same outstanding token. A rejected review
-clears that token and leaves the frozen diff available. A failed copy returns
--1 before checking the change or altering its token. Call 67 reads the diff
-without changing review state. Cancellation, successful close and owner exit
-discard both the proposal and any token.
+The first passing review starts a 60-second lifetime on the kernel's monotonic
+clock. QEMU `virt` provides a 10 MHz RISC-V time counter, so each tick is
+100 nanoseconds. Both review calls reuse the token and deadline while the
+token is live. A passing review at or after the deadline issues a fresh token
+with a new deadline. A rejected review clears the token and leaves the frozen
+diff available. A failed copy returns -1 before checking the change or
+altering its token. Call 67 reads the diff without changing review state.
+Discard, cancellation, successful close and owner exit invalidate the token.
 
 Call 69 checks the caller, goal state and token. It consumes a matching token
-and repeats the RamFS checks in the same syscall that publishes the rename.
+and returns 3 if the deadline has been reached. The rename remains staged for
+review or discard. With a live token, it repeats the RamFS checks in the
+same syscall that publishes the rename.
 A rejection preserves the public files and staged diff. Success updates only
 the file's name, advances the revision and clears the diff.
 Public file and directory creation or removal, truncating opens, nonempty

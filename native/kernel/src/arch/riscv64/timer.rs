@@ -7,14 +7,24 @@ const SBI_TIME: usize = 0x5449_4d45;
 const SBI_SET_TIMER: usize = 0;
 const SIE_STIE: usize = 1 << 5;
 const QUANTUM_TICKS: u64 = 25_000;
+// QEMU virt advertises a 10 MHz timebase in /cpus/timebase-frequency.
+const NANOS_PER_TICK: u64 = 100;
 static ARMED: AtomicBool = AtomicBool::new(false);
 
-/// Starts a fresh quantum on the boot hart.
-pub(crate) fn arm() -> bool {
+fn time_ticks() -> u64 {
     let now: u64;
     // SAFETY: OpenSBI exposes the time counter to the supervisor on QEMU virt.
     unsafe { asm!("rdtime {now}", now = out(reg) now, options(nomem, nostack)) };
-    if !set_deadline(now.saturating_add(QUANTUM_TICKS)) {
+    now
+}
+
+pub(crate) fn monotonic_nanos() -> u64 {
+    time_ticks().saturating_mul(NANOS_PER_TICK)
+}
+
+/// Starts a fresh quantum on the boot hart.
+pub(crate) fn arm() -> bool {
+    if !set_deadline(time_ticks().saturating_add(QUANTUM_TICKS)) {
         return false;
     }
 

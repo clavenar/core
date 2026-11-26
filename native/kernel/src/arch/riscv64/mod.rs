@@ -1,4 +1,4 @@
-mod timer;
+pub(super) mod timer;
 pub(crate) mod trap;
 
 use core::arch::{asm, global_asm};

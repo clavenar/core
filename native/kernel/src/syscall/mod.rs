@@ -19,13 +19,14 @@ use clv_abi::{
     SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
     SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT,
     SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT,
-    SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN,
-    SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_FILE_ARG, SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
-    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
+    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
+    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
+    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
+    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -175,14 +176,15 @@ pub(crate) fn dispatch(
         SYS_AGENT_STAGE_RENAME => scheduler
             .stage_agent_rename(fs, a0, a2, |name| stack.copy_from_user(a1, name))
             .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_DIFF | SYS_GOAL_REVIEW => scheduler
-            .read_goal_diff(a0, number == SYS_GOAL_REVIEW, fs, |names| {
+        SYS_GOAL_DIFF | SYS_GOAL_REVIEW | SYS_GOAL_REVIEW_WITH_DEADLINE => scheduler
+            .read_goal_diff(a0, number != SYS_GOAL_DIFF, fs, |names| {
                 stack.copy_to_user(names, a1, a2)
             })
             .map_or(SYSCALL_ERROR, |(count, source_len, review)| {
                 frame.registers[REG_A1] = source_len;
-                if number == SYS_GOAL_REVIEW {
-                    (frame.registers[REG_A2], frame.registers[REG_A3]) = review.registers();
+                if number != SYS_GOAL_DIFF {
+                    (frame.registers[REG_A2], frame.registers[REG_A3]) =
+                        review.review_registers(number == SYS_GOAL_REVIEW_WITH_DEADLINE);
                 }
                 count
             }),

@@ -10,6 +10,13 @@ pub const RENAME_DIFF_MAX_BYTES: usize = 512;
 /// A boot-local handle for one reviewed change. Zero denotes the absence of a token.
 pub type ReviewToken = core::num::NonZeroUsize;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TimedReviewToken {
+    pub token: ReviewToken,
+    /// Absolute deadline on the guest monotonic clock, in nanoseconds.
+    pub deadline_ns: u64,
+}
+
 /// Failures encountered while reviewing or publishing a rename.
 /// The discriminants are the blocked review statuses in a3 of call 68.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,11 +57,48 @@ impl RenameReview {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TimedRenameReview {
+    Preview,
+    Ready(TimedReviewToken),
+    Blocked(PublicationError),
+}
+
+impl TimedRenameReview {
+    /// Call 75 returns the deadline in a3 with a valid token. Call 68 returns status 1.
+    pub const fn review_registers(self, with_deadline: bool) -> (usize, usize) {
+        match self {
+            Self::Ready(review) if with_deadline => {
+                (review.token.get(), review.deadline_ns as usize)
+            }
+            Self::Ready(review) => RenameReview::Ready(review.token).registers(),
+            Self::Preview => RenameReview::Preview.registers(),
+            Self::Blocked(reason) => RenameReview::Blocked(reason).registers(),
+        }
+    }
+
+    pub const fn from_registers(token: usize, detail: usize) -> Option<Self> {
+        match ReviewToken::new(token) {
+            Some(token) if detail != 0 => Some(Self::Ready(TimedReviewToken {
+                token,
+                deadline_ns: detail as u64,
+            })),
+            Some(_) => None,
+            None => match RenameReview::from_registers(0, detail) {
+                Some(RenameReview::Preview) => Some(Self::Preview),
+                Some(RenameReview::Blocked(reason)) => Some(Self::Blocked(reason)),
+                _ => None,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum CommitResult {
     Committed = 0,
     Conflict = 1,
     PostconditionFailed = 2,
+    ReviewExpired = 3,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
