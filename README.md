@@ -41,10 +41,10 @@ After the OpenSBI banner, the kernel prints `Clavenar kernel booted` with the
 version from `native/kernel/Cargo.toml`. It prints `boot frame=0x...` with the
 physical address of task 1's Sv39 root table.
 
-In an ANSI terminal, the shell shows a cyan `clv>` prompt. When you run
-`goal commit`, `rename committed` appears in green, `review expired` in
-yellow, and `commit conflict` in red. The shell resets the color after each
-prompt or message.
+In an ANSI terminal, the shell displays the `clsh>` prompt and help headings
+in green. `goal commit` prints `rename committed` in green, `review expired`
+in yellow, and `commit conflict` in red. The shell resets the color after
+each prompt, heading, or message.
 
 Type `help` for the full command reference. It groups commands by task, shows
 their arguments beside short descriptions, and lists options under the command
@@ -565,7 +565,7 @@ the bytes, including case and spaces, for both shell- and agent-issued
 file delegations. Single or double quotes can enclose spaces or an empty
 literal. The maximum is 64 bytes.
 
-At a fresh `clv>` prompt, let the shell request `Hello` and the agent
+At a fresh `clsh>` prompt, let the shell request `Hello` and the agent
 request `RamFS`. Both strings occur in `/hello.txt`.
 
 ```text
@@ -643,7 +643,7 @@ the shell or by the agent. Each helper read must fit both the helper
 allowance and the goal's remaining read budget. Direct children and the agent
 spend only from the goal budget. Either limit can be set independently.
 
-At the `clv>` prompt, let `grep` try the 18-byte file first, then resume `hello`.
+At the `clsh>` prompt, let `grep` try the 18-byte file first, then resume `hello`.
 
 ```text
 goal create --children 2 --reply-bytes 36 --allow-helper grep --read-bytes 18 --helper-read-bytes 17
@@ -855,7 +855,7 @@ the reply audit, and all 36 reply bytes are available after it exits.
 
 The goal owner can propose one rename while a goal is ready or running.
 Choose a writable RamFS file and an unused basename in its current directory.
-At a fresh `clv>` prompt, try a path containing `..` and then a valid basename.
+At a fresh `clsh>` prompt, try a path containing `..` and then a valid basename.
 
 ```text
 mkdir /work
@@ -1193,7 +1193,7 @@ running for at least 61 seconds between `goal diff` and `goal commit`.
 
 Two different helper programs can run at the same time. Each program has
 one task slot, so two launches of `grep` run in sequence.
-At a fresh `clv>` prompt, let the shell launch the first `grep` while
+At a fresh `clsh>` prompt, let the shell launch the first `grep` while
 `hello` is suspended. Collect its wait result, reply and completion event
 so the running agent can reuse the `grep` program slot for the second search.
 
@@ -1250,7 +1250,7 @@ original `hello` launch even after its program slot is reused.
 
 ### Revoke a goal's file grant
 
-At the `clv>` prompt, give `hello` a file, then revoke it while `hello` is
+At the `clsh>` prompt, give `hello` a file, then revoke it while `hello` is
 suspended with the descriptor already in its handle table.
 
 ```text
@@ -1291,7 +1291,7 @@ oversized write or a range outside the user stack returns -1 without output.
 The hello program uses this call to print `Hello from user mode`.
 
 Call 4 polls the console. It returns one UART byte in `a0` when input is ready
-and -1 otherwise. At the `clv> ` prompt, type `help` to see the available
+and -1 otherwise. At the `clsh>` prompt, type `help` to see the available
 commands.
 
 `mkdir /notes` creates a directory, and `cd /notes` enters it. Use `pwd` to

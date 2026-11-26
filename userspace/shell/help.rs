@@ -155,7 +155,7 @@ pub(super) fn agents() {
 
 fn section(title: &[u8], entries: &[Entry]) {
     print(b"\r\n");
-    color::print_line(color::CYAN, title);
+    color::print_line(color::GREEN, title);
     for entry in entries {
         entry.print(b"  ");
     }
