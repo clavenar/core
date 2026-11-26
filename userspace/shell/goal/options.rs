@@ -19,6 +19,7 @@ pub(crate) struct GoalOptions<'a> {
     pub allowed_helper: Option<Program>,
     pub allowed_tool: Option<ToolId>,
     pub preserve_file: Option<&'a [u8]>,
+    pub rename_under: Option<&'a [u8]>,
     pub suspended: bool,
     pub with_file: bool,
 }
@@ -56,17 +57,11 @@ impl<'a> GoalOptions<'a> {
                     }
                     rest
                 }
-                GoalFlag::PreserveFile
-                    if matches!(command, GoalCommand::Create)
-                        && options.preserve_file.is_none()
-                        && !rest.starts_with(b"--") =>
-                {
-                    let (path, rest) = split_literal(rest)?;
-                    if path.is_empty() {
-                        return None;
-                    }
-                    options.preserve_file = Some(path);
-                    rest
+                GoalFlag::PreserveFile if matches!(command, GoalCommand::Create) => {
+                    parse_path(rest, &mut options.preserve_file)?
+                }
+                GoalFlag::RenameUnder if matches!(command, GoalCommand::Create) => {
+                    parse_path(rest, &mut options.rename_under)?
                 }
                 GoalFlag::Suspended
                     if matches!(command, GoalCommand::AgentRun) && !options.suspended =>
@@ -99,5 +94,17 @@ fn parse_count<'a>(arguments: &'a [u8], slot: &mut Option<usize>) -> Option<&'a 
         return None;
     }
     *slot = Some(number(digits)?);
+    Some(rest)
+}
+
+fn parse_path<'a>(arguments: &'a [u8], slot: &mut Option<&'a [u8]>) -> Option<&'a [u8]> {
+    if slot.is_some() || arguments.starts_with(b"--") {
+        return None;
+    }
+    let (path, rest) = split_literal(arguments)?;
+    if path.is_empty() {
+        return None;
+    }
+    *slot = Some(path);
     Some(rest)
 }

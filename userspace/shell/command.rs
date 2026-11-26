@@ -70,6 +70,7 @@ keywords!(GoalFlag {
     AllowHelper => "--allow-helper",
     AllowTool => "--allow-tool",
     PreserveFile => "--preserve-file",
+    RenameUnder => "--rename-under",
     Suspended => "--suspended",
     WithFile => "--with-file",
     Delegable => "--delegable",

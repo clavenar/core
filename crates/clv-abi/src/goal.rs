@@ -135,6 +135,13 @@ pub struct ReadLimits {
     pub helpers: Option<usize>,
 }
 
+/// Owner's descriptors to bind at goal creation for rename scope and content preservation.
+#[derive(Clone, Copy, Default)]
+pub struct RenameOptions {
+    pub directory: Option<usize>,
+    pub preserve_file: Option<usize>,
+}
+
 /// Immutable options for goal creation. The helper restriction applies to delegation.
 #[derive(Clone, Copy)]
 pub struct CreateOptions {

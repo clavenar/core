@@ -15,6 +15,7 @@ pub enum RenameDenial {
     InvalidSource = 5,
     GoalInactive = 6,
     InvalidBuffer = 7,
+    OutsideRenameScope = 8,
 }
 
 impl RenameDenial {
@@ -27,6 +28,7 @@ impl RenameDenial {
             5 => Self::InvalidSource,
             6 => Self::GoalInactive,
             7 => Self::InvalidBuffer,
+            8 => Self::OutsideRenameScope,
             _ => return None,
         })
     }

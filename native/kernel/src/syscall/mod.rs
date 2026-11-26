@@ -3,18 +3,19 @@ use clv_abi::agent::{
     RUN_STAGE_RENAME, RUN_SUSPENDED,
 };
 use clv_abi::audit::DelegationDenial;
-use clv_abi::goal::{CreateOptions, FileRecipient, ReadLimits, ReviewToken};
+use clv_abi::goal::{CreateOptions, FileRecipient, ReadLimits, RenameOptions, ReviewToken};
 use clv_abi::tool::ToolId;
 use clv_abi::{
-    ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE,
-    PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, Program, ReplyKind, RequestKind,
-    SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE, SYS_AGENT_DELEGATE_WITH_FILE_ARG,
-    SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
-    SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STAGE_RENAME,
-    SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE,
-    SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
-    SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
-    SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE, SYS_GOAL_CREATE_WITH_OPTIONS,
+    ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, NO_RAMFS_HANDLE, OPEN_READ,
+    OPEN_WRITE_TRUNCATE, PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, Program, ReplyKind,
+    RequestKind, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
+    SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_RESUME, SYS_AGENT_RUN,
+    SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST,
+    SYS_AGENT_STAGE_RENAME, SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND,
+    SYS_CHDIR, SYS_CLOSE, SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT,
+    SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL,
+    SYS_GOAL_CLOSE, SYS_GOAL_COMMIT, SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE,
+    SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_RENAME_SCOPE,
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_DISCARD,
     SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
     SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_PUBLICATION_AUDIT,
@@ -136,28 +137,44 @@ pub(crate) fn dispatch(
                 },
                 ReadLimits::default(),
                 None,
-                None,
+                RenameOptions::default(),
                 fs,
             )
             .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_CREATE_WITH_OPTIONS | SYS_GOAL_CREATE_PRESERVING_FILE => {
-            let preserving = number == SYS_GOAL_CREATE_PRESERVING_FILE;
-            let words = if preserving {
-                read_create_options(stack, a1, a2)
-            } else {
-                Some([
-                    a0,
-                    a1,
-                    a2,
-                    a3,
-                    frame.registers[REG_A4],
-                    frame.registers[REG_A5],
-                ])
+        SYS_GOAL_CREATE_WITH_OPTIONS
+        | SYS_GOAL_CREATE_PRESERVING_FILE
+        | SYS_GOAL_CREATE_WITH_RENAME_SCOPE => {
+            let (words, rename) = match number {
+                SYS_GOAL_CREATE_WITH_RENAME_SCOPE => (
+                    read_create_options(stack, a1, a2),
+                    RenameOptions {
+                        directory: Some(a0),
+                        preserve_file: (a3 != NO_RAMFS_HANDLE).then_some(a3),
+                    },
+                ),
+                SYS_GOAL_CREATE_PRESERVING_FILE => (
+                    read_create_options(stack, a1, a2),
+                    RenameOptions {
+                        directory: None,
+                        preserve_file: Some(a0),
+                    },
+                ),
+                _ => (
+                    Some([
+                        a0,
+                        a1,
+                        a2,
+                        a3,
+                        frame.registers[REG_A4],
+                        frame.registers[REG_A5],
+                    ]),
+                    RenameOptions::default(),
+                ),
             };
             words
                 .and_then(CreateOptions::from_registers_with_allowed_tool)
                 .and_then(|(options, limits, tool)| {
-                    scheduler.create_goal(options, limits, tool, preserving.then_some(a0), fs)
+                    scheduler.create_goal(options, limits, tool, rename, fs)
                 })
                 .unwrap_or(SYSCALL_ERROR)
         }

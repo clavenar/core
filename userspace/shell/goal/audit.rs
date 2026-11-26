@@ -197,6 +197,7 @@ fn print_rename(entry: RenameRecord<'_>) {
         Err(RenameDenial::InvalidSource) => b" denied=invalid-source",
         Err(RenameDenial::GoalInactive) => b" denied=goal-inactive",
         Err(RenameDenial::InvalidBuffer) => b" denied=invalid-buffer",
+        Err(RenameDenial::OutsideRenameScope) => b" denied=outside-rename-scope",
     };
     let mut line = ConsoleLine::new();
     line.write(b"name=");

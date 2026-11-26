@@ -255,23 +255,35 @@ fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
 }
 
 fn create_goal(options: GoalOptions<'_>) -> Option<usize> {
-    let fd = match options.preserve_file {
-        Some(path) => Some(fs::open(path, OPEN_READ)?),
-        None => None,
+    with_optional_handle(options.rename_under, |directory| {
+        with_optional_handle(options.preserve_file, |preserve_file| {
+            goal::create_with_rename_options(
+                goal::CreateOptions {
+                    child_limit: options.children.unwrap_or(1),
+                    reply_limit: options.reply_bytes,
+                    allowed_helper: options.allowed_helper,
+                },
+                options.read_limits,
+                options.allowed_tool,
+                goal::RenameOptions {
+                    directory,
+                    preserve_file,
+                },
+            )
+        })
+    })
+}
+
+fn with_optional_handle(
+    path: Option<&[u8]>,
+    operation: impl FnOnce(Option<usize>) -> Option<usize>,
+) -> Option<usize> {
+    let Some(path) = path else {
+        return operation(None);
     };
-    let result = goal::create_with_preserved_file(
-        goal::CreateOptions {
-            child_limit: options.children.unwrap_or(1),
-            reply_limit: options.reply_bytes,
-            allowed_helper: options.allowed_helper,
-        },
-        options.read_limits,
-        options.allowed_tool,
-        fd,
-    );
-    if let Some(fd) = fd {
-        fs::close(fd);
-    }
+    let fd = fs::open(path, OPEN_READ)?;
+    let result = operation(Some(fd));
+    fs::close(fd);
     result
 }
 

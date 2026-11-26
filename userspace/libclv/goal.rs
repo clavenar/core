@@ -6,20 +6,21 @@ use clv_abi::audit::{
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
     CancelResult, CloseResult, CommitResult, CreateOptions, DiscardResult, FileRecipient, GoalDiff,
-    GoalStatus, PublicationError, ReadLimits, RenameReview, ReviewToken, TimedRenameReview,
-    TimedReviewToken,
+    GoalStatus, PublicationError, ReadLimits, RenameOptions, RenameReview, ReviewToken,
+    TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
-    MESSAGE_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
+    MESSAGE_MAX_BYTES, NO_RAMFS_HANDLE, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
     SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
     SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE, SYS_GOAL_CREATE_WITH_OPTIONS,
-    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_DISCARD,
-    SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
-    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_PUBLICATION_AUDIT,
-    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_RENAME_AUDIT,
-    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE,
-    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
+    SYS_GOAL_CREATE_WITH_RENAME_SCOPE, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF,
+    SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
+    SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
+    SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT,
+    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE,
+    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
+    SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -78,7 +79,7 @@ pub fn create_with_allowed_tool(
             .reply_limit
             .map_or_else(create, create_with_reply_budget);
     }
-    create_with_preserved_file(options, limits, allowed_tool, None)
+    create_with_rename_options(options, limits, allowed_tool, RenameOptions::default())
 }
 
 /// A preserved descriptor binds the goal's rename to that file and its current bytes.
@@ -88,26 +89,56 @@ pub fn create_with_preserved_file(
     allowed_tool: Option<ToolId>,
     preserve_file: Option<usize>,
 ) -> Option<usize> {
+    create_with_rename_options(
+        options,
+        limits,
+        allowed_tool,
+        RenameOptions {
+            directory: None,
+            preserve_file,
+        },
+    )
+}
+
+/// Binds the owner's rename directory and preserved input together at goal creation.
+pub fn create_with_rename_options(
+    options: CreateOptions,
+    limits: ReadLimits,
+    allowed_tool: Option<ToolId>,
+    rename: RenameOptions,
+) -> Option<usize> {
     let words = options.registers_with_allowed_tool(limits, allowed_tool)?;
-    if let Some(fd) = preserve_file {
-        let encoded = words.map(usize::to_le_bytes);
-        let bytes = encoded.as_flattened();
-        return syscall_result(syscall(
-            SYS_GOAL_CREATE_PRESERVING_FILE,
-            fd,
-            bytes.as_ptr().expose_provenance(),
-            bytes.len(),
-        ));
-    }
-    let [children, flags, replies, helper, reads, helper_reads] = words;
-    let (handle, ..) = ecall6(
-        SYS_GOAL_CREATE_WITH_OPTIONS,
-        children,
-        flags,
-        replies,
-        helper,
-        reads,
-        helper_reads,
+    let (call, descriptor, preserve_fd) = match (rename.directory, rename.preserve_file) {
+        (Some(_), Some(NO_RAMFS_HANDLE)) => return None,
+        (Some(dir), file) => (
+            SYS_GOAL_CREATE_WITH_RENAME_SCOPE,
+            dir,
+            file.unwrap_or(NO_RAMFS_HANDLE),
+        ),
+        (None, Some(file)) => (SYS_GOAL_CREATE_PRESERVING_FILE, file, 0),
+        (None, None) => {
+            let [children, flags, replies, helper, reads, helper_reads] = words;
+            let (handle, ..) = ecall6(
+                SYS_GOAL_CREATE_WITH_OPTIONS,
+                children,
+                flags,
+                replies,
+                helper,
+                reads,
+                helper_reads,
+            );
+            return syscall_result(handle);
+        }
+    };
+    let encoded = words.map(usize::to_le_bytes);
+    let bytes = encoded.as_flattened();
+    let (handle, ..) = ecall(
+        call,
+        descriptor,
+        bytes.as_ptr().expose_provenance(),
+        bytes.len(),
+        preserve_fd,
+        0,
     );
     syscall_result(handle)
 }

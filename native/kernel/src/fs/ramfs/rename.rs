@@ -1,25 +1,67 @@
 use clv_abi::audit::{
     EncodedPublicationRecord, PublicationOutcome, PublicationRecord, RenameDenial,
 };
-use clv_abi::goal::{PublicationError, RENAME_DIFF_MAX_BYTES};
+use clv_abi::goal::{PublicationError, RENAME_DIFF_MAX_BYTES, RenameOptions};
 
 use super::{
-    CWD_PATH_CAPACITY, DirectoryId, NAME_LIMIT, Name, Node, RamFs, Revision,
+    CWD_PATH_CAPACITY, DirectoryId, NAME_LIMIT, Name, Node, RamFs, Revision, TaskFs,
     WRITABLE_FILE_CAPACITY, WritableFile,
 };
 
 const DIFF_CAPACITY: usize = CWD_PATH_CAPACITY + 1 + 2 * NAME_LIMIT;
 const _: () = assert!(DIFF_CAPACITY <= RENAME_DIFF_MAX_BYTES);
 
+pub(crate) struct RenamePolicy {
+    // RamFS refuses rmdir on this directory for the lifetime of the owning goal.
+    pub(super) directory: DirectoryId,
+    preserved_file: Option<PreservedFile>,
+}
+
+impl RenamePolicy {
+    pub(crate) fn capture(caller: &TaskFs, fs: &mut RamFs, options: RenameOptions) -> Option<Self> {
+        let directory = match options.directory {
+            None => DirectoryId::Root,
+            Some(fd) => {
+                let Node::Directory(directory) = caller.node_for_handle(fd)? else {
+                    return None;
+                };
+                directory
+            }
+        };
+        let preserved_file = match options.preserve_file {
+            Some(fd) => Some(PreservedFile::capture(fs, caller.node_for_handle(fd)?)?),
+            None => None,
+        };
+        Some(Self {
+            directory,
+            preserved_file,
+        })
+    }
+
+    fn contains_directory(&self, fs: &RamFs, parent: DirectoryId) -> bool {
+        core::iter::successors(Some(parent), |dir| match *dir {
+            DirectoryId::Child(index) => Some(fs.directories[index].as_ref()?.parent),
+            DirectoryId::Root => None,
+        })
+        .any(|dir| dir == self.directory)
+    }
+
+    pub(crate) fn release_input(&mut self, fs: &mut RamFs) {
+        if let Some(input) = self.preserved_file.take() {
+            fs.release(Node::WritableFile(input.file_index));
+        }
+    }
+}
+
 /// The input object and its exact contents at goal creation.
-pub(crate) struct PreservedFile {
+struct PreservedFile {
     file_index: usize,
     contents: [u8; WRITABLE_FILE_CAPACITY],
     length: usize,
 }
 
 impl PreservedFile {
-    pub(super) fn capture(fs: &mut RamFs, node: Node) -> Option<Self> {
+    fn capture(fs: &mut RamFs, node: Node) -> Option<Self> {
         let (file_index, file) = fs.linked_file(node)?;
         let snapshot = Self {
             file_index,
@@ -33,10 +75,6 @@ impl PreservedFile {
     fn matches(&self, file_index: usize, file: &WritableFile) -> bool {
         self.file_index == file_index
             && self.contents[..self.length] == file.contents[..file.length]
-    }
-
-    pub(crate) fn release(self, fs: &mut RamFs) {
-        fs.release(Node::WritableFile(self.file_index));
     }
 }
 
@@ -81,7 +119,7 @@ impl StagedRename {
     fn checked_target(
         &self,
         fs: &RamFs,
-        preserved_file: Option<&PreservedFile>,
+        policy: &RenamePolicy,
     ) -> Result<(Name, Revision), PublicationError> {
         let (names, split) = self.diff();
         let (path, new_name) = names.split_at(split);
@@ -98,7 +136,12 @@ impl StagedRename {
         let file = fs.writable[self.file_index]
             .as_ref()
             .ok_or(PublicationError::Unavailable)?;
-        if preserved_file.is_some_and(|input| !input.matches(self.file_index, file)) {
+        if !policy.contains_directory(fs, file.parent)
+            || policy
+                .preserved_file
+                .as_ref()
+                .is_some_and(|input| !input.matches(self.file_index, file))
+        {
             return Err(PublicationError::PostconditionFailed);
         }
         let name = Name::new(new_name).ok_or(PublicationError::Unavailable)?;
@@ -106,20 +149,16 @@ impl StagedRename {
         Ok((name, revision))
     }
 
-    pub(crate) fn check(
-        &self,
-        fs: &RamFs,
-        preserved_file: Option<&PreservedFile>,
-    ) -> Result<(), PublicationError> {
-        self.checked_target(fs, preserved_file).map(|_| ())
+    pub(crate) fn check(&self, fs: &RamFs, policy: &RenamePolicy) -> Result<(), PublicationError> {
+        self.checked_target(fs, policy).map(|_| ())
     }
 
     pub(crate) fn publish(
         &self,
         fs: &mut RamFs,
-        preserved_file: Option<&PreservedFile>,
+        policy: &RenamePolicy,
     ) -> Result<(), PublicationError> {
-        let (name, revision) = self.checked_target(fs, preserved_file)?;
+        let (name, revision) = self.checked_target(fs, policy)?;
         let file = fs.writable[self.file_index]
             .as_mut()
             .ok_or(PublicationError::Unavailable)?;
@@ -134,10 +173,14 @@ impl RamFs {
         &mut self,
         source: Node,
         new_name: &[u8],
+        policy: &RenamePolicy,
     ) -> Result<StagedRename, RenameDenial> {
         let (index, file) = self
             .linked_file(source)
             .ok_or(RenameDenial::InvalidSource)?;
+        if !policy.contains_directory(self, file.parent) {
+            return Err(RenameDenial::OutsideRenameScope);
+        }
         if !Name::valid(new_name) {
             return Err(RenameDenial::InvalidBasename);
         }

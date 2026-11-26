@@ -1015,6 +1015,46 @@ also fails the postcondition. The option can be combined with the existing
 goal budgets and helper restrictions. A child needs a separate file grant
 to read the input.
 
+### Limit renames to a directory
+
+Use `goal create --rename-under <dir>` to limit a goal's renames to files
+in that directory and its descendants. RamFS checks the file's actual parent
+at staging, review and commit. The directory stays pinned until the goal closes
+or its owner exits. An agent still needs a rename grant for the individual file.
+Combine the option with `--preserve-file <path>` to require its original bytes.
+
+At a fresh `clsh>` prompt, try a path that starts in the permitted directory
+and resolves to a file in its sibling.
+
+```text
+mkdir /work
+mkdir /private
+write /work/draft.txt keep
+write /private/draft.txt private
+goal create --rename-under /work
+goal stage-rename /work/../private/draft.txt final.txt
+goal audit --renames
+goal diff
+```
+
+The audit shows `denied=outside-rename-scope caller=shell`, and the diff
+reports `no staged changes`. In the same goal, authorize the agent to rename
+the file in `/work`.
+
+```text
+goal grant-file --stage-rename /work/draft.txt
+agent run hello --stage-rename final.txt
+wait hello
+goal diff
+goal commit
+cat /work/final.txt
+cat /private/draft.txt
+goal close
+```
+
+The diff shows `rename /work/draft.txt -> final.txt`. Commit reports
+`rename committed`, and the two reads print `keep` and `private`.
+
 ### Let the goal's agent propose a rename
 
 At a fresh QEMU prompt, give `hello` permission to stage a rename of one
@@ -1348,9 +1388,9 @@ Recreating the path while an old handle is open uses a separate slot.
 Task exit and user faults close the task's handles.
 
 `rmdir` frees a directory slot as soon as it removes the name. Remove all
-linked files and subdirectories first. Any live task's working directory or
-open directory handle keeps that directory in use. Attempts to remove `/` or
-a path ending in `.` or `..` return -1.
+linked files and subdirectories first. A live task's working directory, an
+open directory handle or an open goal's rename scope keeps that directory
+in use. Attempts to remove `/` or a path ending in `.` or `..` return -1.
 
 Call 1 takes an exit status in `a0` and removes the calling task from the
 schedule. A task that exits successfully reports
@@ -1561,6 +1601,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 74 `goal_discard` | `a0` goal handle | 0 when a pending rename was discarded, 1 when the diff was already empty, or -1 for an invalid caller or goal |
 | 75 `goal_review_with_deadline` | Same arguments as call 68 | Same diff, lengths and token. With a nonzero token, `a3` holds the absolute guest deadline in nanoseconds. With a zero token, `a3` holds the call 68 review status. |
 | 76 `goal_publication_audit` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` zero-based row index (oldest first) | Retained decision count (0–4) in `a0` and overwritten count in `a1`, or -1 on failure |
+| 77 `goal_create_with_rename_scope` | `a0` owner's directory handle, `a1` stack address of the six call 48 words, `a2` length in bytes (48), `a3` preserved-file handle or `NO_RAMFS_HANDLE` | Fresh goal handle, or -1 on rejection |
 
 Calls 66 and 67 are restricted to the goal owner. Call 66 requires a linked
 writable RamFS file and an empty staging slot. It rejects an occupied name,
@@ -1574,8 +1615,9 @@ destination range fails before copying any bytes.
 Calls 68 and 75 copy the frozen diff to the owning shell. Once the goal has
 completed successfully and the full diff has been delivered, RamFS checks
 the original revision, source identity at its original name, and vacant
-destination. For a goal created with call 70, RamFS also compares the source's
-identity, length and contents with the saved input. A conflict takes precedence
+destination. RamFS checks the source's parent against the goal's rename scope.
+When the goal preserves an input file, RamFS also compares the source's
+identity, length and contents with that input. A conflict takes precedence
 over a failed postcondition.
 
 Call 68 returns the following status codes. Call 75 uses the same codes for a
@@ -1586,7 +1628,7 @@ preview or blocked review and returns the deadline for a passing review.
 | 0 | Preview for an empty diff or a ready, running, failed or cancelled goal. | 0 |
 | 1 | Ready to commit. The checks passed. | Nonzero, single-use |
 | 2 | Conflict. The base revision, original source or destination has changed. | 0 |
-| 3 | Postcondition failed. The staged file differs from the preserved input. | 0 |
+| 3 | Postcondition failed. The source falls outside the rename scope or differs from the preserved input. | 0 |
 | 4 | Review unavailable. The kernel cannot prepare publication, represent the deadline or allocate a token. | 0 |
 
 The first passing review starts a 60-second lifetime on the kernel's monotonic
@@ -1614,6 +1656,13 @@ the file and snapshots all its bytes (0–256), independently of the descriptor
 cursor. A rejected creation consumes no goal handle or pin. The owner can
 close the descriptor immediately. Successful publication, cancellation,
 successful close or owner exit releases the retained input.
+
+Call 77 uses the same 48-byte option block as call 70. It binds the directory
+behind the owner's descriptor and accepts an optional preserved input with the
+same rules as call 70. `NO_RAMFS_HANDLE` is the all-ones RV64 value. Handle
+zero is valid. The owner can close both descriptors after creation. Calls 66
+and 72 check scope membership by walking the source's directory ancestors
+before looking up the destination. File grants continue to govern read access.
 
 Call 71 requires a linked writable RamFS file and an empty file-grant slot.
 The direct agent receives read access and permission to stage a rename.
@@ -1828,6 +1877,7 @@ bytes and displays `<unavailable>` when the field could not be copied.
 | 5 | `invalid-source` — the owner's descriptor is invalid or the source is unavailable as a linked writable file |
 | 6 | `goal-inactive` — the goal has completed, failed or been cancelled |
 | 7 | `invalid-buffer` — the nonempty name does not fit inside the caller's user stack |
+| 8 | `outside-rename-scope` — the file's parent falls outside the goal's directory tree |
 
 Each row reports the first failed check. The kernel copies the bounded
 input, checks the goal state and staging slot, then resolves the file

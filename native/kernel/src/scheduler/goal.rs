@@ -16,12 +16,12 @@ use clv_abi::audit::{
 };
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
-    CancelResult, CloseResult, CreateOptions, GoalStatus, MAX_CHILDREN, ReadLimits,
+    CancelResult, CloseResult, CreateOptions, GoalStatus, MAX_CHILDREN, ReadLimits, RenameOptions,
 };
 use clv_abi::tool::ToolId;
 
 use super::{AgentBinding, SHELL_TASK_INDEX, Scheduler, TaskState};
-use crate::fs::ramfs::{FileGrant, FileGrantMode, GrantArgument, PreservedFile, RamFs, TaskFs};
+use crate::fs::ramfs::{FileGrant, FileGrantMode, GrantArgument, RamFs, RenamePolicy, TaskFs};
 
 pub(crate) enum DelegationTarget {
     Program { selector: usize, with_file: bool },
@@ -78,7 +78,7 @@ pub(super) struct Goal {
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
     file: Option<FileGrant>,
-    preserved_file: Option<PreservedFile>,
+    pub(super) rename_policy: RenamePolicy,
     rename: Option<PendingRename>,
     delegation_audit: AuditHistory<EncodedRecordWithTool>,
     reply_audit: AuditHistory<EncodedReplyRecord>,
@@ -232,7 +232,7 @@ impl Scheduler {
         options: CreateOptions,
         read_limits: ReadLimits,
         allowed_tool: Option<ToolId>,
-        preserve_fd: Option<usize>,
+        rename: RenameOptions,
         fs: &mut RamFs,
     ) -> Option<usize> {
         if self.current != SHELL_TASK_INDEX
@@ -246,10 +246,7 @@ impl Scheduler {
         }
         let handle = self.next_handle;
         let next_handle = handle.checked_add(1)?;
-        let preserved_file = match preserve_fd {
-            Some(fd) => Some(self.tasks[self.current].fs.preserve_file(fs, fd)?),
-            None => None,
-        };
+        let rename_policy = RenamePolicy::capture(&self.tasks[self.current].fs, fs, rename)?;
         self.next_handle = next_handle;
         self.goal = Some(Goal {
             handle,
@@ -259,7 +256,7 @@ impl Scheduler {
             members: [const { None }; MAX_CHILDREN],
             cancelled_before_launch: false,
             file: None,
-            preserved_file,
+            rename_policy,
             rename: None,
             delegation_audit: AuditHistory::default(),
             reply_audit: AuditHistory::default(),

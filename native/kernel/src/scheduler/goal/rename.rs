@@ -7,7 +7,7 @@ use clv_abi::{LaunchParent, PATH_MAX_BYTES};
 
 use super::{Goal, Scheduler};
 use crate::arch::monotonic_nanos;
-use crate::fs::ramfs::{PreservedFile, RamFs, StagedRename, TaskFs};
+use crate::fs::ramfs::{RamFs, RenamePolicy, StagedRename, TaskFs};
 
 const REVIEW_LIFETIME_NS: u64 = 60 * 1_000_000_000;
 
@@ -26,10 +26,10 @@ impl PendingRename {
     fn review(
         &mut self,
         fs: &RamFs,
-        preserved_file: Option<&PreservedFile>,
+        policy: &RenamePolicy,
         next_handle: &mut usize,
     ) -> Result<TimedReviewToken, PublicationError> {
-        if let Err(reason) = self.change.check(fs, preserved_file) {
+        if let Err(reason) = self.change.check(fs, policy) {
             self.review_token = None;
             return Err(reason);
         }
@@ -71,7 +71,13 @@ impl Goal {
             return Err(RenameDenial::AlreadyStaged);
         }
         let from_file_grant = matches!(caller, LaunchParent::Agent(_));
-        let change = task_fs.stage_rename(fs, fd, name, from_file_grant.then_some(self.handle))?;
+        let change = task_fs.stage_rename(
+            fs,
+            fd,
+            name,
+            from_file_grant.then_some(self.handle),
+            &self.rename_policy,
+        )?;
         self.rename = Some(PendingRename {
             change,
             review_token: None,
@@ -100,9 +106,7 @@ impl Goal {
 
     pub(super) fn release_transaction(&mut self, fs: &mut RamFs) {
         self.discard_rename(fs);
-        if let Some(input) = self.preserved_file.take() {
-            input.release(fs);
-        }
+        self.rename_policy.release_input(fs);
     }
 }
 
@@ -178,7 +182,7 @@ impl Scheduler {
             return None;
         }
         let result = if can_review {
-            match pending.review(fs, goal.preserved_file.as_ref(), &mut self.next_handle) {
+            match pending.review(fs, &goal.rename_policy, &mut self.next_handle) {
                 Ok(review) => TimedRenameReview::Ready(review),
                 Err(reason) => TimedRenameReview::Blocked(reason),
             }
@@ -220,7 +224,7 @@ impl Scheduler {
             .review_token
             .take_if(|review| review.token == token)?;
         let result = if review_is_live(review, monotonic_nanos()) {
-            match pending.change.publish(fs, goal.preserved_file.as_ref()) {
+            match pending.change.publish(fs, &goal.rename_policy) {
                 Ok(()) => Some(CommitResult::Committed),
                 Err(PublicationError::Conflict) => Some(CommitResult::Conflict),
                 Err(PublicationError::PostconditionFailed) => {

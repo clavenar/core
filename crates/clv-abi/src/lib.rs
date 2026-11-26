@@ -87,9 +87,11 @@ pub const SYS_GOAL_RENAME_AUDIT: usize = 73;
 pub const SYS_GOAL_DISCARD: usize = 74;
 pub const SYS_GOAL_REVIEW_WITH_DEADLINE: usize = 75;
 pub const SYS_GOAL_PUBLICATION_AUDIT: usize = 76;
+pub const SYS_GOAL_CREATE_WITH_RENAME_SCOPE: usize = 77;
 
 /// No RamFS handle has this value. Handle 0 is valid.
-pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
+pub const NO_RAMFS_HANDLE: usize = usize::MAX;
+pub const NO_DIRECTORY_GRANT: usize = NO_RAMFS_HANDLE;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]

@@ -2,7 +2,7 @@ use clv_abi::audit::{DelegationDenial, RenameDenial};
 use clv_abi::goal::FileRecipient;
 use clv_abi::{GrantKind, MESSAGE_MAX_BYTES, Program};
 
-use super::{CWD_PATH_CAPACITY, DirectoryId, Node, PathBase, PreservedFile, RamFs, StagedRename};
+use super::{CWD_PATH_CAPACITY, DirectoryId, Node, PathBase, RamFs, RenamePolicy, StagedRename};
 
 const HANDLE_COUNT: usize = 4;
 
@@ -195,16 +195,13 @@ impl TaskFs {
         (node.grant_kind() == kind).then_some(node)
     }
 
-    pub(crate) fn preserve_file(&self, fs: &mut RamFs, fd: usize) -> Option<PreservedFile> {
-        PreservedFile::capture(fs, self.node_for_handle(fd)?)
-    }
-
     pub(crate) fn stage_rename(
         &self,
         fs: &mut RamFs,
         fd: usize,
         new_name: &[u8],
         granting_goal: Option<usize>,
+        policy: &RenamePolicy,
     ) -> Result<StagedRename, RenameDenial> {
         let handle = self.slots.iter().flatten().find(|handle| handle.id == fd);
         let source = if let Some(goal) = granting_goal {
@@ -218,7 +215,7 @@ impl TaskFs {
         } else {
             handle.ok_or(RenameDenial::InvalidSource)?
         };
-        fs.stage_rename(source.node, new_name)
+        fs.stage_rename(source.node, new_name, policy)
     }
 
     fn from_grant(fs: &mut RamFs, node: Node, access: Access) -> Option<Self> {
@@ -250,7 +247,7 @@ impl TaskFs {
         self.open_path(fs, PathBase::Confined(directory), path, false)
     }
 
-    fn node_for_handle(&self, fd: usize) -> Option<Node> {
+    pub(super) fn node_for_handle(&self, fd: usize) -> Option<Node> {
         let slot = self.handle_slot(fd)?;
         Some(self.slots[slot].as_ref()?.node)
     }
@@ -289,9 +286,11 @@ impl TaskFs {
         fs: &mut RamFs,
         path: &[u8],
         mut live_task_fs: impl Iterator<Item = &'a TaskFs>,
+        rename_policy: Option<&RenamePolicy>,
     ) -> Option<usize> {
         fs.rmdir(self.cwd?, path, |directory| {
-            live_task_fs.any(|task_fs| task_fs.uses_directory(directory))
+            rename_policy.is_some_and(|policy| policy.directory == directory)
+                || live_task_fs.any(|task_fs| task_fs.uses_directory(directory))
         })
     }
 
