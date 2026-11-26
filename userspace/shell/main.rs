@@ -78,7 +78,7 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<g
               ask [--read] <program> <text>  askat [--echo] hello <dir> <payload>\r\n\
               askfile [--stream] hello <path>\r\n\
               grep -F <pattern> <path>  recv <program>  wait <program>  event\r\n\
-              goal create [--children 1|2] [--reply-bytes N]\r\n\
+              goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>]\r\n\
               goal run [--reply-bytes N] <program>\r\n\
               goal grant-file [--delegable | --delegate-to <program>] <path>\r\n\
               goal status  goal budget  goal audit [--replies]  goal cancel  goal close\r\n\

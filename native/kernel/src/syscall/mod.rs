@@ -1,6 +1,6 @@
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::{DelegationDenial, DelegationRequest};
-use clv_abi::goal::FileRecipient;
+use clv_abi::goal::{CreateOptions, FileRecipient};
 use clv_abi::{
     ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE,
     PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, Program, ReplyKind, RequestKind,
@@ -115,13 +115,14 @@ pub(crate) fn dispatch(
             .spawn(fs, a0, LaunchScope::FileWithPipe(a1), None)
             .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_CREATE | SYS_GOAL_CREATE_WITH_REPLY_BUDGET => scheduler
-            .create_goal(
-                1,
-                (number == SYS_GOAL_CREATE_WITH_REPLY_BUDGET).then_some(a0),
-            )
+            .create_goal(CreateOptions {
+                child_limit: 1,
+                reply_limit: (number == SYS_GOAL_CREATE_WITH_REPLY_BUDGET).then_some(a0),
+                allowed_helper: None,
+            })
             .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_CREATE_WITH_OPTIONS if a1 <= 1 => scheduler
-            .create_goal(a0, (a1 == 1).then_some(a2))
+        SYS_GOAL_CREATE_WITH_OPTIONS => CreateOptions::from_registers(a0, a1, a2, a3)
+            .and_then(|options| scheduler.create_goal(options))
             .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_RUN | SYS_GOAL_RUN_WITH_REPLY_BUDGET => {
             let scope = LaunchScope::Goal {

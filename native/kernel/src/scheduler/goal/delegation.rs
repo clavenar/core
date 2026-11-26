@@ -1,3 +1,4 @@
+use clv_abi::Program;
 use clv_abi::audit::{DelegationDenial, DelegationRecord, DelegationRequest};
 
 use super::{Goal, MemberRole};
@@ -12,12 +13,13 @@ impl Scheduler {
         request: DelegationRequest,
         argument: Result<Option<Message>, DelegationDenial>,
     ) -> Option<usize> {
-        let (_, agent) = self.agent_member(request.agent)?;
+        let (goal, agent) = self.agent_member(request.agent)?;
         let parent = agent.handle;
         let launch = if agent.completion.is_some() {
             Err(DelegationDenial::AgentFinished)
         } else {
-            self.prepare_launch(request.program, None)
+            goal.helper_program(request.program)
+                .and_then(|program| self.prepare_launch(program, None))
         };
         let goal = self.goal.as_mut()?;
         let admission = launch.and_then(|launch| {
@@ -37,6 +39,18 @@ impl Scheduler {
 }
 
 impl Goal {
+    fn helper_program(&self, selector: usize) -> Result<Program, DelegationDenial> {
+        let program = Program::from_raw(selector).ok_or(DelegationDenial::UnknownProgram)?;
+        if self
+            .options
+            .allowed_helper
+            .is_some_and(|allowed| allowed != program)
+        {
+            return Err(DelegationDenial::HelperNotAllowed);
+        }
+        Ok(program)
+    }
+
     fn admit_helper(
         &mut self,
         fs: &mut RamFs,

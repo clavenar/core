@@ -510,6 +510,41 @@ matching lines exceed 64 bytes in total, the shell prints
 An empty match result prints nothing. `wait grep` can also collect the exit
 status after a direct search.
 
+### Restrict delegated helper launches
+
+Use `goal create --allow-helper <program>` to choose the only program an
+agent may launch as a helper for that goal. The choice is fixed at creation
+and applies whether or not the helper requests a file. The goal owner can
+still launch any eligible program directly with `goal run` or `agent run`.
+A delegated file must also permit the chosen recipient.
+
+At the QEMU prompt, give a suspended `echo` agent 18 reply bytes and allow
+`grep` as its helper.
+
+```text
+goal create --children 2 --reply-bytes 18 --allow-helper grep
+goal grant-file --delegable /hello.txt
+agent run --suspended --reply-bytes 18 echo
+agent delegate --reply-bytes 18 hello
+goal budget
+agent delegate --with-file --reply-bytes 18 grep -F RamFS
+wait grep
+recv grep
+goal audit
+goal audit --replies
+goal budget
+goal cancel
+goal close
+```
+
+The `hello` request prints `cannot delegate child`. The first budget check
+shows `available=0 reserved=18 spent=0`. The second request uses the open
+helper slot, and `recv grep` prints `Hello from RamFS`. With its CRLF the
+reply is exactly 18 bytes. The delegation audit shows
+`program=hello bytes=18 file=no denied=helper-not-allowed` followed by
+an accepted `grep` launch. The reply audit shows `bytes=18 remaining_before=18 sent`,
+and the final balance is `available=0 reserved=0 spent=18`.
+
 ### Native syscall ABI
 
 The user program passes the call number in `a7` and executes `ecall`. Call 0
@@ -764,7 +799,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 45 `goal_run_with_reply_budget` | `a0` goal handle, `a1` program selector, `a2` requested reply bytes | Fresh ordinary child launch handle |
 | 46 `agent_run_with_reply_budget` | Same as call 45, plus `a3` start mode (0 runnable, 1 suspended) | Fresh agent handle, with the child launch handle in `a1` |
 | 47 `goal_grant_file` | `a0` goal handle, `a1` open RamFS file handle owned by the shell | 0 when attached, -1 on rejection |
-| 48 `goal_create_with_options` | `a0` child limit (1 or 2), `a1` budget mode (0 unlimited, 1 finite), `a2` total reply bytes in finite mode | Fresh goal handle, or -1 on rejection |
+| 48 `goal_create_with_options` | `a0` child limit (1 or 2), `a1` option flags, `a2` total reply bytes if bit 0 is set, `a3` allowed helper selector if bit 1 is set | Fresh goal handle, or -1 on rejection |
 | 49 `agent_delegate` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle, or -1 on rejection |
 | 50 `goal_grant_delegable_file` | `a0` goal handle, `a1` shell file handle | 0 when attached with permission for the goal's agent to delegate read access, or -1 on rejection |
 | 51 `agent_delegate_with_file` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle with read access to the agent's file, or -1 on rejection |
@@ -776,7 +811,10 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 
 Only the shell can use these calls. A stale or invalid handle or a call
 from another task returns -1 in `a0`. Calls 33 and 43 create single-child
-goals. Call 48 also supports two children and ignores `a2` in unlimited mode.
+goals with unrestricted helper selection. Call 48 also supports two children.
+It ignores `a2` for an unlimited budget and `a3` for unrestricted helper
+selection. Unknown flag bits or an unknown selected helper return -1 before
+the kernel allocates a goal handle.
 The run calls accept a ready goal or a running goal with a place left. They
 return -1 for an unknown selector or start mode, a busy program slot, a full
 goal, a second agent, insufficient available bytes, or exhausted handles.
@@ -802,7 +840,9 @@ agent's handle to one helper program for delegation. Ordinary direct children
 receive read access. Closing the agent's handle ends its ability
 to pass that file on, even while the goal still holds a reference.
 
-Calls 49, 51 and 56 transfer a byte count from zero up to the agent's remaining
+Calls 49, 51 and 56 check the live agent's requested program against the
+goal's allowed helper before checking the program slot or reserving resources.
+On admission they transfer a byte count from zero up to the agent's remaining
 allowance before the helper's first instruction. Both shares count toward
 the goal's reserved total. Call 49 starts the helper with zero in `a1`, `a2`
 and `a3`. Calls 51 and 56 check the selected helper against the recipient on the
@@ -836,6 +876,7 @@ On denial, the code identifies the first failed check and the handle is zero.
 | 8 | RamFS file handles exhausted |
 | 9 | The agent's file grant does not permit the selected helper program |
 | 10 | Invalid argument length or caller buffer |
+| 11 | The goal does not allow this program as a delegated helper |
 
 Call 53 returns the decisions recorded when a goal member's `message_send`
 or `reply_send` reaches the budget check. The kernel validates the mailbox,

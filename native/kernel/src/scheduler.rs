@@ -231,10 +231,9 @@ impl Scheduler {
 
     fn prepare_launch(
         &self,
-        program: usize,
+        program: Program,
         agent: Option<usize>,
     ) -> Result<PreparedLaunch, DelegationDenial> {
-        let program = Program::from_raw(program).ok_or(DelegationDenial::UnknownProgram)?;
         if self.tasks[task_index(program)].state != TaskState::Stopped {
             return Err(DelegationDenial::ProgramBusy);
         }
@@ -267,7 +266,9 @@ impl Scheduler {
         if self.current != SHELL_TASK_INDEX {
             return None;
         }
-        let launch = self.prepare_launch(program, agent).ok()?;
+        let launch = self
+            .prepare_launch(Program::from_raw(program)?, agent)
+            .ok()?;
         let task_fs = match scope {
             LaunchScope::Plain => TaskFs::empty(),
             LaunchScope::Goal {

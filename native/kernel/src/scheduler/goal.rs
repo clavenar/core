@@ -8,7 +8,9 @@ use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult};
 use clv_abi::audit::{EncodedRecord, EncodedReplyRecord, ReplyRecord};
 use clv_abi::budget::ReplyBudget;
-use clv_abi::goal::{CancelResult, CloseResult, FileRecipient, GoalStatus, MAX_CHILDREN};
+use clv_abi::goal::{
+    CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus, MAX_CHILDREN,
+};
 
 use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
 use crate::fs::ramfs::{FileGrant, RamFs, TaskFs};
@@ -47,8 +49,7 @@ impl Member {
 
 pub(super) struct Goal {
     handle: usize,
-    child_limit: usize,
-    reply_limit: Option<usize>,
+    options: CreateOptions,
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
     file: Option<FileGrant>,
@@ -78,7 +79,7 @@ impl Goal {
 
     fn budget(&self) -> ReplyBudget {
         budget::balance(
-            self.reply_limit,
+            self.options.reply_limit,
             self.members().map(|member| &member.replies),
         )
     }
@@ -118,7 +119,7 @@ impl Goal {
     }
 
     fn free_slot(&self) -> Option<usize> {
-        self.members[..self.child_limit]
+        self.members[..self.options.child_limit]
             .iter()
             .position(Option::is_none)
     }
@@ -137,7 +138,7 @@ impl Goal {
             replies,
             completion: None,
         });
-        if slot + 1 == self.child_limit {
+        if slot + 1 == self.options.child_limit {
             self.release_file(fs);
         }
     }
@@ -195,14 +196,10 @@ impl Goal {
 }
 
 impl Scheduler {
-    pub(crate) fn create_goal(
-        &mut self,
-        child_limit: usize,
-        reply_limit: Option<usize>,
-    ) -> Option<usize> {
+    pub(crate) fn create_goal(&mut self, options: CreateOptions) -> Option<usize> {
         if self.current != SHELL_TASK_INDEX
             || self.goal.is_some()
-            || !(1..=MAX_CHILDREN).contains(&child_limit)
+            || !(1..=MAX_CHILDREN).contains(&options.child_limit)
         {
             return None;
         }
@@ -210,8 +207,7 @@ impl Scheduler {
         self.next_handle = handle.checked_add(1)?;
         self.goal = Some(Goal {
             handle,
-            child_limit,
-            reply_limit,
+            options,
             members: [const { None }; MAX_CHILDREN],
             cancelled_before_launch: false,
             file: None,

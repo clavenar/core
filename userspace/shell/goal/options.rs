@@ -1,4 +1,5 @@
 use crate::split_word;
+use clv_abi::Program;
 use clv_abi::goal::MAX_CHILDREN;
 
 pub(crate) enum GoalCommand {
@@ -12,6 +13,7 @@ pub(crate) enum GoalCommand {
 pub(crate) struct GoalOptions {
     pub children: Option<usize>,
     pub reply_bytes: Option<usize>,
+    pub allowed_helper: Option<Program>,
     pub suspended: bool,
     pub with_file: bool,
 }
@@ -34,6 +36,14 @@ impl GoalOptions {
                         return None;
                     }
                     options.children = Some(children);
+                    arguments = rest;
+                }
+                (b"--allow-helper", rest)
+                    if matches!(command, GoalCommand::Create)
+                        && options.allowed_helper.is_none() =>
+                {
+                    let (name, rest) = split_word(rest);
+                    options.allowed_helper = Some(Program::named(name)?);
                     arguments = rest;
                 }
                 (b"--suspended", rest)

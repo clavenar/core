@@ -1,6 +1,6 @@
 use clv_abi::audit::{AUDIT_CAPACITY, DelegationRecord, ReplyRecord};
 pub use clv_abi::budget::ReplyBudget;
-pub use clv_abi::goal::{CancelResult, CloseResult, FileRecipient, GoalStatus};
+pub use clv_abi::goal::{CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus};
 use clv_abi::{
     SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
     SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
@@ -20,15 +20,36 @@ pub fn create_with_reply_budget(bytes: usize) -> Option<usize> {
 
 /// Creates a goal with room for the given number of launches and a shared reply budget.
 pub fn create_with_options(children: usize, reply_bytes: Option<usize>) -> Option<usize> {
-    match (children, reply_bytes) {
-        (1, None) => create(),
-        (1, Some(bytes)) => create_with_reply_budget(bytes),
-        _ => syscall_result(syscall(
-            SYS_GOAL_CREATE_WITH_OPTIONS,
-            children,
-            usize::from(reply_bytes.is_some()),
-            reply_bytes.unwrap_or(0),
-        )),
+    create_configured(CreateOptions {
+        child_limit: children,
+        reply_limit: reply_bytes,
+        allowed_helper: None,
+    })
+}
+
+/// Creates a goal with its child limit, reply budget and optional helper restriction.
+pub fn create_configured(options: CreateOptions) -> Option<usize> {
+    match (
+        options.child_limit,
+        options.reply_limit,
+        options.allowed_helper,
+    ) {
+        (1, None, None) => create(),
+        (1, Some(bytes), None) => create_with_reply_budget(bytes),
+        _ => {
+            let (children, flags, bytes, selector) = options.registers();
+            syscall_result(
+                ecall(
+                    SYS_GOAL_CREATE_WITH_OPTIONS,
+                    children,
+                    flags,
+                    bytes,
+                    selector,
+                    0,
+                )
+                .0,
+            )
+        }
     }
 }
 

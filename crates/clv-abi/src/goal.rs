@@ -2,6 +2,57 @@ use crate::{CompletionKind, NO_CHILD_HANDLE, Program};
 
 pub const MAX_CHILDREN: usize = 2;
 
+/// Immutable options for goal creation. The helper restriction applies to delegation.
+#[derive(Clone, Copy)]
+pub struct CreateOptions {
+    pub child_limit: usize,
+    pub reply_limit: Option<usize>,
+    pub allowed_helper: Option<Program>,
+}
+
+impl CreateOptions {
+    const REPLY_LIMIT: usize = 1;
+    const ALLOWED_HELPER: usize = 2;
+
+    /// Call 48 takes the child limit, option flags, reply limit and helper selector in a0–a3.
+    pub fn registers(self) -> (usize, usize, usize, usize) {
+        let mut flags = 0;
+        if self.reply_limit.is_some() {
+            flags |= Self::REPLY_LIMIT;
+        }
+        if self.allowed_helper.is_some() {
+            flags |= Self::ALLOWED_HELPER;
+        }
+        (
+            self.child_limit,
+            flags,
+            self.reply_limit.unwrap_or(0),
+            self.allowed_helper.map_or(0, |program| program as usize),
+        )
+    }
+
+    pub fn from_registers(
+        child_limit: usize,
+        flags: usize,
+        reply_limit: usize,
+        selector: usize,
+    ) -> Option<Self> {
+        if flags & !(Self::REPLY_LIMIT | Self::ALLOWED_HELPER) != 0 {
+            return None;
+        }
+        let allowed_helper = if flags & Self::ALLOWED_HELPER != 0 {
+            Some(Program::from_raw(selector)?)
+        } else {
+            None
+        };
+        Some(Self {
+            child_limit,
+            reply_limit: (flags & Self::REPLY_LIMIT != 0).then_some(reply_limit),
+            allowed_helper,
+        })
+    }
+}
+
 /// Which helpers may receive a read-only copy of a goal agent's file handle.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FileRecipient {

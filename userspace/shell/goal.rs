@@ -49,7 +49,7 @@ pub(super) fn command(
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] | grant-file [--delegable | --delegate-to <program>] <path> | run [--reply-bytes N] <program> | budget | audit [--replies] | status | cancel | close\r\n"),
+        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] | grant-file [--delegable | --delegate-to <program>] <path> | run [--reply-bytes N] <program> | budget | audit [--replies] | status | cancel | close\r\n"),
     }
 }
 
@@ -87,9 +87,15 @@ fn grant_file(goal: Option<usize>, arguments: &[u8]) {
 
 fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
     let Some((options, b"")) = GoalOptions::parse(arguments, GoalCommand::Create) else {
-        return print(b"usage: goal create [--children 1|2] [--reply-bytes N]\r\n");
+        return print(
+            b"usage: goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>]\r\n",
+        );
     };
-    let result = goal::create_with_options(options.children.unwrap_or(1), options.reply_bytes);
+    let result = goal::create_configured(goal::CreateOptions {
+        child_limit: options.children.unwrap_or(1),
+        reply_limit: options.reply_bytes,
+        allowed_helper: options.allowed_helper,
+    });
     match result {
         Some(handle) => {
             *current = Some(CurrentGoal {
