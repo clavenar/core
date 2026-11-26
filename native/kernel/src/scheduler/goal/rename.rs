@@ -20,9 +20,12 @@ impl PendingRename {
 }
 
 impl Goal {
-    pub(super) fn discard_rename(&mut self, fs: &mut RamFs) {
+    pub(super) fn release_transaction(&mut self, fs: &mut RamFs) {
         if let Some(rename) = self.rename.take() {
             rename.change.discard(fs);
+        }
+        if let Some(input) = self.preserved_file.take() {
+            input.release(fs);
         }
     }
 }
@@ -87,9 +90,9 @@ impl Scheduler {
             return None;
         }
         pending.token = None;
-        let result = pending.change.publish(fs)?;
+        let result = pending.change.publish(fs, goal.preserved_file.as_ref())?;
         if result == CommitResult::Committed {
-            goal.discard_rename(fs);
+            goal.release_transaction(fs);
         }
         Some(result)
     }

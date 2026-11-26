@@ -80,6 +80,7 @@ pub const SYS_GOAL_STAGE_RENAME: usize = 66;
 pub const SYS_GOAL_DIFF: usize = 67;
 pub const SYS_GOAL_REVIEW: usize = 68;
 pub const SYS_GOAL_COMMIT: usize = 69;
+pub const SYS_GOAL_CREATE_PRESERVING_FILE: usize = 70;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;

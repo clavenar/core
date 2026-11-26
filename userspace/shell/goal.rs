@@ -16,7 +16,7 @@ use super::{
     split_word,
 };
 
-const CREATE_HELP: &[u8] = b"goal create [--children 1|2|3] [--reply-bytes N] [--allow-helper <program> | --allow-tool <name@rev>] [--read-bytes N] [--helper-read-bytes N]\r\n";
+const CREATE_HELP: &[u8] = b"goal create [--children 1|2|3] [--reply-bytes N] [--allow-helper <program> | --allow-tool <name@rev>] [--read-bytes N] [--helper-read-bytes N] [--preserve-file <path>]\r\n";
 const GRANT_HELP: &[u8] =
     b"goal grant-file [--delegable | --delegate-to <program> [--argument <literal>]] <path>\r\n";
 const RENAME_HELP: &[u8] = b"goal stage-rename <source> <new-name>\r\n";
@@ -201,6 +201,7 @@ fn commit(goal: &mut CurrentGoal) {
     print(match goal::commit(goal.handle, token) {
         Some(CommitResult::Committed) => b"rename committed\r\n",
         Some(CommitResult::Conflict) => b"commit conflict\r\n",
+        Some(CommitResult::PostconditionFailed) => b"postcondition failed\r\n",
         None => b"cannot commit goal\r\n",
     });
 }
@@ -209,16 +210,7 @@ fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
     let Some((options, b"")) = GoalOptions::parse(arguments, GoalCommand::Create) else {
         return print_usage(CREATE_HELP);
     };
-    let result = goal::create_with_allowed_tool(
-        goal::CreateOptions {
-            child_limit: options.children.unwrap_or(1),
-            reply_limit: options.reply_bytes,
-            allowed_helper: options.allowed_helper,
-        },
-        options.read_limits,
-        options.allowed_tool,
-    );
-    match result {
+    match create_goal(options) {
         Some(handle) => {
             *current = Some(CurrentGoal {
                 handle,
@@ -230,6 +222,27 @@ fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
         None if current.is_some() => print(b"goal already open\r\n"),
         None => print(b"cannot create goal\r\n"),
     }
+}
+
+fn create_goal(options: GoalOptions<'_>) -> Option<usize> {
+    let fd = match options.preserve_file {
+        Some(path) => Some(fs::open(path, OPEN_READ)?),
+        None => None,
+    };
+    let result = goal::create_with_preserved_file(
+        goal::CreateOptions {
+            child_limit: options.children.unwrap_or(1),
+            reply_limit: options.reply_bytes,
+            allowed_helper: options.allowed_helper,
+        },
+        options.read_limits,
+        options.allowed_tool,
+        fd,
+    );
+    if let Some(fd) = fd {
+        fs::close(fd);
+    }
+    result
 }
 
 const DIGITS: usize = usize::MAX.ilog10() as usize + 1;

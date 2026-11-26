@@ -2,7 +2,7 @@ use clv_abi::audit::DelegationDenial;
 use clv_abi::goal::FileRecipient;
 use clv_abi::{GrantKind, MESSAGE_MAX_BYTES, Program};
 
-use super::{CWD_PATH_CAPACITY, DirectoryId, Node, PathBase, RamFs, StagedRename};
+use super::{CWD_PATH_CAPACITY, DirectoryId, Node, PathBase, PreservedFile, RamFs, StagedRename};
 
 const HANDLE_COUNT: usize = 4;
 
@@ -176,6 +176,10 @@ impl TaskFs {
     fn grant_node(&self, fd: usize, kind: GrantKind) -> Option<Node> {
         let node = self.node_for_handle(fd)?;
         (node.grant_kind() == kind).then_some(node)
+    }
+
+    pub(crate) fn preserve_file(&self, fs: &mut RamFs, fd: usize) -> Option<PreservedFile> {
+        PreservedFile::capture(fs, self.node_for_handle(fd)?)
     }
 
     pub(crate) fn stage_rename(

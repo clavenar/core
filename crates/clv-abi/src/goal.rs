@@ -15,6 +15,7 @@ pub type ReviewToken = core::num::NonZeroUsize;
 pub enum CommitResult {
     Committed = 0,
     Conflict = 1,
+    PostconditionFailed = 2,
 }
 
 pub enum GoalDiff<'a> {

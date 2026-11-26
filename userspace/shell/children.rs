@@ -262,7 +262,7 @@ impl Children {
 
 fn agent_run_args(
     arguments: &[u8],
-) -> Option<(GoalOptions, Program, Option<agent::RunRequest<'_>>)> {
+) -> Option<(GoalOptions<'_>, Program, Option<agent::RunRequest<'_>>)> {
     let (options, program, rest) = goal_program(arguments, GoalCommand::AgentRun)?;
     let request = match (program, split_word(rest)) {
         (_, (b"", _)) => None,
@@ -291,7 +291,10 @@ fn mock_definition(name: &[u8]) -> Option<agent::DefinitionId> {
     })
 }
 
-fn goal_program(arguments: &[u8], command: GoalCommand) -> Option<(GoalOptions, Program, &[u8])> {
+fn goal_program(
+    arguments: &[u8],
+    command: GoalCommand,
+) -> Option<(GoalOptions<'_>, Program, &[u8])> {
     let (options, rest) = GoalOptions::parse(arguments, command)?;
     let (name, rest) = split_word(rest);
     Some((options, Program::named(name)?, rest))

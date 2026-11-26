@@ -1,9 +1,46 @@
 use clv_abi::goal::{CommitResult, RENAME_DIFF_MAX_BYTES};
 
-use super::{CWD_PATH_CAPACITY, DirectoryId, NAME_LIMIT, Name, Node, RamFs, Revision};
+use super::{
+    CWD_PATH_CAPACITY, DirectoryId, NAME_LIMIT, Name, Node, RamFs, Revision,
+    WRITABLE_FILE_CAPACITY, WritableFile,
+};
 
 const DIFF_CAPACITY: usize = CWD_PATH_CAPACITY + 1 + 2 * NAME_LIMIT;
 const _: () = assert!(DIFF_CAPACITY <= RENAME_DIFF_MAX_BYTES);
+
+/// The input object and its exact contents at goal creation.
+pub(crate) struct PreservedFile {
+    file_index: usize,
+    contents: [u8; WRITABLE_FILE_CAPACITY],
+    length: usize,
+}
+
+impl PreservedFile {
+    pub(super) fn capture(fs: &mut RamFs, node: Node) -> Option<Self> {
+        let Node::WritableFile(file_index) = node else {
+            return None;
+        };
+        let file = fs.writable[file_index]
+            .as_ref()
+            .filter(|file| file.linked)?;
+        let snapshot = Self {
+            file_index,
+            contents: file.contents,
+            length: file.length,
+        };
+        fs.retain(node);
+        Some(snapshot)
+    }
+
+    fn matches(&self, file_index: usize, file: &WritableFile) -> bool {
+        self.file_index == file_index
+            && self.contents[..self.length] == file.contents[..file.length]
+    }
+
+    pub(crate) fn release(self, fs: &mut RamFs) {
+        fs.release(Node::WritableFile(self.file_index));
+    }
+}
 
 /// A retained file and the names captured when its owner staged this rename.
 pub(crate) struct StagedRename {
@@ -25,7 +62,11 @@ impl StagedRename {
         fs.release(Node::WritableFile(self.file_index));
     }
 
-    pub(crate) fn publish(&self, fs: &mut RamFs) -> Option<CommitResult> {
+    pub(crate) fn publish(
+        &self,
+        fs: &mut RamFs,
+        preserved_file: Option<&PreservedFile>,
+    ) -> Option<CommitResult> {
         let (names, split) = self.diff();
         let (path, new_name) = names.split_at(split);
         let old_name = path.rsplit(|&byte| byte == b'/').next()?;
@@ -37,6 +78,9 @@ impl StagedRename {
         }
         let name = Name::new(new_name)?;
         let file = fs.writable[self.file_index].as_mut()?;
+        if preserved_file.is_some_and(|input| !input.matches(self.file_index, file)) {
+            return Some(CommitResult::PostconditionFailed);
+        }
         fs.revision.advance()?;
         file.name = name;
         Some(CommitResult::Committed)

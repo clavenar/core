@@ -1,16 +1,16 @@
-macro_rules! commands {
+macro_rules! keywords {
     ($kind:ident { $($variant:ident => $name:literal),+ $(,)? }) => {
         #[derive(Clone, Copy)]
         pub(super) enum $kind { $($variant,)+ Unknown }
 
         impl $kind {
             pub(super) fn parse(word: &[u8]) -> Self {
-                // Separate arrays avoid per-entry padding in the boot shell image.
-                const NAMES: &[&[u8]] = &[$($name),+];
-                const COMMANDS: &[$kind] = &[$($kind::$variant),+];
-                for (&name, &command) in NAMES.iter().zip(COMMANDS) {
+                // Store one NUL per spelling to keep the boot shell's lookup tables compact.
+                const NAMES: &[u8] = concat!($($name, "\0",)+).as_bytes();
+                const VALUES: &[$kind] = &[$($kind::$variant),+];
+                for (name, &value) in NAMES.split(|&byte| byte == 0).zip(VALUES) {
                     if name == word {
-                        return command;
+                        return value;
                     }
                 }
                 Self::Unknown
@@ -19,44 +19,56 @@ macro_rules! commands {
     };
 }
 
-commands!(Command {
-    Help => b"help",
-    Pwd => b"pwd",
-    Cd => b"cd",
-    Ls => b"ls",
-    Mkdir => b"mkdir",
-    Rmdir => b"rmdir",
-    Cat => b"cat",
-    Write => b"write",
-    Rm => b"rm",
-    Run => b"run",
-    Ask => b"ask",
-    AskAt => b"askat",
-    AskFile => b"askfile",
-    Grep => b"grep",
-    Recv => b"recv",
-    Wait => b"wait",
-    Event => b"event",
-    Goal => b"goal",
-    Agent => b"agent",
-    Exit => b"exit",
-    Empty => b"",
+keywords!(Command {
+    Help => "help",
+    Pwd => "pwd",
+    Cd => "cd",
+    Ls => "ls",
+    Mkdir => "mkdir",
+    Rmdir => "rmdir",
+    Cat => "cat",
+    Write => "write",
+    Rm => "rm",
+    Run => "run",
+    Ask => "ask",
+    AskAt => "askat",
+    AskFile => "askfile",
+    Grep => "grep",
+    Recv => "recv",
+    Wait => "wait",
+    Event => "event",
+    Goal => "goal",
+    Agent => "agent",
+    Exit => "exit",
+    Empty => "",
 });
 
-commands!(Subcommand {
-    Create => b"create",
-    GrantFile => b"grant-file",
-    StageRename => b"stage-rename",
-    Diff => b"diff",
-    Commit => b"commit",
-    RevokeFile => b"revoke-file",
-    Run => b"run",
-    Audit => b"audit",
-    Budget => b"budget",
-    Status => b"status",
-    Cancel => b"cancel",
-    Close => b"close",
-    Delegate => b"delegate",
-    Suspend => b"suspend",
-    Resume => b"resume",
+keywords!(Subcommand {
+    Create => "create",
+    GrantFile => "grant-file",
+    StageRename => "stage-rename",
+    Diff => "diff",
+    Commit => "commit",
+    RevokeFile => "revoke-file",
+    Run => "run",
+    Audit => "audit",
+    Budget => "budget",
+    Status => "status",
+    Cancel => "cancel",
+    Close => "close",
+    Delegate => "delegate",
+    Suspend => "suspend",
+    Resume => "resume",
+});
+
+keywords!(GoalFlag {
+    ReplyBytes => "reply-bytes",
+    Children => "children",
+    ReadBytes => "read-bytes",
+    HelperReadBytes => "helper-read-bytes",
+    AllowHelper => "allow-helper",
+    AllowTool => "allow-tool",
+    PreserveFile => "preserve-file",
+    Suspended => "suspended",
+    WithFile => "with-file",
 });

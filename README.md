@@ -917,6 +917,42 @@ so even a public write in another directory invalidates the proposal. You can
 inspect the frozen diff after a conflict. Start a fresh goal to stage and
 review a rename against the updated filesystem.
 
+### Preserve a goal's input file
+
+`goal create --preserve-file <path>` pins one writable RamFS file and copies
+its contents at goal creation. To publish a rename, the proposed destination
+must receive that same file with exactly those bytes. At a fresh QEMU prompt,
+run
+
+```text
+mkdir /work
+write /work/draft.txt hello
+goal create --preserve-file /work/draft.txt
+goal stage-rename /work/draft.txt final.txt
+goal run echo
+wait echo
+goal diff
+goal commit
+ls /work
+cat /work/final.txt
+goal close
+```
+
+The commit prints `rename committed`, the directory lists `final.txt`, and
+`cat` prints `hello`. To see the two rejection cases, start each run from a
+fresh boot. Insert `write /work/draft.txt revised` at the point below. After
+`goal commit`, use `cat /work/draft.txt` to inspect the result.
+
+| When the extra write runs | Commit result | Public file |
+| --- | --- | --- |
+| Between `goal create` and `goal stage-rename` | `postcondition failed` | `draft.txt` contains `revised` |
+| Between `goal diff` and `goal commit` | `commit conflict` | `draft.txt` contains `revised` |
+
+Replacing the input with a new file of identical contents before staging
+also fails the postcondition. The option can be combined with the existing
+goal budgets and helper restrictions. A child needs a separate file grant
+to read the input.
+
 ### Share a read allowance across two helper launches
 
 Two different helper programs can run at the same time. Each program has
@@ -1281,7 +1317,8 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 66 `goal_stage_rename` | `a0` goal handle, `a1` owner's file handle, `a2` new basename address, `a3` length (1–64 bytes) | 0 when staged, or -1 on rejection |
 | 67 `goal_diff` | `a0` goal handle, `a1` stack destination, `a2` capacity in bytes | Total bytes copied in `a0`, source path length in `a1`. An empty diff returns zero in both registers. Failure returns -1 in `a0`. |
 | 68 `goal_review` | Same arguments as call 67 | Same diff and lengths as call 67, with a review token in `a2` or zero for a preview |
-| 69 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, or -1 for an invalid caller, goal, token, or unavailable revision |
+| 69 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, 2 on a failed file postcondition, or -1 for an invalid caller, goal, token, or unavailable revision |
+| 70 `goal_create_preserving_file` | `a0` owner's file handle, `a1` stack address of the six call 48 argument words in order (little-endian RV64), `a2` length in bytes (48) | Fresh goal handle, or -1 on rejection |
 
 Calls 66 and 67 are restricted to the goal owner. Call 66 requires a linked
 writable RamFS file and an empty staging slot. It rejects an occupied name,
@@ -1301,12 +1338,22 @@ proposal and any token.
 
 Call 69 checks the caller, goal state and token. It consumes a matching token
 and checks the original RamFS revision, retained source at its original name,
-and vacant destination in one syscall. Success updates only the file's name,
-advances the revision and clears the diff. A conflict preserves the public
-files and the staged diff. Reviewing it again uses the original base.
+and vacant destination in one syscall. For a goal created with call 70,
+RamFS then compares the staged source's identity, length and contents with
+the saved input. A conflict takes precedence over a failed postcondition.
+Either rejection preserves the public files and staged diff. Reviewing it
+again uses the original base and input. Success updates only the file's name,
+advances the revision and clears the diff.
 Public file and directory creation or removal, truncating opens, nonempty
 writes to linked files and publication advance the revision. A mutation
 requiring a new revision fails if the counter is exhausted.
+
+Call 70 uses call 48's option flags, budgets and selector validation. It
+requires a descriptor for a linked writable RamFS file. Creation retains
+the file and snapshots all its bytes (0–256), independently of the descriptor
+cursor. A rejected creation consumes no goal handle or pin. The owner can
+close the descriptor immediately. Successful publication, cancellation,
+successful close or owner exit releases the retained input.
 
 The shell owns the goal and controls its agents. Calls 49, 51, 56 and 64 also
 accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
