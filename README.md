@@ -301,6 +301,28 @@ goal close
 5 reply bytes including the line ending, and `echo ready` costs 10, giving
 `available=9 reserved=0 spent=15`.
 
+Use `goal grant-file --delegate-to <hello|echo> <path>` to choose which helper
+may receive the agent's file. The direct agent can read the file itself. The
+kernel checks the recipient when the agent requests a helper with `--with-file`.
+
+```text
+write /note old
+goal create --children 2 --reply-bytes 24
+goal grant-file --delegate-to echo /note
+agent run --suspended --reply-bytes 16 echo
+agent delegate --with-file --reply-bytes 5 hello
+goal audit
+goal budget
+goal cancel
+goal close
+```
+
+The audit shows `program=hello bytes=5 file=yes denied=file-recipient-not-allowed`.
+The budget reads `available=8 reserved=16 spent=0`, and the helper slot is free.
+Repeat from `goal create` with `--delegate-to hello`. After `agent delegate`,
+run `wait hello` and `recv hello`. The reply is `old`, the audit shows
+`accepted child=<handle>`, and the budget reads `available=8 reserved=11 spent=5`.
+
 Use `goal audit` to see why the kernel accepted or denied each helper launch.
 This example uses the boot file and a suspended agent so the three decisions
 can be reproduced at the shell prompt.
@@ -701,6 +723,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 51 `agent_delegate_with_file` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle with read access to the agent's file, or -1 on rejection |
 | 52 `goal_audit` | `a0` goal handle, `a1` shell stack destination, `a2` capacity in bytes | Retained entry count (0–4), with overwritten count in `a1`, or -1 on failure |
 | 53 `goal_reply_audit` | Same arguments as call 52 | Retained reply-budget entry count (0–4), with overwritten reply entry count in `a1`, or -1 on failure |
+| 54 `goal_grant_file_to` | `a0` goal handle, `a1` shell file handle, `a2` allowed helper program selector (0 for `hello`, 1 for `echo`) | 0 when attached, -1 on rejection, including an unknown selector |
 
 Only the shell can use these calls. A stale or invalid handle or a call
 from another task returns -1 in `a0`. Calls 33 and 43 create single-child
@@ -715,8 +738,8 @@ The agent run calls also create and bind the agent in that operation. Every
 goal child starts with an empty mailbox and uses the ordinary reply, event
 and wait calls. Direct children inherit any file granted to the goal.
 
-Calls 47 and 50 accept one regular file while the goal is ready. The kernel retains
-the file independently of the shell's descriptor, cursor and pathname. Closing
+Calls 47, 50 and 54 accept one regular file while the goal is ready. The kernel
+retains the file independently of the shell's descriptor, cursor and pathname. Closing
 or cancelling a ready goal, or stopping its owner, releases this reference.
 On a successful direct launch the child receives a fresh read-only handle
 at offset zero in `a1`, file kind 2 in `a2` and 0 in `a3`. Direct siblings
@@ -725,15 +748,17 @@ The kernel releases the goal's reference when all places have been used or the
 goal finishes. Each child can close its own handle. Exit, fault or cancellation
 closes any handle it still holds.
 
-Call 50 marks the direct agent's handle as delegable. Ordinary direct
-children receive read access. Closing the agent's handle ends its ability
+Call 50 lets the direct agent delegate to any eligible helper. Call 54 binds the
+agent's handle to one helper program for delegation. Ordinary direct children
+receive read access. Closing the agent's handle ends its ability
 to pass that file on, even while the goal still holds a reference.
 
 Calls 49 and 51 transfer a byte count from zero up to the agent's remaining
 allowance before the helper's first instruction. Both shares count toward
 the goal's reserved total. Call 49 starts the helper with zero in `a1`, `a2`
-and `a3`. Call 51 checks the live agent's handle table and opens its
-delegable file for the helper with read access and an independent cursor.
+and `a3`. Call 51 checks the selected helper against the recipient on the
+agent's open delegable handle before allocating a read-only handle with an
+independent cursor.
 The new file handle arrives in `a1`, file kind 2 in `a2` and zero in `a3`.
 The kernel commits the file grant, reply reservation and launch together.
 The shell receives the ordinary launch handle for replies, events and waits.
@@ -756,6 +781,7 @@ On denial, the code identifies the first failed check and the handle is zero.
 | 6 | Insufficient reply bytes in the agent's reservation |
 | 7 | Agent has no open delegable file |
 | 8 | RamFS file handles exhausted |
+| 9 | The agent's file grant does not permit the selected helper program |
 
 Call 53 returns the decisions recorded when a goal member's `message_send`
 or `reply_send` reaches the budget check. The kernel validates the mailbox,

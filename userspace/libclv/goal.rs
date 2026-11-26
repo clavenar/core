@@ -1,11 +1,11 @@
 use clv_abi::audit::{AUDIT_CAPACITY, DelegationRecord, ReplyRecord};
 pub use clv_abi::budget::ReplyBudget;
-pub use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
+pub use clv_abi::goal::{CancelResult, CloseResult, FileRecipient, GoalStatus};
 use clv_abi::{
     SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
     SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
-    SYS_GOAL_GRANT_FILE, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET,
-    SYS_GOAL_STATUS,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, syscall, syscall_result};
@@ -34,12 +34,22 @@ pub fn create_with_options(children: usize, reply_bytes: Option<usize>) -> Optio
 
 /// Attaches one file from the caller's handle table to a ready goal.
 pub fn grant_file(goal: usize, fd: usize) -> bool {
-    syscall(SYS_GOAL_GRANT_FILE, goal, fd, 0) == 0
+    grant_file_with_recipient(goal, fd, None)
 }
 
 /// Also lets the goal's agent pass read access to its helper.
 pub fn grant_delegable_file(goal: usize, fd: usize) -> bool {
-    syscall(SYS_GOAL_GRANT_DELEGABLE_FILE, goal, fd, 0) == 0
+    grant_file_with_recipient(goal, fd, Some(FileRecipient::Any))
+}
+
+/// Attaches a file and sets which helpers the direct agent may pass it to.
+pub fn grant_file_with_recipient(goal: usize, fd: usize, recipient: Option<FileRecipient>) -> bool {
+    let (call, selector) = match recipient {
+        None => (SYS_GOAL_GRANT_FILE, 0),
+        Some(FileRecipient::Any) => (SYS_GOAL_GRANT_DELEGABLE_FILE, 0),
+        Some(FileRecipient::Program(program)) => (SYS_GOAL_GRANT_FILE_TO, program as usize),
+    };
+    syscall(call, goal, fd, selector) == 0
 }
 
 pub fn budget(goal: usize) -> Option<ReplyBudget> {

@@ -1,7 +1,7 @@
 mod audit;
 mod options;
 
-use clv::goal::{self, CancelResult, CloseResult, GoalStatus, ReplyBudget};
+use clv::goal::{self, CancelResult, CloseResult, FileRecipient, GoalStatus, ReplyBudget};
 use clv::{agent, fs, print};
 use clv_abi::{CompletionKind, OPEN_READ};
 pub(super) use options::{GoalCommand, GoalOptions};
@@ -21,7 +21,7 @@ pub(super) fn command(
     let handle = current.as_ref().map(|goal| goal.handle);
     match split_word(arguments) {
         (b"create", arguments) => create(arguments, current),
-        (b"grant-file", arguments) => grant_file(handle, arguments),
+        (b"grant-file", arguments) => grant_file(handle, arguments, children),
         (b"run", arguments) => children.run_in_goal(handle, arguments),
         (b"audit", option @ (b"" | b"--replies")) => match handle {
             Some(handle) => audit::show(handle, children, option == b"--replies"),
@@ -49,17 +49,26 @@ pub(super) fn command(
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] | grant-file [--delegable] <path> | run [--reply-bytes N] <hello|echo> | budget | audit [--replies] | status | cancel | close\r\n"),
+        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] | grant-file [--delegable | --delegate-to <hello|echo>] <path> | run [--reply-bytes N] <hello|echo> | budget | audit [--replies] | status | cancel | close\r\n"),
     }
 }
 
-fn grant_file(goal: Option<usize>, arguments: &[u8]) {
-    let (path, grant): (_, fn(usize, usize) -> bool) = match split_word(arguments) {
-        (b"--delegable", path) => (path, goal::grant_delegable_file),
-        _ => (arguments, goal::grant_file),
+fn grant_file(goal: Option<usize>, arguments: &[u8], children: &Children) {
+    const USAGE: &[u8] =
+        b"usage: goal grant-file [--delegable | --delegate-to <hello|echo>] <path>\r\n";
+    let (recipient, path) = match split_word(arguments) {
+        (b"--delegable", path) => (Some(FileRecipient::Any), path),
+        (b"--delegate-to", rest) => {
+            let (name, path) = split_word(rest);
+            let Some(program) = children.program(name) else {
+                return print(USAGE);
+            };
+            (Some(FileRecipient::Program(program)), path)
+        }
+        _ => (None, arguments),
     };
     if path.is_empty() {
-        return print(b"usage: goal grant-file [--delegable] <path>\r\n");
+        return print(USAGE);
     }
     let Some(goal) = goal else {
         return print(b"no current goal\r\n");
@@ -67,7 +76,7 @@ fn grant_file(goal: Option<usize>, arguments: &[u8]) {
     let Some(fd) = fs::open(path, OPEN_READ) else {
         return print(b"cannot open path\r\n");
     };
-    let granted = grant(goal, fd);
+    let granted = goal::grant_file_with_recipient(goal, fd, recipient);
     fs::close(fd);
     if granted {
         print(b"file granted\r\n");

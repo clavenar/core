@@ -1,5 +1,6 @@
-use clv_abi::GrantKind;
 use clv_abi::audit::DelegationDenial;
+use clv_abi::goal::FileRecipient;
+use clv_abi::{GrantKind, Program};
 
 use super::{DirectoryId, Node, PathBase, RamFs};
 
@@ -18,7 +19,7 @@ impl Node {
 enum Access {
     ReadOnly,
     ReadWrite,
-    ReadAndDelegate,
+    ReadAndDelegate(FileRecipient),
 }
 
 struct Handle {
@@ -53,15 +54,14 @@ impl Handle {
 /// Pins the shell-authorized file while its goal can admit another child.
 pub(crate) struct FileGrant {
     node: Node,
-    delegable: bool,
+    recipient: Option<FileRecipient>,
 }
 
 impl FileGrant {
     pub(crate) fn open_for_child(&self, fs: &mut RamFs, is_agent: bool) -> Option<TaskFs> {
-        let access = if is_agent && self.delegable {
-            Access::ReadAndDelegate
-        } else {
-            Access::ReadOnly
+        let access = match (is_agent, self.recipient) {
+            (true, Some(recipient)) => Access::ReadAndDelegate(recipient),
+            _ => Access::ReadOnly,
         };
         TaskFs::from_grant(fs, self.node, access)
     }
@@ -100,23 +100,34 @@ impl TaskFs {
         &self,
         fs: &mut RamFs,
         fd: usize,
-        delegable: bool,
+        recipient: Option<FileRecipient>,
     ) -> Option<FileGrant> {
         let node = self.grant_node(fd, GrantKind::File)?;
         fs.retain(node);
-        Some(FileGrant { node, delegable })
+        Some(FileGrant { node, recipient })
     }
 
     /// An agent can hold one delegable file. Its helper receives only read access.
-    pub(crate) fn delegate_file(&self, fs: &mut RamFs) -> Result<Self, DelegationDenial> {
-        let file = self
+    pub(crate) fn delegate_file(
+        &self,
+        fs: &mut RamFs,
+        helper: Program,
+    ) -> Result<Self, DelegationDenial> {
+        let (node, recipient) = self
             .slots
             .iter()
             .flatten()
-            .find(|handle| handle.access == Access::ReadAndDelegate)
+            .find_map(|handle| match handle.access {
+                Access::ReadAndDelegate(recipient) => Some((handle.node, recipient)),
+                _ => None,
+            })
             .ok_or(DelegationDenial::NoDelegableFile)?;
-        Self::from_grant(fs, file.node, Access::ReadOnly)
-            .ok_or(DelegationDenial::FileHandlesExhausted)
+        if let FileRecipient::Program(allowed) = recipient
+            && allowed != helper
+        {
+            return Err(DelegationDenial::FileRecipientNotAllowed);
+        }
+        Self::from_grant(fs, node, Access::ReadOnly).ok_or(DelegationDenial::FileHandlesExhausted)
     }
 
     fn grant_node(&self, fd: usize, kind: GrantKind) -> Option<Node> {

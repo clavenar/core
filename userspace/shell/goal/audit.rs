@@ -91,5 +91,6 @@ fn denial_name(reason: DelegationDenial) -> &'static [u8] {
         DelegationDenial::InsufficientReplyBytes => b"insufficient-reply-bytes",
         DelegationDenial::NoDelegableFile => b"no-delegable-file",
         DelegationDenial::FileHandlesExhausted => b"file-handles-exhausted",
+        DelegationDenial::FileRecipientNotAllowed => b"file-recipient-not-allowed",
     }
 }

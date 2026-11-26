@@ -2,7 +2,7 @@ use clv_abi::audit::{DelegationDenial, DelegationRecord, DelegationRequest};
 
 use super::{Goal, MemberRole};
 use crate::fs::ramfs::{RamFs, TaskFs};
-use crate::scheduler::{Scheduler, Task, TaskState};
+use crate::scheduler::{PreparedLaunch, Scheduler, Task, TaskState};
 
 impl Scheduler {
     pub(crate) fn delegate(&mut self, fs: &mut RamFs, request: DelegationRequest) -> Option<usize> {
@@ -15,7 +15,7 @@ impl Scheduler {
         };
         let goal = self.goal.as_mut()?;
         let admission = launch.and_then(|launch| {
-            let child_fs = goal.admit_helper(fs, &self.tasks, parent, launch.handle, request)?;
+            let child_fs = goal.admit_helper(fs, &self.tasks, parent, &launch, request)?;
             Ok((launch, child_fs))
         });
         let outcome = match &admission {
@@ -35,7 +35,7 @@ impl Goal {
         fs: &mut RamFs,
         tasks: &[Task],
         parent: usize,
-        child: usize,
+        launch: &PreparedLaunch,
         request: DelegationRequest,
     ) -> Result<TaskFs, DelegationDenial> {
         let slot = self.free_slot().ok_or(DelegationDenial::GoalFull)?;
@@ -51,12 +51,18 @@ impl Goal {
                 .iter()
                 .find(|task| task.has_launch(parent))
                 .ok_or(DelegationDenial::AgentFinished)?;
-            task.fs.delegate_file(fs)?
+            task.fs.delegate_file(fs, launch.program)?
         } else {
             TaskFs::empty()
         };
         agent.replies = retained;
-        self.admit(slot, child, MemberRole::Helper { parent }, delegated, fs);
+        self.admit(
+            slot,
+            launch.handle,
+            MemberRole::Helper { parent },
+            delegated,
+            fs,
+        );
         Ok(child_fs)
     }
 }

@@ -8,7 +8,7 @@ use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult};
 use clv_abi::audit::{EncodedRecord, EncodedReplyRecord, ReplyRecord};
 use clv_abi::budget::ReplyBudget;
-use clv_abi::goal::{CancelResult, CloseResult, GoalStatus, MAX_CHILDREN};
+use clv_abi::goal::{CancelResult, CloseResult, FileRecipient, GoalStatus, MAX_CHILDREN};
 
 use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
 use crate::fs::ramfs::{FileGrant, RamFs, TaskFs};
@@ -240,7 +240,7 @@ impl Scheduler {
         &mut self,
         handle: usize,
         fd: usize,
-        delegable: bool,
+        recipient: Option<FileRecipient>,
         fs: &mut RamFs,
     ) -> Option<()> {
         if self.goal_status(handle)? != GoalStatus::Ready {
@@ -250,7 +250,7 @@ impl Scheduler {
         if goal.file.is_some() {
             return None;
         }
-        goal.file = Some(self.tasks[self.current].fs.retain_file(fs, fd, delegable)?);
+        goal.file = Some(self.tasks[self.current].fs.retain_file(fs, fd, recipient)?);
         Some(())
     }
 

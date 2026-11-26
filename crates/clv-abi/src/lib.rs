@@ -61,6 +61,7 @@ pub const SYS_GOAL_GRANT_DELEGABLE_FILE: usize = 50;
 pub const SYS_AGENT_DELEGATE_WITH_FILE: usize = 51;
 pub const SYS_GOAL_AUDIT: usize = 52;
 pub const SYS_GOAL_REPLY_AUDIT: usize = 53;
+pub const SYS_GOAL_GRANT_FILE_TO: usize = 54;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
@@ -119,8 +120,28 @@ pub const MESSAGE_MAX_BYTES: usize = 64;
 pub const PIPE_CAPACITY: usize = 32;
 pub const FILE_REPLY_OK: u8 = 0;
 pub const FILE_REPLY_ERROR: u8 = 1;
-pub const PROGRAM_HELLO: usize = 0;
-pub const PROGRAM_ECHO: usize = 1;
+
+/// Built-in program identified by a launch or a file-grant recipient selector.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Program {
+    Hello = 0,
+    Echo = 1,
+}
+
+pub const PROGRAM_HELLO: usize = Program::Hello as usize;
+pub const PROGRAM_ECHO: usize = Program::Echo as usize;
+
+impl Program {
+    pub const fn from_raw(selector: usize) -> Option<Self> {
+        match selector {
+            PROGRAM_HELLO => Some(Self::Hello),
+            PROGRAM_ECHO => Some(Self::Echo),
+            _ => None,
+        }
+    }
+}
+
 /// A child passes zero in `a2` to receive its request. An empty event wait returns it in `a0`.
 pub const NO_CHILD_HANDLE: usize = 0;
 pub const WAIT_EXITED: usize = 0;

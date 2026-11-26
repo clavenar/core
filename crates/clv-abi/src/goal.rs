@@ -1,6 +1,13 @@
-use crate::{CompletionKind, NO_CHILD_HANDLE};
+use crate::{CompletionKind, NO_CHILD_HANDLE, Program};
 
 pub const MAX_CHILDREN: usize = 2;
+
+/// Which helpers may receive a read-only copy of a goal agent's file handle.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FileRecipient {
+    Any,
+    Program(Program),
+}
 
 const READY: usize = 0;
 const RUNNING: usize = 1;

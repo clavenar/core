@@ -1,7 +1,7 @@
 use clv::{ChildReply, ChildStatus, agent, fs, pipe, print};
 use clv_abi::{
     ChildEvent, CompletionKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PIPE_CAPACITY,
-    PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
+    PROGRAM_ECHO, PROGRAM_HELLO, Program, ReplyKind, RequestKind,
 };
 
 use super::{
@@ -46,6 +46,13 @@ impl Children {
 
     fn named(&mut self, name: &[u8]) -> Option<&mut Child> {
         self.programs.iter_mut().find(|child| child.name == name)
+    }
+
+    pub(super) fn program(&self, name: &[u8]) -> Option<Program> {
+        self.programs
+            .iter()
+            .find(|child| child.name == name)
+            .and_then(|child| Program::from_raw(child.selector))
     }
 
     pub(super) fn program_name(&self, selector: usize) -> Option<&'static [u8]> {

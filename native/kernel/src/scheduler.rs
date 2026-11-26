@@ -5,8 +5,7 @@ use self::goal::Goal;
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
 use clv_abi::{
-    ChildEvent, CompletionKind, GrantKind, PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
-    TaskCompletion,
+    ChildEvent, CompletionKind, GrantKind, Program, ReplyKind, RequestKind, TaskCompletion,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -71,9 +70,16 @@ struct ChildLaunch {
 }
 
 struct PreparedLaunch {
-    index: usize,
+    program: Program,
     handle: usize,
     next_handle: usize,
+}
+
+fn program_index(program: Program) -> usize {
+    match program {
+        Program::Hello => HELLO_TASK_INDEX,
+        Program::Echo => ECHO_TASK_INDEX,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -236,12 +242,8 @@ impl Scheduler {
         program: usize,
         agent: Option<usize>,
     ) -> Result<PreparedLaunch, DelegationDenial> {
-        let index = match program {
-            PROGRAM_HELLO => HELLO_TASK_INDEX,
-            PROGRAM_ECHO => ECHO_TASK_INDEX,
-            _ => return Err(DelegationDenial::UnknownProgram),
-        };
-        if self.tasks[index].state != TaskState::Stopped {
+        let program = Program::from_raw(program).ok_or(DelegationDenial::UnknownProgram)?;
+        if self.tasks[program_index(program)].state != TaskState::Stopped {
             return Err(DelegationDenial::ProgramBusy);
         }
         // An agent takes the first handle of the pair. Commit the sequence only on success.
@@ -255,7 +257,7 @@ impl Scheduler {
             .checked_add(1)
             .ok_or(DelegationDenial::LaunchHandlesExhausted)?;
         Ok(PreparedLaunch {
-            index,
+            program,
             handle,
             next_handle,
         })
@@ -305,10 +307,11 @@ impl Scheduler {
         initial_state: TaskState,
     ) -> usize {
         let PreparedLaunch {
-            index,
+            program,
             handle,
             next_handle,
         } = launch;
+        let index = program_index(program);
         let task = &mut self.tasks[index];
         let mut frame = TrapFrame::new_user(
             task.entry,
