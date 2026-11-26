@@ -46,6 +46,10 @@ In an ANSI terminal, the shell shows a cyan `clv>` prompt. When you run
 yellow, and `commit conflict` in red. The shell resets the color after each
 prompt or message.
 
+Type `help` for the full command reference. It groups commands by task, shows
+their arguments beside short descriptions, and lists options under the command
+that accepts them. Type `goal` or `agent` on its own to see just that section.
+
 The build links the shell and each registered program as separate RV64 ELFs
 and embeds them in the kernel. To add a boot program, put its entry point in
 `userspace/<name>/main.rs` and append its name to the program registry. The

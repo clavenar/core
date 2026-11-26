@@ -1,22 +1,17 @@
 use clv::{fs, print};
 use clv_abi::{OPEN_READ, OPEN_WRITE_TRUNCATE};
 
-use super::{LINE_LIMIT, split_word};
+use super::{LINE_LIMIT, help::Entry, split_word};
 
 pub(super) fn cd(path: &[u8]) {
-    path_command(
-        fs::chdir,
-        path,
-        b"usage: cd <path>\r\n",
-        b"cannot change directory\r\n",
-    );
+    path_command(fs::chdir, path, Entry::Cd, b"cannot change directory\r\n");
 }
 
 pub(super) fn mkdir(path: &[u8]) {
     path_command(
         fs::mkdir,
         path,
-        b"usage: mkdir <path>\r\n",
+        Entry::Mkdir,
         b"cannot create directory\r\n",
     );
 }
@@ -25,23 +20,18 @@ pub(super) fn rmdir(path: &[u8]) {
     path_command(
         fs::rmdir,
         path,
-        b"usage: rmdir <path>\r\n",
+        Entry::Rmdir,
         b"cannot remove directory\r\n",
     );
 }
 
 pub(super) fn rm(path: &[u8]) {
-    path_command(
-        fs::unlink,
-        path,
-        b"usage: rm <path>\r\n",
-        b"cannot remove path\r\n",
-    );
+    path_command(fs::unlink, path, Entry::Rm, b"cannot remove path\r\n");
 }
 
-fn path_command(operation: fn(&[u8]) -> bool, path: &[u8], usage: &[u8], error: &[u8]) {
+fn path_command(operation: fn(&[u8]) -> bool, path: &[u8], entry: Entry, error: &[u8]) {
     if path.is_empty() {
-        print(usage);
+        entry.usage();
     } else if !operation(path) {
         print(error);
     }
@@ -64,7 +54,7 @@ pub(super) fn ls(path: &[u8]) {
 
 pub(super) fn cat(path: &[u8]) {
     if path.is_empty() {
-        print(b"usage: cat <path>\r\n");
+        Entry::Cat.usage();
     } else {
         show(path, false);
     }
@@ -97,7 +87,7 @@ fn show(path: &[u8], list_entries: bool) {
 pub(super) fn write_file(arguments: &[u8]) {
     let (path, text) = split_word(arguments);
     if text.is_empty() {
-        return print(b"usage: write <path> <text>\r\n");
+        return Entry::Write.usage();
     }
     let mut buffer = [0; LINE_LIMIT + 2];
     buffer[..text.len()].copy_from_slice(text);

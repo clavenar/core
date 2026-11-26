@@ -1,3 +1,4 @@
+use crate::help::Entry;
 use clv::goal;
 use clv_abi::audit::{
     AUDIT_CAPACITY, DelegationDenial, DelegationRecordWithTool, ReadLimitScope,
@@ -7,8 +8,6 @@ use clv_abi::tool::FILE_TOOLS;
 use clv_abi::{LaunchParent, PATH_MAX_BYTES, Program};
 
 use super::{DIGITS, amount, decimal, hex, hex_digest, print, print_line};
-
-pub(super) const HELP: &[u8] = b"goal audit [--replies | --reads | --renames]\r\n";
 
 enum View {
     Delegations,
@@ -23,7 +22,7 @@ pub(super) fn show(handle: Option<usize>, option: &[u8]) {
         b"--replies" => View::Replies,
         b"--reads" => View::Reads,
         b"--renames" => View::Renames,
-        _ => return crate::print_usage(HELP),
+        _ => return Entry::Audit.usage(),
     };
     let Some(handle) = handle else {
         return print(b"no current goal\r\n");

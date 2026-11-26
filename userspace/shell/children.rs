@@ -6,8 +6,9 @@ use clv_abi::{
 
 use super::{
     command::GoalFlag,
-    goal::{AGENT_DELEGATE_HELP, AGENT_RUN_HELP, GoalCommand, GoalOptions},
-    hex, print_handle, print_line, print_usage, split_literal, split_word,
+    goal::{GoalCommand, GoalOptions},
+    help::Entry,
+    hex, print_handle, print_line, split_literal, split_word,
 };
 
 pub(super) struct Children {
@@ -84,13 +85,13 @@ impl Children {
                     self.handles[PROGRAM_HELLO] = handle;
                 }
             }
-            _ => print(b"usage: run <program> or run hello <dir>\r\n"),
+            _ => Entry::Run.usage(),
         }
     }
 
     pub(super) fn run_in_goal(&mut self, goal: Option<usize>, arguments: &[u8]) {
         let Some((options, program, b"")) = goal_program(arguments, GoalCommand::Run) else {
-            return print(b"usage: goal run [--reply-bytes N] <program>\r\n");
+            return Entry::GoalRun.usage();
         };
         let Some(goal) = goal else {
             return print(b"no current goal\r\n");
@@ -113,7 +114,7 @@ impl Children {
         arguments: &[u8],
     ) -> Option<agent::AgentLaunch> {
         let Some((options, program, request)) = agent_run_args(arguments) else {
-            print_usage(AGENT_RUN_HELP);
+            Entry::AgentRun.usage();
             return None;
         };
         let Some(launch) = agent::launch(
@@ -132,7 +133,7 @@ impl Children {
 
     pub(super) fn delegate(&mut self, agent: Option<usize>, arguments: &[u8]) {
         let Some(helper) = Helper::parse(arguments) else {
-            return print_usage(AGENT_DELEGATE_HELP);
+            return Entry::Delegate.usage();
         };
         let Some(agent) = agent else {
             return print(b"no current agent\r\n");
@@ -158,7 +159,7 @@ impl Children {
     pub(super) fn grep(&mut self, arguments: &[u8]) {
         let Some((pattern, path)) = grep_pattern(arguments).filter(|(_, path)| !path.is_empty())
         else {
-            return print(b"usage: grep -F <pattern> <path>\r\n");
+            return Entry::Grep.usage();
         };
         if let Some(handle) = spawn_scoped(Program::Grep, path, |program, fd| {
             clv::spawn_with_file_arg(program, fd, pattern)
@@ -172,7 +173,7 @@ impl Children {
         let (name, text) = split_word(arguments);
         let program = match Program::named(name) {
             Some(program) if !text.is_empty() => program,
-            _ => return print(b"usage: ask [--read] <program> <text>\r\n"),
+            _ => return Entry::Ask.usage(),
         };
         let Some(handle) = clv::spawn_request(program as usize, None, kind, text) else {
             print(b"cannot ask ");
@@ -188,7 +189,7 @@ impl Children {
         let (name, arguments) = split_word(arguments);
         let (directory, payload) = split_word(arguments);
         if Program::named(name) != Some(Program::Hello) || payload.is_empty() {
-            return print(b"usage: askat [--echo] hello <dir> <payload>\r\n");
+            return Entry::AskAt.usage();
         }
         if let Some(handle) = spawn_scoped(Program::Hello, directory, |program, fd| {
             clv::spawn_request(program, Some(fd), kind, payload)
@@ -206,7 +207,7 @@ impl Children {
             (first, rest)
         };
         if Program::named(name) != Some(Program::Hello) || path.is_empty() {
-            return print(b"usage: askfile [--stream] hello <path>\r\n");
+            return Entry::AskFile.usage();
         }
         let spawn = if stream {
             clv::spawn_with_file_pipe
@@ -226,7 +227,7 @@ impl Children {
     pub(super) fn recv(&self, name: &[u8]) {
         match Program::named(name) {
             Some(program) => print_reply(self.handles[program as usize]),
-            None => print(b"usage: recv <program>\r\n"),
+            None => Entry::Recv.usage(),
         }
     }
 
@@ -249,7 +250,7 @@ impl Children {
 
     pub(super) fn wait(&self, name: &[u8]) {
         let Some(program) = Program::named(name) else {
-            return print(b"usage: wait <program>\r\n");
+            return Entry::Wait.usage();
         };
         let (status, value): (&[u8], usize) = match clv::wait(self.handles[program as usize]) {
             Some(ChildStatus::Exited(code)) => (b" exited ", code),

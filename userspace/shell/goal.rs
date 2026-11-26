@@ -13,34 +13,11 @@ use clv_abi::{CompletionKind, OPEN_READ, Program};
 pub(super) use options::{GoalCommand, GoalOptions};
 
 use super::{
-    HEX_DIGITS, children::Children, hex, print_handle, print_line, print_usage, split_literal,
-    split_word,
+    HEX_DIGITS,
+    children::Children,
+    help::{self, Entry},
+    hex, print_handle, print_line, split_literal, split_word,
 };
-
-const CREATE_HELP: &[u8] = b"goal create [--children 1|2|3] [--reply-bytes N] [--allow-helper <program> | --allow-tool <name@rev>] [--read-bytes N] [--helper-read-bytes N] [--preserve-file <path>]\r\n";
-const GRANT_HELP: &[u8] =
-    b"goal grant-file [--stage-rename | --delegable | --delegate-to <program> [--argument <literal>]] <path>\r\n";
-const RENAME_HELP: &[u8] = b"goal stage-rename <source> <new-name>\r\n";
-
-pub(super) fn help() {
-    print(CREATE_HELP);
-    print(b"goal run [--reply-bytes N] <program>\r\n");
-    print(GRANT_HELP);
-    print(RENAME_HELP);
-    print(b"goal diff  goal commit  goal discard  goal revoke-file  goal status  goal budget  goal cancel  goal close\r\n");
-    print(audit::HELP);
-}
-
-pub(super) const AGENT_RUN_HELP: &[u8] = b"agent run [--suspended] [--reply-bytes N] <program> [request]\r\n\
-      hello accepts --stage-rename <new-name> | --mock find-greeting[@REV] | --delegate --with-file --reply-bytes N grep -F <pattern>\r\n";
-pub(super) const AGENT_DELEGATE_HELP: &[u8] =
-    b"agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n";
-
-pub(super) fn agent_help() {
-    print(AGENT_RUN_HELP);
-    print(AGENT_DELEGATE_HELP);
-    print(b"agent status  agent suspend  agent resume\r\n");
-}
 
 pub(super) struct CurrentGoal {
     handle: usize,
@@ -100,8 +77,8 @@ pub(super) fn command(
             None => print(b"no current goal\r\n"),
         },
         _ => {
-            print(b"usage: ");
-            help();
+            print(b"usage: goal <subcommand>\r\n");
+            help::goals();
         }
     }
 }
@@ -144,7 +121,7 @@ fn grant_options(arguments: &[u8]) -> Option<(FileTarget<'_>, &[u8])> {
 
 fn grant_file(goal: Option<usize>, arguments: &[u8]) {
     let Some((target, path)) = grant_options(arguments) else {
-        return print_usage(GRANT_HELP);
+        return Entry::GrantFile.usage();
     };
     let granted = with_goal_file(goal, path, |goal, fd| match target {
         FileTarget::Recipient(recipient) => goal::grant_file_with_recipient(goal, fd, recipient),
@@ -182,10 +159,10 @@ fn with_goal_file(
 
 fn stage_rename(goal: Option<usize>, arguments: &[u8]) {
     let Some((path, rest)) = split_literal(arguments) else {
-        return print_usage(RENAME_HELP);
+        return Entry::StageRename.usage();
     };
     let Some((name, b"")) = split_literal(rest) else {
-        return print_usage(RENAME_HELP);
+        return Entry::StageRename.usage();
     };
     if let Some(staged) = with_goal_file(goal, path, |goal, fd| goal::stage_rename(goal, fd, name))
     {
@@ -261,7 +238,7 @@ fn discard(goal: &mut CurrentGoal) {
 
 fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
     let Some((options, b"")) = GoalOptions::parse(arguments, GoalCommand::Create) else {
-        return print_usage(CREATE_HELP);
+        return Entry::GoalCreate.usage();
     };
     match create_goal(options) {
         Some(handle) => {
@@ -364,8 +341,8 @@ pub(super) fn agent_command(
             }
         }
         _ => {
-            print(b"usage: ");
-            agent_help();
+            print(b"usage: agent <subcommand>\r\n");
+            help::agents();
         }
     }
 }

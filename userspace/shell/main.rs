@@ -6,11 +6,13 @@ mod color;
 mod command;
 mod files;
 mod goal;
+mod help;
 
 use children::Children;
 use clv::print;
 use command::Command;
 use core::panic::PanicInfo;
+use help::Entry;
 
 const LINE_LIMIT: usize = 128;
 
@@ -75,17 +77,7 @@ extern "C" fn _start() -> ! {
 fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<goal::CurrentGoal>) {
     let (command, arguments) = split_word(line.trim_ascii());
     match Command::parse(command) {
-        Command::Help if arguments.is_empty() => {
-            print(
-                b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\n\
-              run <program>  run hello <dir>\r\n\
-              ask [--read] <program> <text>  askat [--echo] hello <dir> <payload>\r\n\
-              askfile [--stream] hello <path>\r\n\
-              grep -F <pattern> <path>  recv <program>  wait <program>  event\r\n",
-            );
-            goal::help();
-            goal::agent_help();
-        }
+        Command::Help if arguments.is_empty() => help::all(),
         Command::Pwd if arguments.is_empty() => files::pwd(),
         Command::Cd => files::cd(arguments),
         Command::Ls => files::ls(arguments),
@@ -102,7 +94,7 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<g
         Command::Recv => children.recv(arguments),
         Command::Wait => children.wait(arguments),
         Command::Event if arguments.is_empty() => children.event(),
-        Command::Event => print(b"usage: event\r\n"),
+        Command::Event => Entry::Event.usage(),
         Command::Goal => goal::command(arguments, current_goal, children),
         Command::Agent => goal::agent_command(arguments, current_goal, children),
         Command::Exit if arguments.is_empty() => clv::exit(0),
@@ -160,11 +152,6 @@ fn hex(mut value: usize) -> [u8; 18] {
 
 fn print_handle(label: &[u8], handle: usize) {
     print_line(&[label, &hex(handle)]);
-}
-
-fn print_usage(syntax: &[u8]) {
-    print(b"usage: ");
-    print(syntax);
 }
 
 // Short status lines fit in one console call. Extended audit lines can exceed 128 bytes.
