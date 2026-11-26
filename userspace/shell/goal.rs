@@ -20,7 +20,7 @@ pub(super) fn command(
     let handle = current.as_ref().map(|goal| goal.handle);
     match split_word(arguments) {
         (b"create", arguments) => create(arguments, current),
-        (b"grant-file", path) => grant_file(handle, path),
+        (b"grant-file", arguments) => grant_file(handle, arguments),
         (b"run", arguments) => children.run_in_goal(handle, arguments),
         (b"budget", b"") => match handle.and_then(goal::budget) {
             Some(budget) => print_budget(budget),
@@ -43,13 +43,17 @@ pub(super) fn command(
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] | grant-file <path> | run [--reply-bytes N] <hello|echo> | budget | status | cancel | close\r\n"),
+        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] | grant-file [--delegable] <path> | run [--reply-bytes N] <hello|echo> | budget | status | cancel | close\r\n"),
     }
 }
 
-fn grant_file(goal: Option<usize>, path: &[u8]) {
+fn grant_file(goal: Option<usize>, arguments: &[u8]) {
+    let (path, grant): (_, fn(usize, usize) -> bool) = match split_word(arguments) {
+        (b"--delegable", path) => (path, goal::grant_delegable_file),
+        _ => (arguments, goal::grant_file),
+    };
     if path.is_empty() {
-        return print(b"usage: goal grant-file <path>\r\n");
+        return print(b"usage: goal grant-file [--delegable] <path>\r\n");
     }
     let Some(goal) = goal else {
         return print(b"no current goal\r\n");
@@ -57,7 +61,7 @@ fn grant_file(goal: Option<usize>, path: &[u8]) {
     let Some(fd) = fs::open(path, OPEN_READ) else {
         return print(b"cannot open path\r\n");
     };
-    let granted = goal::grant_file(goal, fd);
+    let granted = grant(goal, fd);
     fs::close(fd);
     if granted {
         print(b"file granted\r\n");
@@ -161,7 +165,7 @@ pub(super) fn agent_command(
                 None => print(b"no current agent\r\n"),
             }
         }
-        _ => print(b"usage: agent run [--suspended] [--reply-bytes N] <hello|echo> | delegate --reply-bytes N <hello|echo> | status | suspend | resume\r\n"),
+        _ => print(b"usage: agent run [--suspended] [--reply-bytes N] <hello|echo> | delegate [--with-file] --reply-bytes N <hello|echo> | status | suspend | resume\r\n"),
     }
 }
 

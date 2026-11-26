@@ -103,31 +103,12 @@ impl Goal {
         let slot = self.free_slot()?;
         let replies = ReplyReservation::new(self.budget().available, reply_bytes)?;
         let child_fs = match &self.file {
-            Some(file) => file.open_for_child(fs)?,
+            Some(file) => file.open_for_child(fs, agent.is_some())?,
             None => TaskFs::empty(),
         };
         let role = agent.map_or(MemberRole::Child, MemberRole::Agent);
         self.admit(slot, child, role, replies, fs);
         Some(child_fs)
-    }
-
-    pub(super) fn delegate(
-        &mut self,
-        agent: usize,
-        child: usize,
-        bytes: usize,
-        fs: &mut RamFs,
-    ) -> Option<TaskFs> {
-        let slot = self.free_slot()?;
-        let parent = self.members.iter_mut().flatten().find(|member| {
-            member.role == MemberRole::Agent(agent) && member.completion.is_none()
-        })?;
-        let role = MemberRole::Helper {
-            parent: parent.handle,
-        };
-        let replies = parent.replies.delegate(bytes)?;
-        self.admit(slot, child, role, replies, fs);
-        Some(TaskFs::empty())
     }
 
     fn free_slot(&self) -> Option<usize> {
@@ -242,6 +223,7 @@ impl Scheduler {
         &mut self,
         handle: usize,
         fd: usize,
+        delegable: bool,
         fs: &mut RamFs,
     ) -> Option<()> {
         if self.goal_status(handle)? != GoalStatus::Ready {
@@ -251,8 +233,39 @@ impl Scheduler {
         if goal.file.is_some() {
             return None;
         }
-        goal.file = Some(self.tasks[self.current].fs.retain_file(fs, fd)?);
+        goal.file = Some(self.tasks[self.current].fs.retain_file(fs, fd, delegable)?);
         Some(())
+    }
+
+    pub(super) fn start_helper(
+        &mut self,
+        fs: &mut RamFs,
+        agent: usize,
+        child: usize,
+        bytes: usize,
+        with_file: bool,
+    ) -> Option<TaskFs> {
+        let goal = self.goal.as_mut()?;
+        let slot = goal.free_slot()?;
+        let parent = goal.members.iter_mut().flatten().find(|member| {
+            member.role == MemberRole::Agent(agent) && member.completion.is_none()
+        })?;
+        let role = MemberRole::Helper {
+            parent: parent.handle,
+        };
+        let (retained, delegated) = parent.replies.split(bytes)?;
+        let child_fs = if with_file {
+            let task = self
+                .tasks
+                .iter()
+                .find(|task| task.has_launch(parent.handle))?;
+            task.fs.delegate_file(fs)?
+        } else {
+            TaskFs::empty()
+        };
+        parent.replies = retained;
+        goal.admit(slot, child, role, delegated, fs);
+        Some(child_fs)
     }
 
     fn agent_member(&self, handle: usize) -> Option<(&Goal, &Member)> {

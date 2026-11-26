@@ -56,6 +56,8 @@ pub const SYS_AGENT_RUN_WITH_REPLY_BUDGET: usize = 46;
 pub const SYS_GOAL_GRANT_FILE: usize = 47;
 pub const SYS_GOAL_CREATE_WITH_OPTIONS: usize = 48;
 pub const SYS_AGENT_DELEGATE: usize = 49;
+pub const SYS_GOAL_GRANT_DELEGABLE_FILE: usize = 50;
+pub const SYS_AGENT_DELEGATE_WITH_FILE: usize = 51;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;

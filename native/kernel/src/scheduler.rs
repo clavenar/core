@@ -82,6 +82,7 @@ pub(crate) enum LaunchScope {
     Delegated {
         agent: usize,
         reply_bytes: usize,
+        with_file: bool,
     },
 }
 
@@ -114,6 +115,14 @@ struct Task {
     state: TaskState,
     timer_fired: bool,
     launch: Option<ChildLaunch>,
+}
+
+impl Task {
+    fn has_launch(&self, handle: usize) -> bool {
+        self.launch
+            .as_ref()
+            .is_some_and(|launch| launch.handle == handle)
+    }
 }
 
 pub(crate) struct Scheduler {
@@ -258,11 +267,11 @@ impl Scheduler {
                 .goal
                 .as_mut()?
                 .start(goal, handle, agent, reply_bytes, fs)?,
-            LaunchScope::Delegated { agent, reply_bytes } => {
-                self.goal
-                    .as_mut()?
-                    .delegate(agent, handle, reply_bytes, fs)?
-            }
+            LaunchScope::Delegated {
+                agent,
+                reply_bytes,
+                with_file,
+            } => self.start_helper(fs, agent, handle, reply_bytes, with_file)?,
             LaunchScope::Directory(fd) => {
                 self.tasks[self.current]
                     .fs
@@ -499,11 +508,7 @@ impl Scheduler {
     }
 
     fn launch_index(&self, handle: usize) -> Option<usize> {
-        self.tasks.iter().position(|task| {
-            task.launch
-                .as_ref()
-                .is_some_and(|launch| launch.handle == handle)
-        })
+        self.tasks.iter().position(|task| task.has_launch(handle))
     }
 
     fn launch_for_shell(&mut self, handle: usize) -> Option<(&mut ChildLaunch, &mut TaskState)> {

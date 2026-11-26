@@ -18,23 +18,20 @@ impl ReplyReservation {
         })
     }
 
-    fn deduct(&mut self, bytes: usize) -> Option<()> {
-        if let Some(remaining) = &mut self.remaining {
-            *remaining = remaining.checked_sub(bytes)?;
-        }
-        Some(())
-    }
-
-    pub(super) fn delegate(&mut self, bytes: usize) -> Option<Self> {
-        self.deduct(bytes)?;
-        Some(Self {
-            remaining: Some(bytes),
-            spent: 0,
-        })
+    /// Compute both shares so the caller can commit them after acquiring any file grant.
+    pub(super) fn split(&self, bytes: usize) -> Option<(Self, Self)> {
+        let helper = Self::new(self.remaining, Some(bytes))?;
+        let parent = Self {
+            remaining: self.remaining.map(|remaining| remaining - bytes),
+            spent: self.spent,
+        };
+        Some((parent, helper))
     }
 
     pub(super) fn charge(&mut self, bytes: usize) -> Option<()> {
-        self.deduct(bytes)?;
+        if let Some(remaining) = &mut self.remaining {
+            *remaining = remaining.checked_sub(bytes)?;
+        }
         // An unlimited goal can outlive the range of its reporting counter.
         self.spent = self.spent.saturating_add(bytes);
         Some(())

@@ -230,7 +230,7 @@ goal close
 Use `agent delegate --reply-bytes N <hello|echo>` to start a helper with
 bytes from the current agent's remaining reservation. The shell can do this
 while the agent is running or suspended. The helper uses the goal's second
-and final launch slot and starts with an empty RamFS handle table.
+and final launch slot. Its RamFS handle table starts empty by default.
 
 ```text
 goal create --children 2 --reply-bytes 64
@@ -274,6 +274,37 @@ ending stored by `write`, so the budget prints `available=3 reserved=0 spent=5`.
 `cat /note` prints `new` because the shell recreated the path after the grant.
 If you try to grant a directory or attach a second file, the shell prints
 `cannot grant file`. The goal keeps its existing grant and balance.
+
+To let the agent pass that file to a helper, attach it with
+`goal grant-file --delegable` and request it with `agent delegate --with-file`.
+The helper receives its own read-only handle at offset zero.
+
+```text
+write /note old
+goal create --children 2 --reply-bytes 24
+goal grant-file --delegable /note
+agent run --suspended --reply-bytes 16 echo
+rm /note
+write /note new
+agent delegate --with-file --reply-bytes 5 hello
+wait hello
+recv hello
+cat /note
+agent resume
+wait echo
+goal budget
+goal close
+```
+
+`recv hello` prints `old` from the original file object. `cat /note` prints
+`new` from the recreated file. Both waits report exit 0. The helper spends
+5 reply bytes including the line ending, and `echo ready` costs 10, giving
+`available=9 reserved=0 spent=15`.
+
+To check denial, repeat through the delegation command using
+`goal grant-file /note`. The shell prints `cannot delegate child`, and
+`goal budget` reports `available=8 reserved=16 spent=0`. The second slot is
+still available for `agent delegate --reply-bytes 11 hello`.
 
 You can cancel a ready goal directly at the shell prompt.
 
@@ -614,6 +645,8 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 47 `goal_grant_file` | `a0` goal handle, `a1` open RamFS file handle owned by the shell | 0 when attached, -1 on rejection |
 | 48 `goal_create_with_options` | `a0` child limit (1 or 2), `a1` budget mode (0 unlimited, 1 finite), `a2` total reply bytes in finite mode | Fresh goal handle, or -1 on rejection |
 | 49 `agent_delegate` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle, or -1 on rejection |
+| 50 `goal_grant_delegable_file` | `a0` goal handle, `a1` shell file handle | 0 when attached with permission for the goal's agent to delegate read access, or -1 on rejection |
+| 51 `agent_delegate_with_file` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle with read access to the agent's file, or -1 on rejection |
 
 Only the shell can use these calls. A stale or invalid handle or a call
 from another task returns -1 in `a0`. Calls 33 and 43 create single-child
@@ -628,7 +661,7 @@ The agent run calls also create and bind the agent in that operation. Every
 goal child starts with an empty mailbox and uses the ordinary reply, event
 and wait calls. Direct children inherit any file granted to the goal.
 
-Call 47 accepts one regular file while the goal is ready. The kernel retains
+Calls 47 and 50 accept one regular file while the goal is ready. The kernel retains
 the file independently of the shell's descriptor, cursor and pathname. Closing
 or cancelling a ready goal, or stopping its owner, releases this reference.
 On a successful direct launch the child receives a fresh read-only handle
@@ -638,11 +671,18 @@ The kernel releases the goal's reference when all places have been used or the
 goal finishes. Each child can close its own handle. Exit, fault or cancellation
 closes any handle it still holds.
 
-Call 49 accepts a byte count from zero up to the agent's remaining allowance.
-It moves those bytes to the helper before its first instruction. Both shares
-count toward the goal's reserved total. The helper starts with zero in
-`a1`, `a2` and `a3`. The shell receives its ordinary launch handle for
-replies, events and waits.
+Call 50 marks the direct agent's handle as delegable. Ordinary direct
+children receive read access. Closing the agent's handle ends its ability
+to pass that file on, even while the goal still holds a reference.
+
+Calls 49 and 51 transfer a byte count from zero up to the agent's remaining
+allowance before the helper's first instruction. Both shares count toward
+the goal's reserved total. Call 49 starts the helper with zero in `a1`, `a2`
+and `a3`. Call 51 checks the live agent's handle table and opens its
+delegable file for the helper with read access and an independent cursor.
+The new file handle arrives in `a1`, file kind 2 in `a2` and zero in `a3`.
+The kernel commits the file grant, reply reservation and launch together.
+The shell receives the ordinary launch handle for replies, events and waits.
 
 `agent_status` uses tags 1–5 below and tag 6 for a suspended child (`a2` is
 zero). It always returns the original child handle on success. `goal_status`

@@ -5,6 +5,7 @@ pub(crate) enum GoalCommand {
     Create,
     Run,
     AgentRun,
+    AgentDelegate,
 }
 
 #[derive(Default)]
@@ -12,6 +13,7 @@ pub(crate) struct GoalOptions {
     pub children: Option<usize>,
     pub reply_bytes: Option<usize>,
     pub suspended: bool,
+    pub with_file: bool,
 }
 
 impl GoalOptions {
@@ -38,6 +40,12 @@ impl GoalOptions {
                     if matches!(command, GoalCommand::AgentRun) && !options.suspended =>
                 {
                     options.suspended = true;
+                    arguments = rest;
+                }
+                (b"--with-file", rest)
+                    if matches!(command, GoalCommand::AgentDelegate) && !options.with_file =>
+                {
+                    options.with_file = true;
                     arguments = rest;
                 }
                 (word, _) if word.starts_with(b"--") => return None,

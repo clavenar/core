@@ -2,8 +2,8 @@ pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
 use clv_abi::{
     SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
-    SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_FILE,
-    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
+    SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, syscall, syscall_result};
@@ -33,6 +33,11 @@ pub fn create_with_options(children: usize, reply_bytes: Option<usize>) -> Optio
 /// Attaches one file from the caller's handle table to a ready goal.
 pub fn grant_file(goal: usize, fd: usize) -> bool {
     syscall(SYS_GOAL_GRANT_FILE, goal, fd, 0) == 0
+}
+
+/// Also lets the goal's agent pass read access to its helper.
+pub fn grant_delegable_file(goal: usize, fd: usize) -> bool {
+    syscall(SYS_GOAL_GRANT_DELEGABLE_FILE, goal, fd, 0) == 0
 }
 
 pub fn budget(goal: usize) -> Option<ReplyBudget> {

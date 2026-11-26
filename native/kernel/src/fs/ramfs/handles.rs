@@ -13,17 +13,24 @@ impl Node {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    ReadOnly,
+    ReadWrite,
+    ReadAndDelegate,
+}
+
 struct Handle {
     id: usize,
     node: Node,
     cursor: usize,
-    writable: bool,
+    access: Access,
 }
 
 impl Handle {
     fn allocate(
         fs: &mut RamFs,
-        writable: bool,
+        access: Access,
         open: impl FnOnce(&mut RamFs) -> Option<Node>,
     ) -> Option<Self> {
         // Reserve usize::MAX for syscall errors. Check before opening, since
@@ -37,21 +44,29 @@ impl Handle {
             id,
             node,
             cursor: 0,
-            writable,
+            access,
         })
     }
 }
 
 /// Pins the shell-authorized file while its goal can admit another child.
-pub(crate) struct FileGrant(Node);
+pub(crate) struct FileGrant {
+    node: Node,
+    delegable: bool,
+}
 
 impl FileGrant {
-    pub(crate) fn open_for_child(&self, fs: &mut RamFs) -> Option<TaskFs> {
-        TaskFs::from_grant(fs, self.0)
+    pub(crate) fn open_for_child(&self, fs: &mut RamFs, is_agent: bool) -> Option<TaskFs> {
+        let access = if is_agent && self.delegable {
+            Access::ReadAndDelegate
+        } else {
+            Access::ReadOnly
+        };
+        TaskFs::from_grant(fs, self.node, access)
     }
 
     pub(crate) fn release(self, fs: &mut RamFs) {
-        fs.release(self.0);
+        fs.release(self.node);
     }
 }
 
@@ -77,13 +92,28 @@ impl TaskFs {
     }
 
     pub(crate) fn grant(&self, fs: &mut RamFs, fd: usize, kind: GrantKind) -> Option<Self> {
-        Self::from_grant(fs, self.grant_node(fd, kind)?)
+        Self::from_grant(fs, self.grant_node(fd, kind)?, Access::ReadOnly)
     }
 
-    pub(crate) fn retain_file(&self, fs: &mut RamFs, fd: usize) -> Option<FileGrant> {
+    pub(crate) fn retain_file(
+        &self,
+        fs: &mut RamFs,
+        fd: usize,
+        delegable: bool,
+    ) -> Option<FileGrant> {
         let node = self.grant_node(fd, GrantKind::File)?;
         fs.retain(node);
-        Some(FileGrant(node))
+        Some(FileGrant { node, delegable })
+    }
+
+    /// An agent can hold one delegable file. Its helper receives only read access.
+    pub(crate) fn delegate_file(&self, fs: &mut RamFs) -> Option<Self> {
+        let file = self
+            .slots
+            .iter()
+            .flatten()
+            .find(|handle| handle.access == Access::ReadAndDelegate)?;
+        Self::from_grant(fs, file.node, Access::ReadOnly)
     }
 
     fn grant_node(&self, fd: usize, kind: GrantKind) -> Option<Node> {
@@ -91,8 +121,8 @@ impl TaskFs {
         (node.grant_kind() == kind).then_some(node)
     }
 
-    fn from_grant(fs: &mut RamFs, node: Node) -> Option<Self> {
-        let handle = Handle::allocate(fs, false, |_| Some(node))?;
+    fn from_grant(fs: &mut RamFs, node: Node, access: Access) -> Option<Self> {
+        let handle = Handle::allocate(fs, access, |_| Some(node))?;
         let mut child = Self::empty();
         child.slots[0] = Some(handle);
         Some(child)
@@ -139,7 +169,12 @@ impl TaskFs {
         writable: bool,
     ) -> Option<usize> {
         let slot = self.slots.iter().position(Option::is_none)?;
-        let handle = Handle::allocate(fs, writable, |fs| fs.open(base, path, writable))?;
+        let access = if writable {
+            Access::ReadWrite
+        } else {
+            Access::ReadOnly
+        };
+        let handle = Handle::allocate(fs, access, |fs| fs.open(base, path, writable))?;
         let id = handle.id;
         self.slots[slot] = Some(handle);
         Some(id)
@@ -207,7 +242,7 @@ impl TaskFs {
     pub(crate) fn write(&mut self, fs: &mut RamFs, fd: usize, bytes: &[u8]) -> Option<usize> {
         let slot = self.handle_slot(fd)?;
         let handle = self.slots[slot].as_mut()?;
-        if !handle.writable {
+        if handle.access != Access::ReadWrite {
             return None;
         }
         let count = fs.write_at(handle.node, handle.cursor, bytes)?;

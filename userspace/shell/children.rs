@@ -122,16 +122,22 @@ impl Children {
             child,
             GoalOptions {
                 reply_bytes: Some(bytes),
+                with_file,
                 ..
             },
-        )) = self.goal_child(arguments, GoalCommand::Run)
+        )) = self.goal_child(arguments, GoalCommand::AgentDelegate)
         else {
-            return print(b"usage: agent delegate --reply-bytes N <hello|echo>\r\n");
+            return print(b"usage: agent delegate [--with-file] --reply-bytes N <hello|echo>\r\n");
         };
         let Some(agent) = agent else {
             return print(b"no current agent\r\n");
         };
-        if let Some(handle) = agent::delegate(agent, child.selector, bytes) {
+        let delegate = if with_file {
+            agent::delegate_with_file
+        } else {
+            agent::delegate
+        };
+        if let Some(handle) = delegate(agent, child.selector, bytes) {
             child.handle = handle;
             print_handle(b"delegated child=", handle);
         } else {
