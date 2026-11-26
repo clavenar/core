@@ -1,6 +1,6 @@
 pub use clv_abi::agent::{
     AgentLaunch, AgentStatus, CURRENT_AGENT, ControlResult, DefinitionId, DefinitionPin,
-    FIND_GREETING_V1, FileDelegation, PlanIntent,
+    FIND_GREETING_V1, FIND_GREETING_V2, FileDelegation, FileToolInvocation, PlanIntent,
 };
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT,
@@ -8,9 +8,9 @@ use clv_abi::agent::{
 };
 use clv_abi::{
     MESSAGE_MAX_BYTES, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
-    SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
-    SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STATUS,
-    SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND,
+    SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_RESUME, SYS_AGENT_RUN,
+    SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST,
+    SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -140,16 +140,35 @@ pub fn delegate_with_file_arg(
     reply_bytes: usize,
     argument: &[u8],
 ) -> Option<usize> {
+    delegate_literal(
+        SYS_AGENT_DELEGATE_WITH_FILE_ARG,
+        agent,
+        program,
+        reply_bytes,
+        argument,
+    )
+}
+
+/// Requests the exact registered file tool using the agent's live grant and reservation.
+pub fn invoke_file_tool(agent: usize, request: &FileToolInvocation<'_>) -> Option<usize> {
+    delegate_literal(
+        SYS_AGENT_INVOKE_FILE_TOOL,
+        agent,
+        request.tool.0.try_into().ok()?,
+        request.reply_bytes,
+        request.argument,
+    )
+}
+
+fn delegate_literal(
+    call: usize,
+    agent: usize,
+    selector: usize,
+    reply_bytes: usize,
+    argument: &[u8],
+) -> Option<usize> {
     with_stack_bytes::<MESSAGE_MAX_BYTES>(argument, |address, length| {
-        ecall(
-            SYS_AGENT_DELEGATE_WITH_FILE_ARG,
-            agent,
-            program,
-            reply_bytes,
-            address,
-            length,
-        )
-        .0
+        ecall(call, agent, selector, reply_bytes, address, length).0
     })
 }
 

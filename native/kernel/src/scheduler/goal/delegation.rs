@@ -1,10 +1,11 @@
 use clv_abi::agent::CURRENT_AGENT;
 use clv_abi::audit::{
-    DelegationDenial, DelegationRecord, DelegationRecordWithCaller, DelegationRequest,
+    DelegationDenial, DelegationRecord, DelegationRecordWithCaller, DelegationRecordWithTool,
+    DelegationRequest, RequestedTool, UNRESOLVED_TOOL_PROGRAM,
 };
 use clv_abi::{LaunchParent, Program};
 
-use super::{Goal, MemberRole};
+use super::{DelegationTarget, Goal, MemberRole};
 use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::ipc::Message;
 use crate::scheduler::{PreparedLaunch, Scheduler, Task, TaskState};
@@ -13,22 +14,24 @@ impl Scheduler {
     pub(crate) fn delegate(
         &mut self,
         fs: &mut RamFs,
-        mut request: DelegationRequest,
+        agent_handle: usize,
+        target: DelegationTarget,
+        reply_bytes: usize,
         argument: Result<Option<Message>, DelegationDenial>,
     ) -> Option<usize> {
-        let (goal, agent, owner) = if request.agent == CURRENT_AGENT {
+        let (goal, agent, owner, agent_handle) = if agent_handle == CURRENT_AGENT {
             let child = self.tasks[self.current].launch.as_ref()?.handle;
             let goal = self.goal.as_ref()?;
             let member = goal.members().find(|member| member.is_live(child))?;
             let MemberRole::Agent(binding) = member.role else {
                 return None;
             };
-            request.agent = binding.handle;
-            (goal, member, LaunchParent::Agent(child))
+            (goal, member, LaunchParent::Agent(child), binding.handle)
         } else {
-            let (goal, member, _) = self.agent_member(request.agent)?;
-            (goal, member, LaunchParent::Shell)
+            let (goal, member, _) = self.agent_member(agent_handle)?;
+            (goal, member, LaunchParent::Shell, agent_handle)
         };
+        let (request, tool) = target.resolve(agent_handle, reply_bytes);
         let parent = agent.handle;
         let launch = if agent.completion.is_some() {
             Err(DelegationDenial::AgentFinished)
@@ -54,14 +57,51 @@ impl Scheduler {
             Err(reason) => Err(*reason),
         };
         goal.delegation_audit.record(
-            DelegationRecordWithCaller {
-                decision: DelegationRecord { request, outcome },
-                caller: owner,
+            DelegationRecordWithTool {
+                delegation: DelegationRecordWithCaller {
+                    decision: DelegationRecord { request, outcome },
+                    caller: owner,
+                },
+                tool,
             }
             .encode(),
         );
         let (launch, child_fs, argument) = admission.ok()?;
         Some(self.install_child(launch, child_fs, argument, None, TaskState::Runnable))
+    }
+}
+
+impl DelegationTarget {
+    fn resolve(
+        self,
+        agent: usize,
+        reply_bytes: usize,
+    ) -> (DelegationRequest, Option<RequestedTool<'static>>) {
+        let (program, with_file, tool) = match self {
+            Self::Program {
+                selector,
+                with_file,
+            } => (selector, with_file, None),
+            Self::FileTool(id) => {
+                let binding = crate::programs::file_tool(id);
+                let tool = RequestedTool {
+                    id,
+                    image_sha256: binding.map(|(_, hash)| hash),
+                };
+                let selector =
+                    binding.map_or(UNRESOLVED_TOOL_PROGRAM, |(program, _)| program as usize);
+                (selector, true, Some(tool))
+            }
+        };
+        (
+            DelegationRequest {
+                agent,
+                program,
+                reply_bytes,
+                with_file,
+            },
+            tool,
+        )
     }
 }
 

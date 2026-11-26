@@ -1,5 +1,6 @@
 use clv_abi::audit::AUDIT_CAPACITY;
 
+use super::DelegationAudit;
 use crate::scheduler::Scheduler;
 
 #[derive(Default)]
@@ -41,14 +42,18 @@ impl Scheduler {
     pub(crate) fn goal_delegation_audit(
         &self,
         handle: usize,
-        with_caller: bool,
+        view: DelegationAudit,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize)> {
         let history = &self.shell_goal(handle)?.delegation_audit;
-        if with_caller {
-            history.read(copy)
-        } else {
-            history.read_projected(|[decision @ .., _]| *decision, copy)
+        match view {
+            DelegationAudit::Decision => {
+                history.read_projected(|row| *row.first_chunk::<6>().unwrap(), copy)
+            }
+            DelegationAudit::Caller => {
+                history.read_projected(|row| *row.first_chunk::<7>().unwrap(), copy)
+            }
+            DelegationAudit::Tool => history.read(copy),
         }
     }
 

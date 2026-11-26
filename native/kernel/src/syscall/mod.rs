@@ -2,16 +2,18 @@ use clv_abi::agent::{
     AgentLaunch, NO_DEFINITION, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
     RUN_SUSPENDED,
 };
-use clv_abi::audit::{DelegationDenial, DelegationRequest};
+use clv_abi::audit::DelegationDenial;
 use clv_abi::goal::{CreateOptions, FileRecipient, ReadLimits};
+use clv_abi::tool::ToolId;
 use clv_abi::{
     ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE,
     PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, Program, ReplyKind, RequestKind,
     SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE, SYS_AGENT_DELEGATE_WITH_FILE_ARG,
-    SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET,
-    SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION,
-    SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE, SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT,
-    SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
+    SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
+    SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STATUS,
+    SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE, SYS_EVENT_WAIT,
+    SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_AUDIT_WITH_TOOL,
+    SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
     SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
     SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
     SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_REPLY_AUDIT,
@@ -31,7 +33,9 @@ use crate::fs::ramfs::{GrantArgument, RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
 use crate::ipc::pipe::PipeResult;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::usercopy::UserStack;
-use crate::scheduler::{LaunchScope, Mailbox, ReceiveResult, Scheduler, WaitResult};
+use crate::scheduler::{
+    DelegationAudit, DelegationTarget, LaunchScope, Mailbox, ReceiveResult, Scheduler, WaitResult,
+};
 
 const CONSOLE_WRITE_LIMIT: usize = 128;
 const REG_A0: usize = 10;
@@ -156,12 +160,18 @@ pub(crate) fn dispatch(
             frame.registers[REG_A3] = spent;
             flags
         }),
-        SYS_GOAL_AUDIT | SYS_GOAL_AUDIT_WITH_CALLER => write_audit_result(
-            frame,
-            scheduler.goal_delegation_audit(a0, number == SYS_GOAL_AUDIT_WITH_CALLER, |bytes| {
-                stack.copy_to_user(bytes, a1, a2)
-            }),
-        ),
+        SYS_GOAL_AUDIT | SYS_GOAL_AUDIT_WITH_CALLER | SYS_GOAL_AUDIT_WITH_TOOL => {
+            let view = match number {
+                SYS_GOAL_AUDIT => DelegationAudit::Decision,
+                SYS_GOAL_AUDIT_WITH_CALLER => DelegationAudit::Caller,
+                _ => DelegationAudit::Tool,
+            };
+            write_audit_result(
+                frame,
+                scheduler
+                    .goal_delegation_audit(a0, view, |bytes| stack.copy_to_user(bytes, a1, a2)),
+            )
+        }
         SYS_GOAL_REPLY_AUDIT => write_audit_result(
             frame,
             scheduler.goal_reply_audit(a0, |bytes| stack.copy_to_user(bytes, a1, a2)),
@@ -248,14 +258,22 @@ pub(crate) fn dispatch(
                 });
             write_agent_launch(frame, launch)
         }
-        SYS_AGENT_DELEGATE | SYS_AGENT_DELEGATE_WITH_FILE | SYS_AGENT_DELEGATE_WITH_FILE_ARG => {
-            let request = DelegationRequest {
-                agent: a0,
-                program: a1,
-                reply_bytes: a2,
-                with_file: number != SYS_AGENT_DELEGATE,
+        SYS_AGENT_DELEGATE
+        | SYS_AGENT_DELEGATE_WITH_FILE
+        | SYS_AGENT_DELEGATE_WITH_FILE_ARG
+        | SYS_AGENT_INVOKE_FILE_TOOL => {
+            let target = if number == SYS_AGENT_INVOKE_FILE_TOOL {
+                DelegationTarget::FileTool(ToolId(a1 as u64))
+            } else {
+                DelegationTarget::Program {
+                    selector: a1,
+                    with_file: number != SYS_AGENT_DELEGATE,
+                }
             };
-            let argument = if number == SYS_AGENT_DELEGATE_WITH_FILE_ARG {
+            let argument = if matches!(
+                number,
+                SYS_AGENT_DELEGATE_WITH_FILE_ARG | SYS_AGENT_INVOKE_FILE_TOOL
+            ) {
                 copy_request(
                     scheduler,
                     RequestKind::Argument,
@@ -268,7 +286,7 @@ pub(crate) fn dispatch(
                 Ok(None)
             };
             scheduler
-                .delegate(fs, request, argument)
+                .delegate(fs, a0, target, a2, argument)
                 .unwrap_or(SYSCALL_ERROR)
         }
         SYS_AGENT_STATUS | SYS_AGENT_STATUS_WITH_DEFINITION => {

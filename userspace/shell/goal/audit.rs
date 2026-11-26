@@ -1,38 +1,68 @@
 use clv::goal;
 use clv_abi::audit::{
-    DelegationDenial, DelegationRecordWithCaller, ReadLimitScope, ReadRecordWithLimit, ReplyRecord,
+    AUDIT_CAPACITY, DelegationDenial, DelegationRecordWithTool, ReadLimitScope,
+    ReadRecordWithLimit, ReplyRecord,
 };
+use clv_abi::tool::FILE_TOOLS;
 use clv_abi::{LaunchParent, Program};
 
-use super::{DIGITS, amount, decimal, hex, print, print_line};
+use super::{DIGITS, amount, decimal, hex, hex_digest, print, print_line};
 
 pub(super) fn show(handle: usize, option: &[u8]) {
-    let shown = match option {
-        b"--reads" => goal::read_audit_with_limit(handle).map(|(snapshot, total)| {
-            print_snapshot(handle, snapshot, print_read);
-            print_line(&[b"read_bytes=", decimal(total, &mut [0; DIGITS])]);
-        }),
-        b"--replies" => {
-            goal::reply_audit(handle).map(|snapshot| print_snapshot(handle, snapshot, print_reply))
-        }
-        _ => goal::audit_with_caller(handle)
-            .map(|snapshot| print_snapshot(handle, snapshot, print_delegation)),
-    };
-    if shown.is_none() {
+    if show_rows(handle, option).is_none() {
         print(b"cannot read goal audit\r\n");
+    }
+}
+
+fn show_rows(handle: usize, option: &[u8]) -> Option<()> {
+    match option {
+        b"--reads" => {
+            let mut records = [Default::default(); AUDIT_CAPACITY];
+            let (rows, overwritten, total) =
+                goal::read_audit_rows_with_limit(handle, &mut records)?;
+            print_snapshot(
+                handle,
+                overwritten,
+                rows.iter().map(ReadRecordWithLimit::decode),
+                print_read,
+            )?;
+            print_line(&[b"read_bytes=", decimal(total, &mut [0; DIGITS])]);
+            Some(())
+        }
+        b"--replies" => {
+            let mut records = [Default::default(); AUDIT_CAPACITY];
+            let (rows, overwritten) = goal::reply_audit_rows(handle, &mut records)?;
+            print_snapshot(
+                handle,
+                overwritten,
+                rows.iter().map(ReplyRecord::decode),
+                print_reply,
+            )
+        }
+        _ => {
+            let mut records = [Default::default(); AUDIT_CAPACITY];
+            let (rows, overwritten) = goal::audit_with_tool(handle, &mut records)?;
+            print_snapshot(
+                handle,
+                overwritten,
+                rows.iter().map(DelegationRecordWithTool::decode),
+                print_delegation,
+            )
+        }
     }
 }
 
 fn print_snapshot<Record>(
     handle: usize,
-    snapshot: goal::AuditSnapshot<Record>,
-    print_entry: impl Fn(&Record),
-) {
-    let entries = snapshot.entries.iter().flatten();
-    print_header(handle, entries.clone().count(), snapshot.overwritten);
+    overwritten: usize,
+    entries: impl ExactSizeIterator<Item = Option<Record>>,
+    print_entry: impl Fn(Record),
+) -> Option<()> {
+    print_header(handle, entries.len(), overwritten);
     for entry in entries {
-        print_entry(entry);
+        print_entry(entry?);
     }
+    Some(())
 }
 
 fn print_header(handle: usize, count: usize, overwritten: usize) {
@@ -46,12 +76,16 @@ fn print_header(handle: usize, count: usize, overwritten: usize) {
     ]);
 }
 
-fn print_delegation(entry: &DelegationRecordWithCaller) {
+fn print_delegation(record: DelegationRecordWithTool<'_>) {
+    let entry = record.delegation;
     let child;
     let (decision, detail): (&[u8], &[u8]) = match entry.decision.outcome {
         Ok(handle) => {
             child = hex(handle);
             (b" accepted child=", &child)
+        }
+        Err(DelegationDenial::UnknownProgram) if record.tool.is_some() => {
+            (b" denied=", b"unknown-tool")
         }
         Err(reason) => (b" denied=", denial_name(reason)),
     };
@@ -64,6 +98,21 @@ fn print_delegation(entry: &DelegationRecordWithCaller) {
         }
     };
     let request = entry.decision.request;
+    let raw_id;
+    let digest;
+    let mut tool_name: &[u8] = b"";
+    let mut image_hash: &[u8] = b"";
+    if let Some(tool) = record.tool {
+        raw_id = hex(tool.id.0 as usize);
+        tool_name = FILE_TOOLS
+            .iter()
+            .find(|item| item.id == tool.id)
+            .map_or(&raw_id[..], |item| item.name.as_bytes());
+        if let Some(hash) = tool.image_sha256 {
+            digest = hex_digest(hash);
+            image_hash = &digest;
+        }
+    }
     print_line(&[
         b"agent=",
         &hex(request.agent),
@@ -79,10 +128,18 @@ fn print_delegation(entry: &DelegationRecordWithCaller) {
         detail,
         caller,
         identity,
+        if tool_name.is_empty() { b"" } else { b" tool=" },
+        tool_name,
+        if image_hash.is_empty() {
+            b""
+        } else {
+            b" elf_sha256="
+        },
+        image_hash,
     ]);
 }
 
-fn print_reply(entry: &ReplyRecord) {
+fn print_reply(entry: ReplyRecord) {
     print_line(&[
         b"child=",
         &hex(entry.child),
@@ -98,7 +155,7 @@ fn print_reply(entry: &ReplyRecord) {
     ]);
 }
 
-fn print_read(entry: &ReadRecordWithLimit) {
+fn print_read(entry: ReadRecordWithLimit) {
     let read = &entry.read;
     print_line(&[
         b"child=",

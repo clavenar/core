@@ -1,4 +1,17 @@
+use clv_abi::agent::SHA256_BYTES;
+use clv_abi::tool::{FILE_TOOLS, ToolId};
 use clv_abi::{PROGRAMS, Program};
+
+static TOOL_IMAGE_HASHES: [[u8; SHA256_BYTES]; FILE_TOOLS.len()] =
+    include!(concat!(env!("OUT_DIR"), "/tool-image-hashes.rs"));
+
+pub(crate) fn file_tool(id: ToolId) -> Option<(Program, &'static [u8; SHA256_BYTES])> {
+    FILE_TOOLS
+        .iter()
+        .zip(&TOOL_IMAGE_HASHES)
+        .find(|(tool, _)| tool.id == id)
+        .map(|(tool, digest)| (tool.program, digest))
+}
 
 pub(crate) const SHELL_TASK_INDEX: usize = 1;
 pub(crate) const TASK_COUNT: usize = PROGRAMS.len() + 1;

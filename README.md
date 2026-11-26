@@ -42,10 +42,11 @@ version from `native/kernel/Cargo.toml`. It prints `boot frame=0x...` with the
 physical address of task 1's Sv39 root table.
 
 The build links the shell and each registered program as separate RV64 ELFs
-and embeds them in the kernel. To add a tool, put its entry point in
-`userspace/<name>/main.rs` and append its name to the
-[program registry](crates/clv-abi/src/program.rs). The build, shell and kernel
-use that registry for names and stable launch selectors.
+and embeds them in the kernel. To add a boot program, put its entry point in
+`userspace/<name>/main.rs` and append its name to the program registry. The
+build, shell and kernel use that registry for names and stable launch
+selectors. A versioned file tool maps an exact tool ID to one of those
+programs. [Program registry](crates/clv-abi/src/program.rs) · [File tool registry](crates/clv-abi/src/tool.rs)
 The loader accepts static, little-endian ELF64 executables with one
 read/execute segment of at most 20 KiB at `0x00400000`. The loader allocates
 one to five pages based on the segment's memory size (`p_memsz`) and zero-fills
@@ -743,7 +744,7 @@ completion or cancellation, until the owner closes the goal. [Definition source]
 ```text
 goal create --children 2 --allow-helper grep --read-bytes 18 --reply-bytes 36
 goal grant-file --delegate-to grep --argument Hello /hello.txt
-agent run hello --mock find-greeting@2
+agent run hello --mock find-greeting@3
 goal status
 goal budget
 agent run --suspended hello --mock find-greeting@1
@@ -756,7 +757,7 @@ goal audit
 goal close
 ```
 
-Revision 2 prints `cannot start agent`. The goal remains `Ready` with
+Revision 3 prints `cannot start agent`. The goal remains `Ready` with
 `available=36 reserved=0 spent=0`. Revision 1 starts in the same goal.
 Both status snapshots show `definition=find-greeting@1 sha256=` followed
 by the same 64 hex digits. Compare those digits on the build host with
@@ -768,6 +769,44 @@ The pin stays visible. The delegation audit shows `denied=no-delegable-file
 caller=agent`, and `recv hello` prints `cannot delegate child`. Before
 `goal close`, `goal audit --reads` and `goal budget` show zero bytes read
 and zero reply bytes spent.
+
+### Invoke a registered file tool
+
+`find-greeting@2` asks the kernel to invoke `text.search@1` with the literal
+`Hello` and an 18-byte reply reservation. This tool accepts a read-only
+regular-file grant and a literal of 0–64 bytes. The existing `grep`
+executable returns matching lines in a `Matches` reply. An empty literal
+matches every line. A search with no matches returns an empty `Matches`
+reply. Read failures and results exceeding the 64-byte mailbox return
+`ReadFailed` and `ResultTooLarge`, respectively. [Revision 2 definition](userspace/hello/definitions/find-greeting-v2.toml)
+
+```text
+goal create --children 2 --allow-helper grep --read-bytes 18 --reply-bytes 36
+goal grant-file --delegate-to grep --argument Hello /hello.txt
+agent run hello --mock find-greeting@2
+wait hello
+recv hello
+agent status
+goal audit
+goal audit --reads
+goal audit --replies
+goal budget
+goal close
+```
+
+`recv hello` prints `Hello from RamFS`. The delegation audit shows
+`program=grep`, the accepted child, `caller=agent`, `tool=text.search@1`
+and `elf_sha256=` for the exact linked `grep.elf` embedded in this build.
+`agent status` separately reports the SHA-256 of the revision 2 TOML file.
+The helper reads 18 bytes and sends 18 reply bytes. Forwarding the result
+spends another 18 reply bytes.
+
+Repeat the sequence with `goal grant-file --delegate-to grep --argument RamFS /hello.txt`.
+The audit identifies the same tool and image and reports
+`denied=argument-not-allowed caller=agent`. The read history is empty.
+The only reply is the agent's zero-byte failure, and all 36 reply bytes are
+available when the agent exits. The shorthand `find-greeting` still selects
+revision 1, whose ordinary program delegation has no tool identity.
 
 ### Share a read allowance across two helper launches
 
@@ -1128,8 +1167,10 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 61 `goal_read_audit_with_limit` | Same arguments as call 57 | Same count, overwritten count and lifetime read bytes as call 57, with the effective limit identified in each entry |
 | 62 `goal_grant_file_to_with_arg` | `a0` goal handle, `a1` shell file handle, `a2` helper selector, `a3` literal address, `a4` literal length (0–64 bytes) | 0 when the file and its argument restriction are attached, -1 on rejection |
 | 63 `agent_status_with_definition` | `a0` agent handle, `a1` shell stack destination, `a2` capacity in bytes | Same status registers as call 39, plus a 34-byte definition record in the buffer |
+| 64 `agent_invoke_file_tool` | `a0` agent handle or zero for self, `a1` versioned tool ID, `a2` reply reservation, `a3` literal address, `a4` literal length (0–64) | Fresh helper handle on admission, or -1 on rejection |
+| 65 `goal_audit_with_tool` | Same arguments as call 52 | Retained delegation count and overwritten count as in call 59, with 104 bytes per entry |
 
-The shell owns the goal and controls its agents. Calls 49, 51 and 56 also
+The shell owns the goal and controls its agents. Calls 49, 51, 56 and 64 also
 accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
 agent. The kernel resolves its original launch and agent handle. Only the shell
 can delegate by supplying an explicit agent handle. An unauthorized caller
@@ -1157,7 +1198,7 @@ the available balance. Bits 2 and 3 select the request format.
 | --- | --- | --- |
 | Both clear | `DelegateWithFile` (tag 4) | Two little-endian RV64 words for the helper selector and its reply allowance, followed by 0–64 literal argument bytes |
 | Bit 2 only | `PlanIntent` (tag 5) | One intent byte. Intent 1 for `hello` pins `find-greeting@1`. Other legacy intents retain their original delivery behavior. |
-| Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. The built-in pair `[1, 1]` selects `find-greeting@1` for `hello`. |
+| Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. The pairs `[1, 1]` and `[1, 2]` select the corresponding `find-greeting` revisions for `hello`. |
 
 Unknown flag bits, both format bits set, an unreadable buffer or the wrong
 length fail before admission. For tag 6 the kernel also verifies that the
@@ -1201,18 +1242,23 @@ to pass that file on, even while the goal still holds a reference.
 
 Call 62 binds the selected program and an owned copy of its literal argument
 to the grant. A zero length pins an explicitly empty argument and ignores the
-address. A nonempty literal must fit in the caller's stack. Call 56 must
+address. A nonempty literal must fit in the caller's stack. Calls 56 and 64 must
 present the exact bytes to receive the file. Call 51 omits the argument and
 therefore receives denial code 12 on a pinned grant, including an empty pin.
 A mismatch allocates no helper, file handle or reply reservation. Revoking a
 ready goal's file also releases its pinned argument.
 
-Calls 49, 51 and 56 check the live agent's requested program against the
+Call 64 resolves the requested file tool in the boot registry before helper
+admission. The high 32 bits of the ID select the tool family and the low 32
+bits select the exact revision. `text.search@1` has ID `0x0000000100000001`.
+An unknown revision fails before any helper launch or budget reservation.
+
+Calls 49, 51, 56 and 64 check the selected helper program against the
 goal's allowed helper before checking the program slot or reserving resources.
 On admission they transfer a byte count from zero up to the agent's remaining
 allowance before the helper's first instruction. Both shares count toward
 the goal's reserved total. Call 49 starts the helper with zero in `a1`, `a2`
-and `a3`. Calls 51 and 56 check the selected helper against the recipient on the
+and `a3`. Calls 51, 56 and 64 check the selected helper against the recipient on the
 agent's open delegable handle before allocating a read-only handle with an
 independent cursor.
 The new file handle arrives in `a1`, file kind 2 in `a2` and zero in `a3`.
@@ -1224,12 +1270,12 @@ program slot stays busy while its old parent has a pending reply, wait
 result, shell event or open pipe reader. This lets the parent collect the
 result even when another caller tries to launch the same program.
 
-Calls 55 and 56 copy up to 64 literal argument bytes into the launch mailbox
+Calls 55, 56 and 64 copy up to 64 literal argument bytes into the launch mailbox
 before the child can run. The child reads the argument with call 25. An empty
 argument has tag 3. Invalid arguments fail before admission or reservation.
 
-Calls 52 and 59 read the same four-entry delegation history for calls 49, 51
-and 56. Only the shell that owns the goal can read it. The kernel records
+Calls 52, 59 and 65 read the same four-entry delegation history for calls 49,
+51, 56 and 64. Only the shell that owns the goal can read it. The kernel records
 both accepted and denied requests after authenticating the caller and
 resolving the agent handle. Each 48-byte call 52 entry begins with the agent
 handle, requested program selector, requested reply bytes and file flag
@@ -1243,6 +1289,14 @@ Call 59 appends a seventh little-endian RV64 word to each entry, making
 calling agent's original child launch handle. The kernel captures it at
 the delegation decision. Both formats use the same order and overwritten
 count.
+
+Call 65 extends the 56-byte caller record with a state word, the requested
+tool ID and 32 digest bytes in SHA-256 order. State 0 identifies an ordinary
+program request and has zeroed tool fields. State 1 records an unresolved ID
+with a zero digest. State 2 records the exact registered ID and the digest of
+its embedded ELF, including when the live grant denies the request. For an
+unresolved ID the program word is all ones and the unknown-selector denial
+uses code 2. The shell displays that denial as `unknown-tool`.
 
 | Denial code | Reason |
 | --- | --- |
@@ -1286,7 +1340,7 @@ The goal takes precedence when the remaining amounts are equal. A successful
 copy charges the goal once and, for a helper, spends the same number of bytes
 from its helper allowance. Denials preserve both balances and the cursor.
 
-Calls 52, 53, 57, 59 and 61 each copy up to four retained entries, oldest
+Calls 52, 53, 57, 59, 61 and 65 each copy up to four retained entries, oldest
 first. A short buffer or an invalid destination range returns -1 before copying
 any bytes. Zero capacity succeeds for an empty audit. Reads preserve the entries
 and the overwritten count, which saturates at the largest RV64 unsigned value.

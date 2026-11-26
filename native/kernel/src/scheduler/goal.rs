@@ -8,14 +8,26 @@ use self::budget::ReplyReservation;
 use self::reads::ReadBudget;
 use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin};
-use clv_abi::audit::{EncodedRecordWithCaller, EncodedReplyRecord, ReplyRecord};
+use clv_abi::audit::{EncodedRecordWithTool, EncodedReplyRecord, ReplyRecord};
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
     CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus, MAX_CHILDREN, ReadLimits,
 };
+use clv_abi::tool::ToolId;
 
 use super::{AgentBinding, SHELL_TASK_INDEX, Scheduler, TaskState};
 use crate::fs::ramfs::{FileGrant, GrantArgument, RamFs, TaskFs};
+
+pub(crate) enum DelegationTarget {
+    Program { selector: usize, with_file: bool },
+    FileTool(ToolId),
+}
+
+pub(crate) enum DelegationAudit {
+    Decision,
+    Caller,
+    Tool,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MemberRole {
@@ -60,7 +72,7 @@ pub(super) struct Goal {
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
     file: Option<FileGrant>,
-    delegation_audit: AuditHistory<EncodedRecordWithCaller>,
+    delegation_audit: AuditHistory<EncodedRecordWithTool>,
     reply_audit: AuditHistory<EncodedReplyRecord>,
 }
 

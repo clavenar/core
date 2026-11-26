@@ -7,6 +7,7 @@ pub mod audit;
 pub mod budget;
 pub mod goal;
 mod program;
+pub mod tool;
 pub use program::{PROGRAMS, Program};
 
 pub const SYS_PROBE: usize = 0;
@@ -73,6 +74,8 @@ pub const SYS_GOAL_REVOKE_FILE: usize = 60;
 pub const SYS_GOAL_READ_AUDIT_WITH_LIMIT: usize = 61;
 pub const SYS_GOAL_GRANT_FILE_TO_WITH_ARG: usize = 62;
 pub const SYS_AGENT_STATUS_WITH_DEFINITION: usize = 63;
+pub const SYS_AGENT_INVOKE_FILE_TOOL: usize = 64;
+pub const SYS_GOAL_AUDIT_WITH_TOOL: usize = 65;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;

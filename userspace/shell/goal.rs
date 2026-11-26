@@ -244,18 +244,13 @@ fn print_agent_status(agent_handle: Option<usize>) {
     {
         print_agent_handles(handle, b" goal=", snapshot.goal);
         if let Some(pin) = pin {
-            let mut hash = [0; 2 * SHA256_BYTES];
-            for (&byte, pair) in pin.sha256.iter().zip(hash.chunks_exact_mut(2)) {
-                pair[0] = HEX_DIGITS[usize::from(byte >> 4)];
-                pair[1] = HEX_DIGITS[usize::from(byte & 15)];
-            }
             print_line(&[
                 b"definition=",
                 pin.id.intent.name().as_bytes(),
                 b"@",
                 decimal(usize::from(pin.id.revision), &mut [0; DIGITS]),
                 b" sha256=",
-                &hash,
+                &hex_digest(pin.sha256),
             ]);
         }
         match snapshot.status {
@@ -267,6 +262,15 @@ fn print_agent_status(agent_handle: Option<usize>) {
     } else {
         print(b"no current agent\r\n");
     }
+}
+
+fn hex_digest(hash: &[u8; SHA256_BYTES]) -> [u8; 2 * SHA256_BYTES] {
+    let mut text = [0; 2 * SHA256_BYTES];
+    for (&byte, pair) in hash.iter().zip(text.chunks_exact_mut(2)) {
+        pair[0] = HEX_DIGITS[usize::from(byte >> 4)];
+        pair[1] = HEX_DIGITS[usize::from(byte & 15)];
+    }
+    text
 }
 
 fn print_status(status: GoalStatus) {

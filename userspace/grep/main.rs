@@ -2,6 +2,7 @@
 #![no_main]
 
 use clv::{LaunchRequest, fs};
+use clv_abi::tool::TEXT_SEARCH_V1;
 use clv_abi::{GrantKind, MESSAGE_MAX_BYTES, ReplyKind, RequestKind};
 use core::panic::PanicInfo;
 
@@ -20,7 +21,7 @@ extern "C" fn _start(_task: usize, file: usize, grant: usize) -> ! {
         _ => Err(ReplyKind::ReadFailed),
     };
     let status = match result {
-        Ok(length) if clv::send_reply(ReplyKind::Matches, &output[..length]) => {
+        Ok(length) if clv::send_reply(TEXT_SEARCH_V1.success_reply, &output[..length]) => {
             usize::from(length == 0)
         }
         Ok(_) => 2,

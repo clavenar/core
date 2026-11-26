@@ -1,5 +1,7 @@
 //! Wire formats for the goal owner's delegation, reply and RamFS read histories.
 
+use crate::agent::SHA256_BYTES;
+use crate::tool::ToolId;
 use crate::{LaunchParent, NO_CHILD_HANDLE};
 
 pub const AUDIT_CAPACITY: usize = 4;
@@ -7,6 +9,10 @@ pub const AUDIT_CAPACITY: usize = 4;
 pub type EncodedRecord = [[u8; 8]; 6];
 /// Call 59 appends the calling agent's child launch handle. Zero identifies the shell.
 pub type EncodedRecordWithCaller = [[u8; 8]; 7];
+/// Call 65 appends a tool state, raw versioned ID and the measured ELF SHA-256.
+pub type EncodedRecordWithTool = [[u8; 8]; 13];
+/// Program selector in every audit view when the requested tool revision is unknown.
+pub const UNRESOLVED_TOOL_PROGRAM: usize = usize::MAX;
 /// Child, requested bytes, allowance before the decision, and flags, in RV64 words.
 /// Flag bit 0 marks an unlimited allowance and bit 1 marks a budget denial.
 pub type EncodedReplyRecord = [[u8; 8]; 4];
@@ -134,6 +140,57 @@ impl DelegationRecordWithCaller {
         Some(Self {
             decision: DelegationRecord::decode(decision)?,
             caller,
+        })
+    }
+}
+
+pub struct RequestedTool<'a> {
+    pub id: ToolId,
+    /// Present when the exact requested revision resolved in the kernel registry.
+    pub image_sha256: Option<&'a [u8; SHA256_BYTES]>,
+}
+
+pub struct DelegationRecordWithTool<'a> {
+    pub delegation: DelegationRecordWithCaller,
+    pub tool: Option<RequestedTool<'a>>,
+}
+
+impl<'a> DelegationRecordWithTool<'a> {
+    pub fn encode(&self) -> EncodedRecordWithTool {
+        let mut record = [[0; 8]; 13];
+        let (prefix, [state, id, digest @ ..]) = record.split_last_chunk_mut::<6>().unwrap();
+        prefix.copy_from_slice(&self.delegation.encode());
+        if let Some(tool) = &self.tool {
+            *id = tool.id.0.to_le_bytes();
+            let tag: u64 = if let Some(hash) = tool.image_sha256 {
+                digest.as_flattened_mut().copy_from_slice(hash);
+                2
+            } else {
+                1
+            };
+            *state = tag.to_le_bytes();
+        }
+        record
+    }
+
+    pub fn decode(record: &'a EncodedRecordWithTool) -> Option<Self> {
+        let (prefix, [state, id, digest @ ..]) = record.split_last_chunk::<6>()?;
+        let id = ToolId(u64::from_le_bytes(*id));
+        let tool = match u64::from_le_bytes(*state) {
+            0 => None,
+            1 => Some(RequestedTool {
+                id,
+                image_sha256: None,
+            }),
+            2 => Some(RequestedTool {
+                id,
+                image_sha256: Some(digest.as_flattened().try_into().ok()?),
+            }),
+            _ => return None,
+        };
+        Some(Self {
+            delegation: DelegationRecordWithCaller::decode(prefix.try_into().ok()?)?,
+            tool,
         })
     }
 }

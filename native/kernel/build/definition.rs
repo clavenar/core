@@ -1,7 +1,9 @@
 use clv_abi::Program;
 use clv_abi::agent::{
-    DELEGATION_REQUEST_MAX_BYTES, DefinitionPin, FIND_GREETING_V1, FileDelegation,
+    DELEGATION_REQUEST_MAX_BYTES, DefinitionId, DefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2,
+    FileDelegation, FileToolInvocation,
 };
+use clv_abi::tool::FILE_TOOLS;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
@@ -18,35 +20,51 @@ struct Definition {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Delegation {
-    program: String,
+    program: Option<String>,
+    tool: Option<String>,
     argument: String,
     reply_bytes: usize,
 }
 
-pub(super) fn build(path: &Path, output: &Path) {
+pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
+    let stem = format!("{}-v{}", id.intent.name(), id.revision);
+    let path = directory.join(format!("{stem}.toml"));
     println!("cargo:rerun-if-changed={}", path.display());
     let source = fs::read_to_string(path).expect("could not read the find-greeting definition");
     let definition: Definition = toml::from_str(&source).expect("invalid find-greeting definition");
-    let id = FIND_GREETING_V1;
     assert_eq!(definition.name, id.intent.name());
     assert_eq!(definition.revision, id.revision);
     assert_eq!(definition.agent, id.intent.program().name());
 
     let step = definition.delegate_with_file;
-    let request = FileDelegation {
-        program: Program::named(step.program.as_bytes()).expect("unknown definition helper"),
-        argument: step.argument.as_bytes(),
-        reply_bytes: step.reply_bytes,
-    };
+    let argument = step.argument.as_bytes();
+    let reply_bytes = step.reply_bytes;
     let mut buffer = [0; DELEGATION_REQUEST_MAX_BYTES];
-    let action = request
-        .encode(&mut buffer)
-        .expect("definition argument exceeds the IPC limit");
-    fs::write(output.join("find-greeting-v1.action"), action).unwrap();
+    let action = match (id, step.program, step.tool) {
+        (FIND_GREETING_V1, Some(name), None) => FileDelegation {
+            program: Program::named(name.as_bytes()).expect("unknown definition helper"),
+            argument,
+            reply_bytes,
+        }
+        .encode(&mut buffer),
+        (FIND_GREETING_V2, None, Some(name)) => FileToolInvocation {
+            tool: FILE_TOOLS
+                .iter()
+                .find(|tool| tool.name == name)
+                .expect("unknown file tool revision")
+                .id,
+            argument,
+            reply_bytes,
+        }
+        .encode(&mut buffer),
+        _ => panic!("invalid delegation target for {stem}"),
+    }
+    .expect("definition argument exceeds the IPC limit");
+    fs::write(output.join(format!("{stem}.action")), action).unwrap();
     let sha256 = Sha256::digest(source.as_bytes()).into();
     let pin = DefinitionPin {
         id,
         sha256: &sha256,
     };
-    fs::write(output.join("find-greeting-v1.pin"), pin.encode()).unwrap();
+    fs::write(output.join(format!("{stem}.pin")), pin.encode()).unwrap();
 }

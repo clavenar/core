@@ -1,18 +1,18 @@
 use clv_abi::audit::{
-    AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, ReadRecord, ReadRecordWithLimit,
-    ReplyRecord,
+    AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, EncodedReadRecordWithLimit,
+    EncodedRecordWithTool, EncodedReplyRecord, ReadRecord, ReadRecordWithLimit, ReplyRecord,
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
     CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus, ReadLimits,
 };
 use clv_abi::{
-    MESSAGE_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_BUDGET,
-    SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE, SYS_GOAL_CREATE_WITH_OPTIONS,
-    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
-    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT,
-    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
+    MESSAGE_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
+    SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
+    SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
+    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_REPLY_AUDIT,
+    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -142,9 +142,26 @@ pub fn audit_with_caller(goal: usize) -> Option<AuditSnapshot<DelegationRecordWi
     )
 }
 
+/// Borrows the extended wire records so each decision can be decoded in place.
+pub fn audit_with_tool(
+    goal: usize,
+    records: &mut [EncodedRecordWithTool; AUDIT_CAPACITY],
+) -> Option<(&[EncodedRecordWithTool], usize)> {
+    let (rows, overwritten, _) = audit_rows(SYS_GOAL_AUDIT_WITH_TOOL, goal, records)?;
+    Some((rows, overwritten))
+}
+
 /// Reads the goal members' reply-budget decisions in send-attempt order.
 pub fn reply_audit(goal: usize) -> Option<AuditSnapshot<ReplyRecord>> {
     Some(snapshot(SYS_GOAL_REPLY_AUDIT, goal, ReplyRecord::decode)?.0)
+}
+
+pub fn reply_audit_rows(
+    goal: usize,
+    records: &mut [EncodedReplyRecord; AUDIT_CAPACITY],
+) -> Option<(&[EncodedReplyRecord], usize)> {
+    let (rows, overwritten, _) = audit_rows(SYS_GOAL_REPLY_AUDIT, goal, records)?;
+    Some((rows, overwritten))
 }
 
 /// Returns the retained RamFS read decisions and the total bytes delivered over the goal's lifetime.
@@ -161,22 +178,22 @@ pub fn read_audit_with_limit(goal: usize) -> Option<(AuditSnapshot<ReadRecordWit
     )
 }
 
+pub fn read_audit_rows_with_limit(
+    goal: usize,
+    records: &mut [EncodedReadRecordWithLimit; AUDIT_CAPACITY],
+) -> Option<(&[EncodedReadRecordWithLimit], usize, usize)> {
+    audit_rows(SYS_GOAL_READ_AUDIT_WITH_LIMIT, goal, records)
+}
+
 fn snapshot<Record: Copy, const WORDS: usize>(
     number: usize,
     goal: usize,
     decode: impl Fn(&[[u8; 8]; WORDS]) -> Option<Record>,
 ) -> Option<(AuditSnapshot<Record>, usize)> {
     let mut records = [[[0; 8]; WORDS]; AUDIT_CAPACITY];
-    let (count, overwritten, total, _) = ecall(
-        number,
-        goal,
-        records.as_mut_ptr().expose_provenance(),
-        core::mem::size_of_val(&records),
-        0,
-        0,
-    );
+    let (rows, overwritten, total) = audit_rows(number, goal, &mut records)?;
     let mut entries = [None; AUDIT_CAPACITY];
-    for (entry, record) in entries.iter_mut().zip(records.get(..count)?) {
+    for (entry, record) in entries.iter_mut().zip(rows) {
         *entry = Some(decode(record)?);
     }
     Some((
@@ -186,6 +203,22 @@ fn snapshot<Record: Copy, const WORDS: usize>(
         },
         total,
     ))
+}
+
+fn audit_rows<Record>(
+    number: usize,
+    goal: usize,
+    records: &mut [Record; AUDIT_CAPACITY],
+) -> Option<(&[Record], usize, usize)> {
+    let (count, overwritten, total, _) = ecall(
+        number,
+        goal,
+        records.as_mut_ptr().expose_provenance(),
+        core::mem::size_of_val(records),
+        0,
+        0,
+    );
+    Some((records.get(..count)?, overwritten, total))
 }
 
 /// Starts one ordinary child and returns its launch handle.

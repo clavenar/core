@@ -1,6 +1,9 @@
 #[path = "build/definition.rs"]
 mod definition;
 
+use clv_abi::agent::{FIND_GREETING_V1, FIND_GREETING_V2, SHA256_BYTES};
+use clv_abi::tool::FILE_TOOLS;
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fmt::Write;
 use std::fs;
@@ -11,10 +14,9 @@ fn main() {
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
     let output = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let userspace = root.join("userspace");
-    definition::build(
-        &userspace.join("hello/definitions/find-greeting-v1.toml"),
-        &output,
-    );
+    for id in [FIND_GREETING_V1, FIND_GREETING_V2] {
+        definition::build(&userspace.join("hello/definitions"), &output, id);
+    }
     build_library("clv_abi", &root.join("crates/clv-abi/src"), &output, &[]);
     build_library("clv", &userspace.join("libclv"), &output, &["clv_abi"]);
     let linker_script = userspace.join("user.ld");
@@ -30,6 +32,14 @@ fn main() {
         println!("cargo:rerun-if-changed={}", program.display());
         build_program(&program.join("main.rs"), &linker_script, &output, name);
     }
+    let hashes: Vec<[u8; SHA256_BYTES]> = FILE_TOOLS
+        .iter()
+        .map(|tool| {
+            let image = fs::read(output.join(format!("{}.elf", tool.program.name()))).unwrap();
+            Sha256::digest(image).into()
+        })
+        .collect();
+    fs::write(output.join("tool-image-hashes.rs"), format!("{hashes:?}")).unwrap();
 }
 
 fn target_rustc(output: &Path, dependencies: &[&str]) -> Command {

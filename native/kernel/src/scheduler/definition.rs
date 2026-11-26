@@ -1,10 +1,7 @@
 use clv_abi::RequestKind;
-use clv_abi::agent::{DefinitionId, EncodedDefinitionPin, FIND_GREETING_V1};
+use clv_abi::agent::{DefinitionId, EncodedDefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2};
 
 use crate::ipc::{Message, MessageKind};
-
-static FIND_GREETING_PIN: &EncodedDefinitionPin =
-    include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v1.pin"));
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct AgentBinding {
@@ -22,11 +19,20 @@ impl AgentBinding {
         if let Some(message) = request
             && let MessageKind::Request(kind) = message.kind
         {
-            let id = DefinitionId::from_request(kind, message.bytes(false));
-            if id == Some(FIND_GREETING_V1) && program == FIND_GREETING_V1.intent.program() as usize
-            {
-                definition = Some(FIND_GREETING_PIN);
-            } else if kind == RequestKind::PlanDefinition {
+            let id = DefinitionId::from_request(kind, message.bytes(false))
+                .filter(|id| program == id.intent.program() as usize);
+            definition = match id {
+                Some(FIND_GREETING_V1) => Some(include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/find-greeting-v1.pin"
+                ))),
+                Some(FIND_GREETING_V2) => Some(include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/find-greeting-v2.pin"
+                ))),
+                _ => None,
+            };
+            if definition.is_none() && kind == RequestKind::PlanDefinition {
                 // An explicit revision must resolve before this agent can be admitted.
                 return None;
             }

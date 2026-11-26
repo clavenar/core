@@ -1,4 +1,5 @@
 use crate::goal::GoalStatus;
+use crate::tool::ToolId;
 use crate::{MESSAGE_MAX_BYTES, Program, RequestKind};
 
 const SUSPENDED: usize = 6;
@@ -56,6 +57,11 @@ pub struct DefinitionId {
 pub const FIND_GREETING_V1: DefinitionId = DefinitionId {
     intent: PlanIntent::FindGreeting,
     revision: 1,
+};
+
+pub const FIND_GREETING_V2: DefinitionId = DefinitionId {
+    intent: PlanIntent::FindGreeting,
+    revision: 2,
 };
 
 impl DefinitionId {
@@ -119,28 +125,68 @@ impl<'a> FileDelegation<'a> {
         &self,
         buffer: &'b mut [u8; DELEGATION_REQUEST_MAX_BYTES],
     ) -> Option<&'b [u8]> {
-        let (header, argument) = buffer.split_at_mut(DELEGATION_HEADER_BYTES);
-        argument
-            .get_mut(..self.argument.len())?
-            .copy_from_slice(self.argument);
-        header[..8].copy_from_slice(&(self.program as u64).to_le_bytes());
-        header[8..].copy_from_slice(&(self.reply_bytes as u64).to_le_bytes());
-        Some(&buffer[..DELEGATION_HEADER_BYTES + self.argument.len()])
+        encode_file_action(self.program as u64, self.reply_bytes, self.argument, buffer)
     }
 
     pub fn decode(bytes: &'a [u8]) -> Option<Self> {
-        let (header, argument) = bytes.split_at_checked(DELEGATION_HEADER_BYTES)?;
-        if argument.len() > MESSAGE_MAX_BYTES {
-            return None;
-        }
-        let selector = u64::from_le_bytes(header[..8].try_into().ok()?);
-        let reply_bytes = u64::from_le_bytes(header[8..].try_into().ok()?);
+        let (selector, reply_bytes, argument) = decode_file_action(bytes)?;
         Some(Self {
             program: Program::from_raw(selector.try_into().ok()?)?,
-            reply_bytes: reply_bytes.try_into().ok()?,
+            reply_bytes,
             argument,
         })
     }
+}
+
+/// A definition step names a tool revision independently of its backing executable.
+pub struct FileToolInvocation<'a> {
+    pub tool: ToolId,
+    pub reply_bytes: usize,
+    pub argument: &'a [u8],
+}
+
+impl<'a> FileToolInvocation<'a> {
+    pub fn encode<'b>(
+        &self,
+        buffer: &'b mut [u8; DELEGATION_REQUEST_MAX_BYTES],
+    ) -> Option<&'b [u8]> {
+        encode_file_action(self.tool.0, self.reply_bytes, self.argument, buffer)
+    }
+
+    pub fn decode(bytes: &'a [u8]) -> Option<Self> {
+        let (selector, reply_bytes, argument) = decode_file_action(bytes)?;
+        Some(Self {
+            tool: ToolId(selector),
+            reply_bytes,
+            argument,
+        })
+    }
+}
+
+fn encode_file_action<'a>(
+    selector: u64,
+    reply_bytes: usize,
+    argument: &[u8],
+    buffer: &'a mut [u8; DELEGATION_REQUEST_MAX_BYTES],
+) -> Option<&'a [u8]> {
+    let (header, literal) = buffer.split_at_mut(DELEGATION_HEADER_BYTES);
+    literal.get_mut(..argument.len())?.copy_from_slice(argument);
+    header[..8].copy_from_slice(&selector.to_le_bytes());
+    header[8..].copy_from_slice(&(reply_bytes as u64).to_le_bytes());
+    Some(&buffer[..DELEGATION_HEADER_BYTES + argument.len()])
+}
+
+fn decode_file_action(bytes: &[u8]) -> Option<(u64, usize, &[u8])> {
+    let (selector, rest) = bytes.split_first_chunk::<8>()?;
+    let (reply_bytes, argument) = rest.split_first_chunk::<8>()?;
+    if argument.len() > MESSAGE_MAX_BYTES {
+        return None;
+    }
+    Some((
+        u64::from_le_bytes(*selector),
+        u64::from_le_bytes(*reply_bytes).try_into().ok()?,
+        argument,
+    ))
 }
 
 /// The two handles returned by a successful agent run.

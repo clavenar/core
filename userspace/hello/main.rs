@@ -28,12 +28,12 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, writer: us
             kind: RequestKind::DelegateWithFile,
             bytes,
             ..
-        }) => supervise_helper(agent::FileDelegation::decode(bytes)),
+        }) => supervise_helper(delegate_file(bytes)),
         Some(LaunchRequest::Received {
             kind: kind @ (RequestKind::PlanIntent | RequestKind::PlanDefinition),
             bytes,
             ..
-        }) => supervise_helper(mock_plan(kind, bytes)),
+        }) => supervise_helper(launch_planned_helper(kind, bytes)),
         _ if grant_kind == GrantKind::File as usize && writer != 0 => {
             let status = copy_file(handle, |bytes| pipe::write(writer, bytes));
             pipe::close(writer);
@@ -72,18 +72,29 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, writer: us
     }
 }
 
-fn mock_plan(kind: RequestKind, bytes: &[u8]) -> Option<agent::FileDelegation<'static>> {
+fn delegate_file(bytes: &[u8]) -> Option<usize> {
+    agent::delegate_from_current(&agent::FileDelegation::decode(bytes)?)
+}
+
+fn launch_planned_helper(kind: RequestKind, bytes: &[u8]) -> Option<usize> {
     match agent::DefinitionId::from_request(kind, bytes)? {
-        agent::FIND_GREETING_V1 => agent::FileDelegation::decode(include_bytes!(concat!(
+        agent::FIND_GREETING_V1 => delegate_file(include_bytes!(concat!(
             env!("OUT_DIR"),
             "/find-greeting-v1.action"
         ))),
+        agent::FIND_GREETING_V2 => {
+            let request = agent::FileToolInvocation::decode(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/find-greeting-v2.action"
+            )))?;
+            agent::invoke_file_tool(agent::CURRENT_AGENT, &request)
+        }
         _ => None,
     }
 }
 
-fn supervise_helper(request: Option<agent::FileDelegation<'_>>) -> usize {
-    let Some(helper) = request.and_then(|request| agent::delegate_from_current(&request)) else {
+fn supervise_helper(helper: Option<usize>) -> usize {
+    let Some(helper) = helper else {
         clv::send_reply(ReplyKind::DelegationFailed, &[]);
         return 1;
     };
