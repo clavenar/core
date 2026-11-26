@@ -1,4 +1,5 @@
 use clv_abi::GrantKind;
+use clv_abi::audit::DelegationDenial;
 
 use super::{DirectoryId, Node, PathBase, RamFs};
 
@@ -107,13 +108,15 @@ impl TaskFs {
     }
 
     /// An agent can hold one delegable file. Its helper receives only read access.
-    pub(crate) fn delegate_file(&self, fs: &mut RamFs) -> Option<Self> {
+    pub(crate) fn delegate_file(&self, fs: &mut RamFs) -> Result<Self, DelegationDenial> {
         let file = self
             .slots
             .iter()
             .flatten()
-            .find(|handle| handle.access == Access::ReadAndDelegate)?;
+            .find(|handle| handle.access == Access::ReadAndDelegate)
+            .ok_or(DelegationDenial::NoDelegableFile)?;
         Self::from_grant(fs, file.node, Access::ReadOnly)
+            .ok_or(DelegationDenial::FileHandlesExhausted)
     }
 
     fn grant_node(&self, fd: usize, kind: GrantKind) -> Option<Node> {

@@ -301,10 +301,34 @@ goal close
 5 reply bytes including the line ending, and `echo ready` costs 10, giving
 `available=9 reserved=0 spent=15`.
 
-To check denial, repeat through the delegation command using
-`goal grant-file /note`. The shell prints `cannot delegate child`, and
-`goal budget` reports `available=8 reserved=16 spent=0`. The second slot is
-still available for `agent delegate --reply-bytes 11 hello`.
+Use `goal audit` to see why the kernel accepted or denied each helper launch.
+This example uses the boot file and a suspended agent so the three decisions
+can be reproduced at the shell prompt.
+
+```text
+goal create --children 2 --reply-bytes 24
+goal grant-file /hello.txt
+agent run --suspended --reply-bytes 16 echo
+agent delegate --with-file --reply-bytes 5 hello
+agent delegate --reply-bytes 17 hello
+agent delegate --reply-bytes 11 hello
+wait hello
+goal audit
+goal budget
+goal cancel
+goal close
+```
+
+The audit shows `denied=no-delegable-file` for the ordinary file grant,
+`denied=insufficient-reply-bytes` for the 17-byte request, and
+`accepted child=<handle>` for the 11-byte request. The first two attempts
+leave the agent's 16 bytes and the helper slot available. After `wait hello`,
+the balance is `available=8 reserved=5 spent=11`.
+
+The goal retains its four most recent decisions in chronological order.
+`overwritten` counts older decisions that have been discarded. You can read
+the same entries again after `wait`, `event`, or `goal cancel`, until you
+close the goal. Each new goal starts with an empty audit.
 
 You can cancel a ready goal directly at the shell prompt.
 
@@ -647,6 +671,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 49 `agent_delegate` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle, or -1 on rejection |
 | 50 `goal_grant_delegable_file` | `a0` goal handle, `a1` shell file handle | 0 when attached with permission for the goal's agent to delegate read access, or -1 on rejection |
 | 51 `agent_delegate_with_file` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle with read access to the agent's file, or -1 on rejection |
+| 52 `goal_audit` | `a0` goal handle, `a1` shell stack destination, `a2` capacity in bytes | Retained entry count (0–4), with overwritten count in `a1`, or -1 on failure |
 
 Only the shell can use these calls. A stale or invalid handle or a call
 from another task returns -1 in `a0`. Calls 33 and 43 create single-child
@@ -654,7 +679,7 @@ goals. Call 48 also supports two children and ignores `a2` in unlimited mode.
 The run calls accept a ready goal or a running goal with a place left. They
 return -1 for an unknown selector or start mode, a busy program slot, a full
 goal, a second agent, insufficient available bytes, or exhausted handles.
-A failed launch preserves the goal, its grant, reservations and launch handles.
+A failed launch preserves goal membership, grants, reservations and launch handles.
 
 The kernel binds the child to the goal before its first instruction.
 The agent run calls also create and bind the agent in that operation. Every
@@ -683,6 +708,30 @@ delegable file for the helper with read access and an independent cursor.
 The new file handle arrives in `a1`, file kind 2 in `a2` and zero in `a3`.
 The kernel commits the file grant, reply reservation and launch together.
 The shell receives the ordinary launch handle for replies, events and waits.
+
+Call 52 snapshots decisions from calls 49 and 51 made by the owning shell for
+an agent in the open goal. Attempts with a foreign or stale agent handle are
+discarded. Each 48-byte entry begins with the agent handle, requested program
+selector, requested reply bytes, and file flag (0 or 1). The final two words
+hold the decision code and helper launch handle. All six words are little-endian
+RV64 values. On acceptance, code 0 accompanies the new child's handle.
+On denial, the code identifies the first failed check and the handle is zero.
+
+| Denial code | Reason |
+| --- | --- |
+| 1 | Agent already finished |
+| 2 | Unknown program selector |
+| 3 | Program slot busy |
+| 4 | Launch handles exhausted |
+| 5 | Goal child limit reached |
+| 6 | Insufficient reply bytes in the agent's reservation |
+| 7 | Agent has no open delegable file |
+| 8 | RamFS file handles exhausted |
+
+The kernel copies all retained entries, oldest first, in one read. A short
+buffer or an invalid destination range returns -1 before copying any bytes.
+Zero capacity succeeds for an empty audit. Reads preserve the entries and
+the overwritten count, which saturates at the largest RV64 unsigned value.
 
 `agent_status` uses tags 1–5 below and tag 6 for a suspended child (`a2` is
 zero). It always returns the original child handle on success. `goal_status`

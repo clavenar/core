@@ -48,6 +48,13 @@ impl Children {
         self.programs.iter_mut().find(|child| child.name == name)
     }
 
+    pub(super) fn program_name(&self, selector: usize) -> Option<&'static [u8]> {
+        self.programs
+            .iter()
+            .find(|child| child.selector == selector)
+            .map(|child| child.name)
+    }
+
     pub(super) fn run(&mut self, arguments: &[u8]) {
         let (name, directory) = split_word(arguments);
         match self.named(name) {

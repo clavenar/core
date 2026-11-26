@@ -1,6 +1,8 @@
 mod budget;
+mod delegation;
 
 use self::budget::ReplyReservation;
+use self::delegation::DelegationAudit;
 use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult};
 use clv_abi::budget::ReplyBudget;
@@ -48,6 +50,7 @@ pub(super) struct Goal {
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
     file: Option<FileGrant>,
+    audit: DelegationAudit,
 }
 
 impl Goal {
@@ -200,6 +203,7 @@ impl Scheduler {
             members: [const { None }; MAX_CHILDREN],
             cancelled_before_launch: false,
             file: None,
+            audit: DelegationAudit::default(),
         });
         Some(handle)
     }
@@ -235,37 +239,6 @@ impl Scheduler {
         }
         goal.file = Some(self.tasks[self.current].fs.retain_file(fs, fd, delegable)?);
         Some(())
-    }
-
-    pub(super) fn start_helper(
-        &mut self,
-        fs: &mut RamFs,
-        agent: usize,
-        child: usize,
-        bytes: usize,
-        with_file: bool,
-    ) -> Option<TaskFs> {
-        let goal = self.goal.as_mut()?;
-        let slot = goal.free_slot()?;
-        let parent = goal.members.iter_mut().flatten().find(|member| {
-            member.role == MemberRole::Agent(agent) && member.completion.is_none()
-        })?;
-        let role = MemberRole::Helper {
-            parent: parent.handle,
-        };
-        let (retained, delegated) = parent.replies.split(bytes)?;
-        let child_fs = if with_file {
-            let task = self
-                .tasks
-                .iter()
-                .find(|task| task.has_launch(parent.handle))?;
-            task.fs.delegate_file(fs)?
-        } else {
-            TaskFs::empty()
-        };
-        parent.replies = retained;
-        goal.admit(slot, child, role, delegated, fs);
-        Some(child_fs)
     }
 
     fn agent_member(&self, handle: usize) -> Option<(&Goal, &Member)> {

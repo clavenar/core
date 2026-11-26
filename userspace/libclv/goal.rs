@@ -1,7 +1,8 @@
+use clv_abi::audit::{AUDIT_CAPACITY, DelegationRecord, EncodedRecord};
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
 use clv_abi::{
-    SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
+    SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
     SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
     SYS_GOAL_GRANT_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
 };
@@ -43,6 +44,32 @@ pub fn grant_delegable_file(goal: usize, fd: usize) -> bool {
 pub fn budget(goal: usize) -> Option<ReplyBudget> {
     let (flags, available, reserved, spent) = ecall(SYS_GOAL_BUDGET, goal, 0, 0, 0, 0);
     ReplyBudget::from_registers(flags, available, reserved, spent)
+}
+
+pub struct AuditSnapshot {
+    pub entries: [Option<DelegationRecord>; AUDIT_CAPACITY],
+    pub overwritten: usize,
+}
+
+/// Reads the retained decisions in launch-attempt order without consuming them.
+pub fn audit(goal: usize) -> Option<AuditSnapshot> {
+    let mut records: [EncodedRecord; AUDIT_CAPACITY] = Default::default();
+    let (count, overwritten, _, _) = ecall(
+        SYS_GOAL_AUDIT,
+        goal,
+        records.as_mut_ptr().expose_provenance(),
+        core::mem::size_of_val(&records),
+        0,
+        0,
+    );
+    let mut entries = [None; AUDIT_CAPACITY];
+    for (entry, record) in entries.iter_mut().zip(records.get(..count)?) {
+        *entry = Some(DelegationRecord::decode(record)?);
+    }
+    Some(AuditSnapshot {
+        entries,
+        overwritten,
+    })
 }
 
 /// Starts one ordinary child and returns its launch handle.

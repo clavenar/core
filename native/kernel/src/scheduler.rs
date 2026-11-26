@@ -3,6 +3,7 @@ mod pipe;
 
 use self::goal::Goal;
 use clv_abi::agent::AgentLaunch;
+use clv_abi::audit::DelegationDenial;
 use clv_abi::{
     ChildEvent, CompletionKind, GrantKind, PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
     TaskCompletion,
@@ -69,6 +70,12 @@ struct ChildLaunch {
     event: Option<PendingEvent>,
 }
 
+struct PreparedLaunch {
+    index: usize,
+    handle: usize,
+    next_handle: usize,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum LaunchScope {
     Plain,
@@ -78,11 +85,6 @@ pub(crate) enum LaunchScope {
     Goal {
         handle: usize,
         reply_bytes: Option<usize>,
-    },
-    Delegated {
-        agent: usize,
-        reply_bytes: usize,
-        with_file: bool,
     },
 }
 
@@ -229,6 +231,36 @@ impl Scheduler {
         Some(AgentLaunch { agent, child })
     }
 
+    fn prepare_launch(
+        &self,
+        program: usize,
+        agent: Option<usize>,
+    ) -> Result<PreparedLaunch, DelegationDenial> {
+        let index = match program {
+            PROGRAM_HELLO => HELLO_TASK_INDEX,
+            PROGRAM_ECHO => ECHO_TASK_INDEX,
+            _ => return Err(DelegationDenial::UnknownProgram),
+        };
+        if self.tasks[index].state != TaskState::Stopped {
+            return Err(DelegationDenial::ProgramBusy);
+        }
+        // An agent takes the first handle of the pair. Commit the sequence only on success.
+        let handle = match agent {
+            Some(agent) => agent
+                .checked_add(1)
+                .ok_or(DelegationDenial::LaunchHandlesExhausted)?,
+            None => self.next_handle,
+        };
+        let next_handle = handle
+            .checked_add(1)
+            .ok_or(DelegationDenial::LaunchHandlesExhausted)?;
+        Ok(PreparedLaunch {
+            index,
+            handle,
+            next_handle,
+        })
+    }
+
     fn start_child(
         &mut self,
         fs: &mut RamFs,
@@ -238,26 +270,10 @@ impl Scheduler {
         agent: Option<usize>,
         initial_state: TaskState,
     ) -> Option<usize> {
-        let index = match program {
-            PROGRAM_HELLO => HELLO_TASK_INDEX,
-            PROGRAM_ECHO => ECHO_TASK_INDEX,
-            _ => return None,
-        };
-        if self.current != SHELL_TASK_INDEX || self.tasks[index].state != TaskState::Stopped {
+        if self.current != SHELL_TASK_INDEX {
             return None;
         }
-        // An agent takes the first handle of the pair. Commit the sequence only on success.
-        let handle = match agent {
-            Some(agent) => agent.checked_add(1)?,
-            None => self.next_handle,
-        };
-        let next_handle = handle.checked_add(1)?;
-        let mut frame = TrapFrame::new_user(
-            self.tasks[index].entry,
-            self.tasks[index].address_space.stack.top(),
-            index + 1,
-            self.initial_status,
-        );
+        let launch = self.prepare_launch(program, agent).ok()?;
         let task_fs = match scope {
             LaunchScope::Plain => TaskFs::empty(),
             LaunchScope::Goal {
@@ -266,12 +282,7 @@ impl Scheduler {
             } => self
                 .goal
                 .as_mut()?
-                .start(goal, handle, agent, reply_bytes, fs)?,
-            LaunchScope::Delegated {
-                agent,
-                reply_bytes,
-                with_file,
-            } => self.start_helper(fs, agent, handle, reply_bytes, with_file)?,
+                .start(goal, launch.handle, agent, reply_bytes, fs)?,
             LaunchScope::Directory(fd) => {
                 self.tasks[self.current]
                     .fs
@@ -281,13 +292,35 @@ impl Scheduler {
                 self.tasks[self.current].fs.grant(fs, fd, GrantKind::File)?
             }
         };
-        let grant = task_fs.startup_grant();
         let pipe = matches!(scope, LaunchScope::FileWithPipe(_)).then(Pipe::new);
+        Some(self.install_child(launch, task_fs, request, pipe, initial_state))
+    }
+
+    fn install_child(
+        &mut self,
+        launch: PreparedLaunch,
+        task_fs: TaskFs,
+        request: Option<Message>,
+        pipe: Option<Pipe>,
+        initial_state: TaskState,
+    ) -> usize {
+        let PreparedLaunch {
+            index,
+            handle,
+            next_handle,
+        } = launch;
+        let task = &mut self.tasks[index];
+        let mut frame = TrapFrame::new_user(
+            task.entry,
+            task.address_space.stack.top(),
+            index + 1,
+            self.initial_status,
+        );
+        let grant = task_fs.startup_grant();
         if let Some((fd, kind)) = grant {
             let writer = if pipe.is_some() { handle } else { 0 };
             frame.set_startup_args(fd, kind as usize, writer);
         }
-        let task = &mut self.tasks[index];
         // SAFETY: This slot is stopped and its private stack frame is mapped
         // writable in the shared supervisor identity map.
         unsafe { task.address_space.clear_user_stack() };
@@ -310,7 +343,7 @@ impl Scheduler {
         });
         task.state = initial_state;
         self.next_handle = next_handle;
-        Some(handle)
+        handle
     }
 
     pub(crate) fn wait_child(
