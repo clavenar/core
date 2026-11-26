@@ -842,6 +842,38 @@ Revision 1 requests `grep` directly. The kernel records the denial before
 allocating the helper. Only the agent's zero-byte failure reply appears in
 the reply audit, and all 36 reply bytes are available after it exits.
 
+### Stage a private file rename
+
+The goal owner can propose one rename while a goal is ready or running.
+Choose a writable RamFS file and an unused basename in its current directory.
+At a fresh `clv>` prompt, try a path containing `..` and then a valid basename.
+
+```text
+mkdir /work
+write /work/draft.txt hello
+goal create
+goal stage-rename /work/draft.txt ../final.txt
+goal diff
+goal stage-rename /work/draft.txt final.txt
+goal diff
+ls /work
+goal cancel
+goal diff
+cat /work/draft.txt
+goal close
+```
+
+The first attempt reports `cannot stage rename`, and the first diff says
+`no staged changes`. The second diff prints `rename /work/draft.txt -> final.txt`.
+You can read it repeatedly. The public directory still lists only `draft.txt`.
+After cancellation the diff is empty and `cat` prints `hello`.
+
+Staging retains the original file and records both names at that moment.
+If the shell removes the source and creates a new file at the same path,
+the pending change still refers to the original file. A completed or failed
+goal keeps its diff available for review. Cancelling the goal, closing it
+successfully, or exiting the owner releases the pending change.
+
 ### Share a read allowance across two helper launches
 
 Two different helper programs can run at the same time. Each program has
@@ -1203,6 +1235,17 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 63 `agent_status_with_definition` | `a0` agent handle, `a1` shell stack destination, `a2` capacity in bytes | Same status registers as call 39, plus a 34-byte definition record in the buffer |
 | 64 `agent_invoke_file_tool` | `a0` agent handle or zero for self, `a1` versioned tool ID, `a2` reply reservation, `a3` literal address, `a4` literal length (0–64) | Fresh helper handle on admission, or -1 on rejection |
 | 65 `goal_audit_with_tool` | Same arguments as call 52 | Retained delegation count and overwritten count as in call 59, with 104 bytes per entry |
+| 66 `goal_stage_rename` | `a0` goal handle, `a1` owner's file handle, `a2` new basename address, `a3` length (1–64 bytes) | 0 when staged, or -1 on rejection |
+| 67 `goal_diff` | `a0` goal handle, `a1` stack destination, `a2` capacity in bytes | Total bytes copied in `a0`, source path length in `a1`. An empty diff returns zero in both registers. Failure returns -1 in `a0`. |
+
+Calls 66 and 67 are restricted to the goal owner. Call 66 requires a linked
+writable RamFS file and an empty staging slot. It rejects an occupied name,
+`.`, `..`, and names containing a slash or NUL. Rejection preserves any
+pending change. Call 67 copies the original absolute source path followed
+immediately by the destination basename, with no separator or terminator.
+A stack buffer of `RENAME_DIFF_MAX_BYTES` suffices for any diff. An empty
+diff also accepts zero capacity. A short buffer or an invalid nonempty
+destination range fails before copying any bytes.
 
 The shell owns the goal and controls its agents. Calls 49, 51, 56 and 64 also
 accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live

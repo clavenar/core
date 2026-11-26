@@ -76,6 +76,8 @@ pub const SYS_GOAL_GRANT_FILE_TO_WITH_ARG: usize = 62;
 pub const SYS_AGENT_STATUS_WITH_DEFINITION: usize = 63;
 pub const SYS_AGENT_INVOKE_FILE_TOOL: usize = 64;
 pub const SYS_GOAL_AUDIT_WITH_TOOL: usize = 65;
+pub const SYS_GOAL_STAGE_RENAME: usize = 66;
+pub const SYS_GOAL_DIFF: usize = 67;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;

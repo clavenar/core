@@ -1,6 +1,8 @@
 mod handles;
+mod rename;
 
 pub(crate) use handles::{FileGrant, GrantArgument, TaskFs};
+pub(crate) use rename::StagedRename;
 
 const WRITABLE_FILE_COUNT: usize = 4;
 const DIRECTORY_COUNT: usize = 4;
@@ -54,16 +56,19 @@ struct Name {
 }
 
 impl Name {
+    fn valid(name: &[u8]) -> bool {
+        (1..=NAME_LIMIT).contains(&name.len())
+            && name != b"."
+            && name != b".."
+            && !name.iter().any(|&byte| byte == b'/' || byte == 0)
+    }
+
     fn new(name: &[u8]) -> Option<Self> {
-        if name.is_empty()
-            || name == b"."
-            || name == b".."
-            || name.iter().any(|&byte| byte == b'/' || byte == 0)
-        {
+        if !Self::valid(name) {
             return None;
         }
         let mut bytes = [0; NAME_LIMIT];
-        bytes.get_mut(..name.len())?.copy_from_slice(name);
+        bytes[..name.len()].copy_from_slice(name);
         Some(Self {
             bytes,
             length: name.len(),
@@ -210,28 +215,33 @@ impl RamFs {
         Some(0)
     }
 
-    fn absolute_path(
+    fn absolute_path<'a>(
         &self,
         mut directory: DirectoryId,
-        deliver: impl FnOnce(&[u8]) -> bool,
-    ) -> Option<usize> {
-        let mut buffer = [0; CWD_PATH_CAPACITY];
+        leaf: Option<&[u8]>,
+        buffer: &'a mut [u8],
+    ) -> Option<&'a [u8]> {
         let mut start = buffer.len();
-        while let DirectoryId::Child(index) = directory {
-            let entry = self.directories[index].as_ref()?;
-            let name = entry.name.as_bytes();
+        let mut prepend = |name: &[u8]| {
             let end = start;
             start = start.checked_sub(name.len() + 1)?;
             buffer[start] = b'/';
             buffer[start + 1..end].copy_from_slice(name);
+            Some(())
+        };
+        if let Some(name) = leaf {
+            prepend(name)?;
+        }
+        while let DirectoryId::Child(index) = directory {
+            let entry = self.directories[index].as_ref()?;
+            prepend(entry.name.as_bytes())?;
             directory = entry.parent;
         }
         if start == buffer.len() {
-            start -= 1;
+            start = start.checked_sub(1)?;
             buffer[start] = b'/';
         }
-        let path = &buffer[start..];
-        deliver(path).then_some(path.len())
+        Some(&buffer[start..])
     }
 
     fn resolve_directory(&self, cwd: DirectoryId, path: &[u8]) -> Option<DirectoryId> {

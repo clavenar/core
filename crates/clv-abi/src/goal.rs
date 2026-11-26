@@ -4,6 +4,17 @@ use crate::{CompletionKind, NO_CHILD_HANDLE, Program};
 /// Maximum number of successful member launches over the lifetime of a goal.
 pub const MAX_CHILDREN: usize = 3;
 
+/// Maximum combined byte length of a canonical source path and a destination basename.
+pub const RENAME_DIFF_MAX_BYTES: usize = 512;
+
+pub enum GoalDiff<'a> {
+    Empty,
+    Rename {
+        source: &'a [u8],
+        new_name: &'a [u8],
+    },
+}
+
 /// Cumulative RamFS byte limits for the whole goal and for its delegated helpers together.
 #[derive(Clone, Copy, Default)]
 pub struct ReadLimits {

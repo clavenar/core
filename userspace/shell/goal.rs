@@ -1,11 +1,13 @@
 mod audit;
 mod options;
+mod subcommand;
 
 use clv::goal::{self, CancelResult, CloseResult, FileRecipient, GoalStatus, ReplyBudget};
 use clv::{agent, fs, print};
 use clv_abi::agent::{NO_DEFINITION, SHA256_BYTES};
 use clv_abi::{CompletionKind, OPEN_READ, Program};
 pub(super) use options::{GoalCommand, GoalOptions};
+use subcommand::Subcommand;
 
 use super::{
     HEX_DIGITS, children::Children, hex, print_handle, print_line, print_usage, split_literal,
@@ -15,12 +17,14 @@ use super::{
 const CREATE_HELP: &[u8] = b"goal create [--children 1|2|3] [--reply-bytes N] [--allow-helper <program> | --allow-tool <name@rev>] [--read-bytes N] [--helper-read-bytes N]\r\n";
 const GRANT_HELP: &[u8] =
     b"goal grant-file [--delegable | --delegate-to <program> [--argument <literal>]] <path>\r\n";
+const RENAME_HELP: &[u8] = b"goal stage-rename <source> <new-name>\r\n";
 
 pub(super) fn help() {
     print(CREATE_HELP);
     print(b"goal run [--reply-bytes N] <program>\r\n");
     print(GRANT_HELP);
-    print(b"goal revoke-file  goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n");
+    print(RENAME_HELP);
+    print(b"goal diff  goal revoke-file  goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n");
 }
 
 pub(super) const AGENT_RUN_HELP: &[u8] = b"agent run [--suspended] [--reply-bytes N] <program> [request]\r\n\
@@ -45,30 +49,36 @@ pub(super) fn command(
     children: &mut Children,
 ) {
     let handle = current.as_ref().map(|goal| goal.handle);
-    match split_word(arguments) {
-        (b"create", arguments) => create(arguments, current),
-        (b"grant-file", arguments) => grant_file(handle, arguments),
-        (b"revoke-file", b"") => match handle {
+    let (name, args) = split_word(arguments);
+    match (Subcommand::parse(name), args) {
+        (Subcommand::Create, arguments) => create(arguments, current),
+        (Subcommand::GrantFile, arguments) => grant_file(handle, arguments),
+        (Subcommand::StageRename, arguments) => stage_rename(handle, arguments),
+        (Subcommand::Diff, b"") => match handle {
+            Some(handle) => show_diff(handle),
+            None => print(b"no current goal\r\n"),
+        },
+        (Subcommand::RevokeFile, b"") => match handle {
             Some(handle) if goal::revoke_file(handle) => print(b"file revoked\r\n"),
             Some(_) => print(b"cannot revoke file\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        (b"run", arguments) => children.run_in_goal(handle, arguments),
-        (b"audit", option) => audit::show(handle, option),
-        (b"budget", b"") => match handle.and_then(goal::budget) {
+        (Subcommand::Run, arguments) => children.run_in_goal(handle, arguments),
+        (Subcommand::Audit, option) => audit::show(handle, option),
+        (Subcommand::Budget, b"") => match handle.and_then(goal::budget) {
             Some(budget) => print_budget(budget),
             None => print(b"no current goal\r\n"),
         },
-        (b"status", b"") => match handle.and_then(goal::status) {
+        (Subcommand::Status, b"") => match handle.and_then(goal::status) {
             Some(status) => print_status(status),
             None => print(b"no current goal\r\n"),
         },
-        (b"cancel", b"") => match handle.and_then(goal::cancel) {
+        (Subcommand::Cancel, b"") => match handle.and_then(goal::cancel) {
             Some(CancelResult::Cancelled) => print(b"goal cancelled\r\n"),
             Some(CancelResult::AlreadyFinished) => print(b"goal already finished\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        (b"close", b"") => match handle.and_then(goal::close) {
+        (Subcommand::Close, b"") => match handle.and_then(goal::close) {
             Some(CloseResult::Closed) => {
                 *current = None;
                 print(b"goal closed\r\n");
@@ -113,23 +123,64 @@ fn grant_file(goal: Option<usize>, arguments: &[u8]) {
     let Some((target, path)) = grant_options(arguments) else {
         return print_usage(GRANT_HELP);
     };
-    let Some(goal) = goal else {
-        return print(b"no current goal\r\n");
-    };
-    let Some(fd) = fs::open(path, OPEN_READ) else {
-        return print(b"cannot open path\r\n");
-    };
-    let granted = match target {
+    let granted = with_goal_file(goal, path, |goal, fd| match target {
         FileTarget::Recipient(recipient) => goal::grant_file_with_recipient(goal, fd, recipient),
         FileTarget::WithArgument(program, literal) => {
             goal::grant_file_to_with_arg(goal, fd, program, literal)
         }
+    });
+    if let Some(granted) = granted {
+        print(if granted {
+            b"file granted\r\n"
+        } else {
+            b"cannot grant file\r\n"
+        });
+    }
+}
+
+fn with_goal_file(
+    goal: Option<usize>,
+    path: &[u8],
+    operation: impl FnOnce(usize, usize) -> bool,
+) -> Option<bool> {
+    let Some(goal) = goal else {
+        print(b"no current goal\r\n");
+        return None;
     };
+    let Some(fd) = fs::open(path, OPEN_READ) else {
+        print(b"cannot open path\r\n");
+        return None;
+    };
+    let result = operation(goal, fd);
     fs::close(fd);
-    if granted {
-        print(b"file granted\r\n");
-    } else {
-        print(b"cannot grant file\r\n");
+    Some(result)
+}
+
+fn stage_rename(goal: Option<usize>, arguments: &[u8]) {
+    let Some((path, rest)) = split_literal(arguments) else {
+        return print_usage(RENAME_HELP);
+    };
+    let Some((name, b"")) = split_literal(rest) else {
+        return print_usage(RENAME_HELP);
+    };
+    if let Some(staged) = with_goal_file(goal, path, |goal, fd| goal::stage_rename(goal, fd, name))
+    {
+        print(if staged {
+            b"rename staged\r\n"
+        } else {
+            b"cannot stage rename\r\n"
+        });
+    }
+}
+
+fn show_diff(handle: usize) {
+    let mut buffer = [0; clv_abi::goal::RENAME_DIFF_MAX_BYTES];
+    match goal::diff(handle, &mut buffer) {
+        Some(goal::GoalDiff::Empty) => print(b"no staged changes\r\n"),
+        Some(goal::GoalDiff::Rename { source, new_name }) => {
+            print_line(&[b"rename ", source, b" -> ", new_name])
+        }
+        None => print(b"cannot read goal diff\r\n"),
     }
 }
 
@@ -197,9 +248,10 @@ pub(super) fn agent_command(
     children: &mut Children,
 ) {
     let agent_handle = current.as_ref().and_then(|goal| goal.agent);
-    match split_word(arguments) {
-        (b"delegate", arguments) => children.delegate(agent_handle, arguments),
-        (b"run", arguments) => {
+    let (name, args) = split_word(arguments);
+    match (Subcommand::parse(name), args) {
+        (Subcommand::Delegate, arguments) => children.delegate(agent_handle, arguments),
+        (Subcommand::Run, arguments) => {
             let Some(goal) = current else {
                 return print(b"no current goal\r\n");
             };
@@ -208,9 +260,9 @@ pub(super) fn agent_command(
                 print_agent_handles(launch.agent, b" child=", launch.child);
             }
         }
-        (b"status", b"") => print_agent_status(agent_handle),
-        (action @ (b"suspend" | b"resume"), b"") => {
-            let suspending = action == b"suspend";
+        (Subcommand::Status, b"") => print_agent_status(agent_handle),
+        (action @ (Subcommand::Suspend | Subcommand::Resume), b"") => {
+            let suspending = matches!(action, Subcommand::Suspend);
             let control = if suspending {
                 agent::suspend
             } else {

@@ -2,7 +2,7 @@ use clv_abi::audit::DelegationDenial;
 use clv_abi::goal::FileRecipient;
 use clv_abi::{GrantKind, MESSAGE_MAX_BYTES, Program};
 
-use super::{DirectoryId, Node, PathBase, RamFs};
+use super::{CWD_PATH_CAPACITY, DirectoryId, Node, PathBase, RamFs, StagedRename};
 
 const HANDLE_COUNT: usize = 4;
 
@@ -178,6 +178,15 @@ impl TaskFs {
         (node.grant_kind() == kind).then_some(node)
     }
 
+    pub(crate) fn stage_rename(
+        &self,
+        fs: &mut RamFs,
+        fd: usize,
+        new_name: &[u8],
+    ) -> Option<StagedRename> {
+        fs.stage_rename(self.node_for_handle(fd)?, new_name)
+    }
+
     fn from_grant(fs: &mut RamFs, node: Node, access: Access) -> Option<Self> {
         let handle = Handle::allocate(fs, access, |_| Some(node))?;
         let mut child = Self::empty();
@@ -271,7 +280,9 @@ impl TaskFs {
     }
 
     pub(crate) fn getcwd(&self, fs: &RamFs, deliver: impl FnOnce(&[u8]) -> bool) -> Option<usize> {
-        fs.absolute_path(self.cwd?, deliver)
+        let mut buffer = [0; CWD_PATH_CAPACITY];
+        let path = fs.absolute_path(self.cwd?, None, &mut buffer)?;
+        deliver(path).then_some(path.len())
     }
 
     pub(crate) fn read(

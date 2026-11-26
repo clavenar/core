@@ -16,7 +16,7 @@ use clv_abi::goal::{
 use clv_abi::tool::ToolId;
 
 use super::{AgentBinding, SHELL_TASK_INDEX, Scheduler, TaskState};
-use crate::fs::ramfs::{FileGrant, GrantArgument, RamFs, TaskFs};
+use crate::fs::ramfs::{FileGrant, GrantArgument, RamFs, StagedRename, TaskFs};
 
 pub(crate) enum DelegationTarget {
     Program { selector: usize, with_file: bool },
@@ -73,6 +73,7 @@ pub(super) struct Goal {
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
     file: Option<FileGrant>,
+    rename: Option<StagedRename>,
     delegation_audit: AuditHistory<EncodedRecordWithTool>,
     reply_audit: AuditHistory<EncodedReplyRecord>,
 }
@@ -104,6 +105,13 @@ impl Goal {
         )
     }
 
+    fn is_active(&self) -> bool {
+        matches!(
+            self.status(),
+            GoalStatus::Ready | GoalStatus::Running { .. }
+        )
+    }
+
     pub(super) fn start(
         &mut self,
         handle: usize,
@@ -112,12 +120,7 @@ impl Goal {
         reply_bytes: Option<usize>,
         fs: &mut RamFs,
     ) -> Option<TaskFs> {
-        if self.handle != handle
-            || !matches!(
-                self.status(),
-                GoalStatus::Ready | GoalStatus::Running { .. }
-            )
-        {
+        if self.handle != handle || !self.is_active() {
             return None;
         }
         if agent.is_some()
@@ -166,6 +169,12 @@ impl Goal {
     fn release_file(&mut self, fs: &mut RamFs) {
         if let Some(file) = self.file.take() {
             file.release(fs);
+        }
+    }
+
+    fn discard_rename(&mut self, fs: &mut RamFs) {
+        if let Some(rename) = self.rename.take() {
+            rename.discard(fs);
         }
     }
 
@@ -241,6 +250,7 @@ impl Scheduler {
             members: [const { None }; MAX_CHILDREN],
             cancelled_before_launch: false,
             file: None,
+            rename: None,
             delegation_audit: AuditHistory::default(),
             reply_audit: AuditHistory::default(),
         });
@@ -260,6 +270,27 @@ impl Scheduler {
 
     pub(crate) fn goal_budget(&self, handle: usize) -> Option<ReplyBudget> {
         Some(self.shell_goal(handle)?.budget())
+    }
+
+    pub(crate) fn stage_goal_rename(
+        &mut self,
+        handle: usize,
+        fs: &mut RamFs,
+        fd: usize,
+        new_name: &[u8],
+    ) -> Option<usize> {
+        let goal = self.shell_goal(handle)?;
+        if goal.rename.is_some() || !goal.is_active() {
+            return None;
+        }
+        self.goal.as_mut()?.rename =
+            Some(self.tasks[self.current].fs.stage_rename(fs, fd, new_name)?);
+        Some(0)
+    }
+
+    pub(crate) fn goal_diff(&self, handle: usize) -> Option<(&[u8], usize)> {
+        let rename = self.shell_goal(handle)?.rename.as_ref();
+        Some(rename.map_or((&[][..], 0), StagedRename::diff))
     }
 
     pub(crate) fn grant_goal_file(
@@ -353,19 +384,24 @@ impl Scheduler {
     }
 
     pub(crate) fn cancel_goal(&mut self, handle: usize, fs: &mut RamFs) -> Option<CancelResult> {
-        match self.goal_status(handle)? {
+        let result = match self.goal_status(handle)? {
             GoalStatus::Ready => {
                 let goal = self.goal.as_mut()?;
                 goal.release_file(fs);
                 goal.cancelled_before_launch = true;
+                CancelResult::Cancelled
             }
-            GoalStatus::Running { .. } => self.cancel_running_children(fs, |_| true)?,
-            GoalStatus::Cancelled { .. } => {}
+            GoalStatus::Running { .. } => {
+                self.cancel_running_children(fs, |_| true)?;
+                CancelResult::Cancelled
+            }
+            GoalStatus::Cancelled { .. } => CancelResult::Cancelled,
             GoalStatus::Completed { .. } | GoalStatus::Failed { .. } => {
-                return Some(CancelResult::AlreadyFinished);
+                CancelResult::AlreadyFinished
             }
-        }
-        Some(CancelResult::Cancelled)
+        };
+        self.goal.as_mut()?.discard_rename(fs);
+        Some(result)
     }
 
     pub(super) fn release_shell_goal(&mut self, fs: &mut RamFs) {
@@ -376,6 +412,7 @@ impl Scheduler {
     fn drop_goal(&mut self, fs: &mut RamFs) {
         if let Some(mut goal) = self.goal.take() {
             goal.release_file(fs);
+            goal.discard_rename(fs);
         }
     }
 
