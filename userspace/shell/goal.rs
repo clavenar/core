@@ -1,6 +1,7 @@
 mod audit;
 mod options;
 
+use super::color;
 use super::command::{GoalFlag, Subcommand};
 use clv::goal::{
     self, CancelResult, CloseResult, CommitResult, DiscardResult, FileRecipient, GoalStatus,
@@ -238,13 +239,13 @@ fn commit(goal: &mut CurrentGoal) {
     let Some(token) = goal.review.take() else {
         return print(b"goal commit requires a passing goal diff after completion\r\n");
     };
-    print(match goal::commit(goal.handle, token) {
-        Some(CommitResult::Committed) => b"rename committed\r\n",
-        Some(CommitResult::Conflict) => b"commit conflict\r\n",
-        Some(CommitResult::PostconditionFailed) => b"postcondition failed\r\n",
-        Some(CommitResult::ReviewExpired) => b"review expired\r\n",
-        None => b"cannot commit goal\r\n",
-    });
+    match goal::commit(goal.handle, token) {
+        Some(CommitResult::Committed) => color::print_line(color::GREEN, b"rename committed"),
+        Some(CommitResult::Conflict) => color::print_line(color::RED, b"commit conflict"),
+        Some(CommitResult::ReviewExpired) => color::print_line(color::YELLOW, b"review expired"),
+        Some(CommitResult::PostconditionFailed) => print(b"postcondition failed\r\n"),
+        None => print(b"cannot commit goal\r\n"),
+    }
 }
 
 fn discard(goal: &mut CurrentGoal) {

@@ -41,6 +41,11 @@ After the OpenSBI banner, the kernel prints `Clavenar kernel booted` with the
 version from `native/kernel/Cargo.toml`. It prints `boot frame=0x...` with the
 physical address of task 1's Sv39 root table.
 
+In an ANSI terminal, the shell shows a cyan `clv>` prompt. When you run
+`goal commit`, `rename committed` appears in green, `review expired` in
+yellow, and `commit conflict` in red. The shell resets the color after each
+prompt or message.
+
 The build links the shell and each registered program as separate RV64 ELFs
 and embeds them in the kernel. To add a boot program, put its entry point in
 `userspace/<name>/main.rs` and append its name to the program registry. The

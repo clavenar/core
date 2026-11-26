@@ -2,6 +2,7 @@
 #![no_main]
 
 mod children;
+mod color;
 mod command;
 mod files;
 mod goal;
@@ -28,7 +29,7 @@ extern "C" fn _start() -> ! {
     while !clv::timer_fired() {
         core::hint::spin_loop();
     }
-    print(b"clv> ");
+    print(color::PROMPT);
 
     loop {
         let Some(byte) = clv::read_console() else {
@@ -51,7 +52,7 @@ extern "C" fn _start() -> ! {
                 }
                 length = 0;
                 overflow = false;
-                print(b"clv> ");
+                print(color::PROMPT);
             }
             8 | 127 if length > 0 && !overflow => {
                 length -= 1;
