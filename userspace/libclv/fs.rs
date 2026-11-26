@@ -3,7 +3,15 @@ use clv_abi::{
     SYS_READDIR, SYS_RMDIR, SYS_UNLINK, SYS_WRITE,
 };
 
-use super::{read_into, syscall, syscall_result, with_stack_bytes, write_from};
+use super::{read_into, syscall, with_stack_bytes, write_from};
+
+pub(super) fn submit_rename(name: &[u8], call: impl FnOnce(usize, usize) -> usize) -> bool {
+    // The resource handler audits an overlong name before reading its address.
+    if name.len() > PATH_MAX_BYTES {
+        return call(0, name.len()) == 0;
+    }
+    with_stack_bytes::<PATH_MAX_BYTES>(name, call) == Some(0)
+}
 
 fn path_call(number: usize, path: &[u8], mode: usize) -> Option<usize> {
     with_stack_bytes::<PATH_MAX_BYTES>(path, |address, length| {

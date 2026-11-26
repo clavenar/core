@@ -26,7 +26,8 @@ pub(super) fn help() {
     print(b"goal run [--reply-bytes N] <program>\r\n");
     print(GRANT_HELP);
     print(RENAME_HELP);
-    print(b"goal diff  goal commit  goal revoke-file  goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n");
+    print(b"goal diff  goal commit  goal revoke-file  goal status  goal budget  goal cancel  goal close\r\n");
+    print(audit::HELP);
 }
 
 pub(super) const AGENT_RUN_HELP: &[u8] = b"agent run [--suspended] [--reply-bytes N] <program> [request]\r\n\

@@ -1,7 +1,7 @@
 use super::frame::{FRAME_SIZE, Frame, FrameAllocator};
 
 pub(crate) const USER_TEXT_BASE: usize = 0x0040_0000;
-pub(super) const MAX_USER_IMAGE_PAGES: usize = 5;
+pub(super) const MAX_USER_IMAGE_PAGES: usize = 6;
 const MAX_USER_IMAGE_SIZE: usize = MAX_USER_IMAGE_PAGES * FRAME_SIZE;
 
 const ELF_HEADER_SIZE: usize = 64;

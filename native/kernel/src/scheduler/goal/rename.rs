@@ -1,7 +1,9 @@
+use clv_abi::audit::{RenameDenial, RenameRecord};
 use clv_abi::goal::{CommitResult, GoalStatus, ReviewToken};
+use clv_abi::{LaunchParent, PATH_MAX_BYTES};
 
 use super::{Goal, Scheduler};
-use crate::fs::ramfs::{RamFs, StagedRename};
+use crate::fs::ramfs::{RamFs, StagedRename, TaskFs};
 
 pub(super) struct PendingRename {
     change: StagedRename,
@@ -21,6 +23,30 @@ impl PendingRename {
 }
 
 impl Goal {
+    fn stage_rename(
+        &mut self,
+        fs: &mut RamFs,
+        task_fs: &TaskFs,
+        fd: usize,
+        name: &[u8],
+        caller: LaunchParent,
+    ) -> Result<(), RenameDenial> {
+        if !self.is_active() {
+            return Err(RenameDenial::GoalInactive);
+        }
+        if self.rename.is_some() {
+            return Err(RenameDenial::AlreadyStaged);
+        }
+        let from_file_grant = matches!(caller, LaunchParent::Agent(_));
+        let change = task_fs.stage_rename(fs, fd, name, from_file_grant.then_some(self.handle))?;
+        self.rename = Some(PendingRename {
+            change,
+            token: None,
+            from_file_grant,
+        });
+        Ok(())
+    }
+
     pub(super) fn discard_granted_rename(&mut self, fs: &mut RamFs) {
         if let Some(rename) = self.rename.take_if(|rename| rename.from_file_grant) {
             rename.change.discard(fs);
@@ -43,42 +69,51 @@ impl Scheduler {
         handle: usize,
         fs: &mut RamFs,
         fd: usize,
-        new_name: &[u8],
+        length: usize,
+        copy: impl FnOnce(&mut [u8]) -> bool,
     ) -> Option<usize> {
         self.shell_goal(handle)?;
-        self.stage_rename(fs, fd, new_name, None)
+        self.stage_rename(fs, fd, LaunchParent::Shell, length, copy)
     }
 
     pub(crate) fn stage_agent_rename(
         &mut self,
         fs: &mut RamFs,
         fd: usize,
-        new_name: &[u8],
+        length: usize,
+        copy: impl FnOnce(&mut [u8]) -> bool,
     ) -> Option<usize> {
-        let (goal, _, _) = self.current_agent_member()?;
-        self.stage_rename(fs, fd, new_name, Some(goal.handle))
+        let (_, member, _) = self.current_agent_member()?;
+        self.stage_rename(fs, fd, LaunchParent::Agent(member.handle), length, copy)
     }
 
     fn stage_rename(
         &mut self,
         fs: &mut RamFs,
         fd: usize,
-        new_name: &[u8],
-        granting_goal: Option<usize>,
+        caller: LaunchParent,
+        length: usize,
+        copy: impl FnOnce(&mut [u8]) -> bool,
     ) -> Option<usize> {
         let goal = self.goal.as_mut()?;
-        if goal.rename.is_some() || !goal.is_active() {
-            return None;
-        }
-        let change = self.tasks[self.current]
-            .fs
-            .stage_rename(fs, fd, new_name, granting_goal)?;
-        goal.rename = Some(PendingRename {
-            change,
-            token: None,
-            from_file_grant: granting_goal.is_some(),
-        });
-        Some(0)
+        let mut buffer = [0; PATH_MAX_BYTES];
+        let name = match buffer.get_mut(..length) {
+            Some(name) => copy(name)
+                .then_some(&*name)
+                .ok_or(RenameDenial::InvalidBuffer),
+            None => Err(RenameDenial::InvalidBasename),
+        };
+        let outcome = name
+            .and_then(|name| goal.stage_rename(fs, &self.tasks[self.current].fs, fd, name, caller));
+        goal.rename_audit.record(
+            RenameRecord {
+                caller,
+                basename: name.ok(),
+                outcome,
+            }
+            .encode(),
+        );
+        outcome.ok().map(|()| 0)
     }
 
     pub(crate) fn read_goal_diff(

@@ -127,9 +127,9 @@ pub fn launch(
 
 /// Proposes a basename for the file granted to the calling goal agent.
 pub fn stage_rename(fd: usize, new_name: &[u8]) -> bool {
-    with_stack_bytes::<PATH_MAX_BYTES>(new_name, |address, length| {
+    super::fs::submit_rename(new_name, |address, length| {
         syscall(SYS_AGENT_STAGE_RENAME, fd, address, length)
-    }) == Some(0)
+    })
 }
 
 /// Starts an ordinary helper using bytes from the live agent's reservation.

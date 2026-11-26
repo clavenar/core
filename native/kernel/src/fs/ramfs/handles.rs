@@ -1,4 +1,4 @@
-use clv_abi::audit::DelegationDenial;
+use clv_abi::audit::{DelegationDenial, RenameDenial};
 use clv_abi::goal::FileRecipient;
 use clv_abi::{GrantKind, MESSAGE_MAX_BYTES, Program};
 
@@ -205,18 +205,20 @@ impl TaskFs {
         fd: usize,
         new_name: &[u8],
         granting_goal: Option<usize>,
-    ) -> Option<StagedRename> {
-        let handle = self.slots[self.handle_slot(fd)?].as_ref()?;
-        if let Some(goal) = granting_goal {
+    ) -> Result<StagedRename, RenameDenial> {
+        let handle = self.slots.iter().flatten().find(|handle| handle.id == fd);
+        let source = if let Some(goal) = granting_goal {
             let required = Access::GoalFile {
                 goal,
                 mode: FileGrantMode::StageRename,
             };
-            if handle.access != required {
-                return None;
-            }
-        }
-        fs.stage_rename(handle.node, new_name)
+            handle
+                .filter(|handle| handle.access == required)
+                .ok_or(RenameDenial::NoRenameGrant)?
+        } else {
+            handle.ok_or(RenameDenial::InvalidSource)?
+        };
+        fs.stage_rename(source.node, new_name)
     }
 
     fn from_grant(fs: &mut RamFs, node: Node, access: Access) -> Option<Self> {

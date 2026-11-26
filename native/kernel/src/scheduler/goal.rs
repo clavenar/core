@@ -10,7 +10,7 @@ use self::reads::ReadBudget;
 use self::rename::PendingRename;
 use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin};
-use clv_abi::audit::{EncodedRecordWithTool, EncodedReplyRecord, ReplyRecord};
+use clv_abi::audit::{EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, ReplyRecord};
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
     CancelResult, CloseResult, CreateOptions, GoalStatus, MAX_CHILDREN, ReadLimits,
@@ -79,6 +79,7 @@ pub(super) struct Goal {
     rename: Option<PendingRename>,
     delegation_audit: AuditHistory<EncodedRecordWithTool>,
     reply_audit: AuditHistory<EncodedReplyRecord>,
+    rename_audit: AuditHistory<EncodedRenameRecord>,
 }
 
 impl Goal {
@@ -258,6 +259,7 @@ impl Scheduler {
             rename: None,
             delegation_audit: AuditHistory::default(),
             reply_audit: AuditHistory::default(),
+            rename_audit: AuditHistory::default(),
         });
         Some(handle)
     }

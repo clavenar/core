@@ -18,11 +18,11 @@ use clv_abi::{
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_GRANT_DELEGABLE_FILE,
     SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO,
     SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT,
-    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
-    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
-    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
-    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVOKE_FILE,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
+    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE,
+    SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR,
+    SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
     SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
     SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
     SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
@@ -169,14 +169,12 @@ pub(crate) fn dispatch(
                 .spawn(fs, a1, scope, None)
                 .unwrap_or(SYSCALL_ERROR)
         }
-        SYS_GOAL_STAGE_RENAME => with_user_path(stack, a2, a3, |name| {
-            scheduler.stage_goal_rename(a0, fs, a1, name)
-        })
-        .unwrap_or(SYSCALL_ERROR),
-        SYS_AGENT_STAGE_RENAME => with_user_path(stack, a1, a2, |name| {
-            scheduler.stage_agent_rename(fs, a0, name)
-        })
-        .unwrap_or(SYSCALL_ERROR),
+        SYS_GOAL_STAGE_RENAME => scheduler
+            .stage_goal_rename(a0, fs, a1, a3, |name| stack.copy_from_user(a2, name))
+            .unwrap_or(SYSCALL_ERROR),
+        SYS_AGENT_STAGE_RENAME => scheduler
+            .stage_agent_rename(fs, a0, a2, |name| stack.copy_from_user(a1, name))
+            .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_DIFF | SYS_GOAL_REVIEW => scheduler
             .read_goal_diff(a0, number == SYS_GOAL_REVIEW, |names| {
                 stack.copy_to_user(names, a1, a2)
@@ -213,6 +211,10 @@ pub(crate) fn dispatch(
         SYS_GOAL_REPLY_AUDIT => write_audit_result(
             frame,
             scheduler.goal_reply_audit(a0, |bytes| stack.copy_to_user(bytes, a1, a2)),
+        ),
+        SYS_GOAL_RENAME_AUDIT => write_audit_result(
+            frame,
+            scheduler.goal_rename_audit(a0, |bytes| stack.copy_to_user(bytes, a1, a2)),
         ),
         SYS_GOAL_READ_AUDIT | SYS_GOAL_READ_AUDIT_WITH_LIMIT => scheduler
             .goal_read_audit(a0, number == SYS_GOAL_READ_AUDIT_WITH_LIMIT, |bytes| {

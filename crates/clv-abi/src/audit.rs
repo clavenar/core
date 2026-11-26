@@ -1,4 +1,7 @@
-//! Wire formats for the goal owner's delegation, reply and RamFS read histories.
+//! Wire formats for the goal owner's delegation, reply and RamFS histories.
+
+mod rename;
+pub use rename::{EncodedRenameRecord, RenameDenial, RenameRecord};
 
 use crate::agent::SHA256_BYTES;
 use crate::tool::ToolId;
@@ -120,28 +123,35 @@ pub struct DelegationRecordWithCaller {
     pub caller: LaunchParent,
 }
 
+fn encode_caller(caller: LaunchParent) -> [u8; 8] {
+    let handle = match caller {
+        LaunchParent::Shell => NO_CHILD_HANDLE,
+        LaunchParent::Agent(child) => child,
+    };
+    (handle as u64).to_le_bytes()
+}
+
+fn decode_caller(word: [u8; 8]) -> Option<LaunchParent> {
+    Some(match usize::try_from(u64::from_le_bytes(word)).ok()? {
+        NO_CHILD_HANDLE => LaunchParent::Shell,
+        child => LaunchParent::Agent(child),
+    })
+}
+
 impl DelegationRecordWithCaller {
     pub fn encode(self) -> EncodedRecordWithCaller {
         let mut record = [[0; 8]; 7];
         let [decision @ .., caller] = &mut record;
         *decision = self.decision.encode();
-        let handle = match self.caller {
-            LaunchParent::Shell => NO_CHILD_HANDLE,
-            LaunchParent::Agent(child) => child,
-        };
-        *caller = (handle as u64).to_le_bytes();
+        *caller = encode_caller(self.caller);
         record
     }
 
     pub fn decode(record: &EncodedRecordWithCaller) -> Option<Self> {
         let [decision @ .., caller] = record;
-        let caller = match usize::try_from(u64::from_le_bytes(*caller)).ok()? {
-            NO_CHILD_HANDLE => LaunchParent::Shell,
-            child => LaunchParent::Agent(child),
-        };
         Some(Self {
             decision: DelegationRecord::decode(decision)?,
-            caller,
+            caller: decode_caller(*caller)?,
         })
     }
 }

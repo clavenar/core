@@ -1,3 +1,4 @@
+use clv_abi::audit::RenameDenial;
 use clv_abi::goal::{CommitResult, RENAME_DIFF_MAX_BYTES};
 
 use super::{
@@ -83,10 +84,19 @@ impl StagedRename {
 }
 
 impl RamFs {
-    pub(super) fn stage_rename(&mut self, source: Node, new_name: &[u8]) -> Option<StagedRename> {
-        let (index, file) = self.linked_file(source)?;
-        if !Name::valid(new_name) || self.lookup(file.parent, new_name).is_some() {
-            return None;
+    pub(super) fn stage_rename(
+        &mut self,
+        source: Node,
+        new_name: &[u8],
+    ) -> Result<StagedRename, RenameDenial> {
+        let (index, file) = self
+            .linked_file(source)
+            .ok_or(RenameDenial::InvalidSource)?;
+        if !Name::valid(new_name) {
+            return Err(RenameDenial::InvalidBasename);
+        }
+        if self.lookup(file.parent, new_name).is_some() {
+            return Err(RenameDenial::DestinationExists);
         }
         let mut names = [0; DIFF_CAPACITY];
         let parent = file.parent;
@@ -94,10 +104,11 @@ impl RamFs {
         destination.copy_from_slice(new_name);
         // absolute_path writes backwards, placing the source directly before the new name.
         let source_len = self
-            .absolute_path(parent, Some(file.name.as_bytes()), path)?
+            .absolute_path(parent, Some(file.name.as_bytes()), path)
+            .ok_or(RenameDenial::InvalidSource)?
             .len();
         self.retain(source);
-        Some(StagedRename {
+        Ok(StagedRename {
             file_index: index,
             parent,
             base: self.revision,

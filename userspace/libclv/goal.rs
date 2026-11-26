@@ -1,6 +1,7 @@
 use clv_abi::audit::{
     AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, EncodedReadRecordWithLimit,
-    EncodedRecordWithTool, EncodedReplyRecord, ReadRecord, ReadRecordWithLimit, ReplyRecord,
+    EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, ReadRecord,
+    ReadRecordWithLimit, ReplyRecord,
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
@@ -9,14 +10,14 @@ pub use clv_abi::goal::{
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
-    MESSAGE_MAX_BYTES, PATH_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
+    MESSAGE_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
     SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
     SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE, SYS_GOAL_CREATE_WITH_OPTIONS,
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_GRANT_DELEGABLE_FILE,
     SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO,
     SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT,
-    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
+    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVOKE_FILE,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -156,9 +157,9 @@ pub fn revoke_file(goal: usize) -> bool {
 
 /// Retains the file behind the owner's descriptor and stages a same-directory rename.
 pub fn stage_rename(goal: usize, fd: usize, new_name: &[u8]) -> bool {
-    with_stack_bytes::<PATH_MAX_BYTES>(new_name, |address, length| {
+    super::fs::submit_rename(new_name, |address, length| {
         ecall(SYS_GOAL_STAGE_RENAME, goal, fd, address, length, 0).0
-    }) == Some(0)
+    })
 }
 
 /// Reads the pending change into the owner's stack buffer without consuming it.
@@ -247,6 +248,15 @@ pub fn reply_audit_rows(
     records: &mut [EncodedReplyRecord; AUDIT_CAPACITY],
 ) -> Option<(&[EncodedReplyRecord], usize)> {
     let (rows, overwritten, _) = audit_rows(SYS_GOAL_REPLY_AUDIT, goal, records)?;
+    Some((rows, overwritten))
+}
+
+/// Reads shell and agent rename staging decisions in attempt order.
+pub fn rename_audit_rows(
+    goal: usize,
+    records: &mut [EncodedRenameRecord; AUDIT_CAPACITY],
+) -> Option<(&[EncodedRenameRecord], usize)> {
+    let (rows, overwritten, _) = audit_rows(SYS_GOAL_RENAME_AUDIT, goal, records)?;
     Some((rows, overwritten))
 }
 

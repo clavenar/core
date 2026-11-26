@@ -48,8 +48,8 @@ build, shell and kernel use that registry for names and stable launch
 selectors. A versioned file tool maps an exact tool ID to one of those
 programs. [Program registry](crates/clv-abi/src/program.rs) · [File tool registry](crates/clv-abi/src/tool.rs)
 The loader accepts static, little-endian ELF64 executables with one
-read/execute segment of at most 20 KiB at `0x00400000`. The loader allocates
-one to five pages based on the segment's memory size (`p_memsz`) and zero-fills
+read/execute segment of at most 24 KiB at `0x00400000`. The loader allocates
+one to six pages based on the segment's memory size (`p_memsz`) and zero-fills
 any bytes beyond the file data. Boot reports each program's validated entry
 address. If loading fails, it prints `User ELF load failed` with the program
 name and idles.
@@ -994,6 +994,47 @@ To check a read-only grant, repeat the first sequence through `goal diff`
 using `goal grant-file /work/draft.txt`. The agent exits with status 1
 and the diff is empty.
 
+### Inspect rename staging decisions
+
+`goal audit --renames` shows the last four staging decisions for the current
+goal. Each row includes the requested basename, the result and the caller.
+For an agent, `caller_child` matches the original child handle printed by
+`agent run`. At a fresh QEMU prompt, give `hello` read access and ask for a rename.
+
+```text
+write /draft.txt hello
+goal create
+goal grant-file /draft.txt
+agent run hello --stage-rename final.txt
+wait hello
+goal audit --renames
+goal diff
+goal close
+```
+
+The agent exits with status 1. The audit shows `name="final.txt"`,
+`denied=no-rename-grant` and `caller=agent`. The diff is empty.
+In the same boot, give a new goal permission to stage the rename.
+
+```text
+goal create
+goal grant-file --stage-rename /draft.txt
+agent run hello --stage-rename final.txt
+wait hello
+goal diff
+goal audit --renames
+goal revoke-file
+goal diff
+goal audit --renames
+cat /draft.txt
+goal close
+```
+
+The first diff shows `rename /draft.txt -> final.txt`. Revocation clears
+the diff, and both audit reads show the same `staged` decision. The public
+file still contains `hello`. A successful `goal commit` also keeps the staging
+history available until the owner closes the goal.
+
 ### Share a read allowance across two helper launches
 
 Two different helper programs can run at the same time. Each program has
@@ -1362,6 +1403,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 70 `goal_create_preserving_file` | `a0` owner's file handle, `a1` stack address of the six call 48 argument words in order (little-endian RV64), `a2` length in bytes (48) | Fresh goal handle, or -1 on rejection |
 | 71 `goal_grant_file_for_rename` | `a0` goal handle, `a1` owner's file handle | 0 when the ready goal receives the grant, or -1 on rejection |
 | 72 `agent_stage_rename` | `a0` granted file handle, `a1` new basename address, `a2` length (1–64 bytes) | 0 when the calling agent stages the rename, or -1 on rejection |
+| 73 `goal_rename_audit` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes | Retained staging decision count (0–4), with overwritten count in `a1`, or -1 on failure |
 
 Calls 66 and 67 are restricted to the goal owner. Call 66 requires a linked
 writable RamFS file and an empty staging slot. It rejects an occupied name,
@@ -1584,7 +1626,34 @@ The goal takes precedence when the remaining amounts are equal. A successful
 copy charges the goal once and, for a helper, spends the same number of bytes
 from its helper allowance. Denials preserve both balances and the cursor.
 
-Calls 52, 53, 57, 59, 61 and 65 each copy up to four retained entries, oldest
+Call 73 lets the owner read the staging decisions from calls 66 and 72.
+The kernel records each attempt after authenticating the goal owner or
+its live agent. Each 88-byte row starts with three little-endian RV64 words
+for the caller, decision and copied basename length. Caller zero identifies
+the shell. An agent row carries the original child launch handle. The final
+64 bytes contain the submitted name followed by zero padding. An empty name
+has length zero. An oversized name or unreadable buffer has length
+`u64::MAX` and a zeroed name field. The shell quotes and escapes copied
+bytes and displays `<unavailable>` when the field could not be copied.
+
+| Decision code | Result |
+| --- | --- |
+| 0 | `staged` |
+| 1 | `no-rename-grant` — the agent lacks an open descriptor with this goal's staging permission |
+| 2 | `invalid-basename` — the name is empty, exceeds 64 bytes, is `.` or `..`, or contains a slash or NUL |
+| 3 | `destination-exists` — the name already exists in the source directory |
+| 4 | `already-staged` — the active goal already holds a pending rename |
+| 5 | `invalid-source` — the owner's descriptor is invalid or the source is unavailable as a linked writable file |
+| 6 | `goal-inactive` — the goal has completed, failed or been cancelled |
+| 7 | `invalid-buffer` — the nonempty name does not fit inside the caller's user stack |
+
+Each row reports the first failed check. The kernel copies the bounded
+input, checks the goal state and staging slot, then resolves the file
+descriptor and validates the source and destination. A failed launch or
+shell path open ends before a staging call. Revocation, cancellation and
+publication preserve earlier decisions. Closing the goal releases its history.
+
+Calls 52, 53, 57, 59, 61, 65 and 73 each copy up to four retained entries, oldest
 first. A short buffer or an invalid destination range returns -1 before copying
 any bytes. Zero capacity succeeds for an empty audit. Reads preserve the entries
 and the overwritten count, which saturates at the largest RV64 unsigned value.

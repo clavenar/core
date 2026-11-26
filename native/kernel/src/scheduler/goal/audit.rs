@@ -64,4 +64,12 @@ impl Scheduler {
     ) -> Option<(usize, usize)> {
         self.shell_goal(handle)?.reply_audit.read(copy)
     }
+
+    pub(crate) fn goal_rename_audit(
+        &self,
+        handle: usize,
+        copy: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<(usize, usize)> {
+        self.shell_goal(handle)?.rename_audit.read(copy)
+    }
 }

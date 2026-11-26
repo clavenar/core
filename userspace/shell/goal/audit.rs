@@ -1,17 +1,20 @@
 use clv::goal;
 use clv_abi::audit::{
     AUDIT_CAPACITY, DelegationDenial, DelegationRecordWithTool, ReadLimitScope,
-    ReadRecordWithLimit, ReplyRecord,
+    ReadRecordWithLimit, RenameDenial, RenameRecord, ReplyRecord,
 };
 use clv_abi::tool::FILE_TOOLS;
-use clv_abi::{LaunchParent, Program};
+use clv_abi::{LaunchParent, PATH_MAX_BYTES, Program};
 
 use super::{DIGITS, amount, decimal, hex, hex_digest, print, print_line};
+
+pub(super) const HELP: &[u8] = b"goal audit [--replies | --reads | --renames]\r\n";
 
 enum View {
     Delegations,
     Replies,
     Reads,
+    Renames,
 }
 
 pub(super) fn show(handle: Option<usize>, option: &[u8]) {
@@ -19,7 +22,8 @@ pub(super) fn show(handle: Option<usize>, option: &[u8]) {
         b"" => View::Delegations,
         b"--replies" => View::Replies,
         b"--reads" => View::Reads,
-        _ => return print(b"usage: goal audit [--replies | --reads]\r\n"),
+        b"--renames" => View::Renames,
+        _ => return crate::print_usage(HELP),
     };
     let Some(handle) = handle else {
         return print(b"no current goal\r\n");
@@ -31,6 +35,16 @@ pub(super) fn show(handle: Option<usize>, option: &[u8]) {
 
 fn show_rows(handle: usize, view: View) -> Option<()> {
     match view {
+        View::Renames => {
+            let mut records = [Default::default(); AUDIT_CAPACITY];
+            let (rows, overwritten) = goal::rename_audit_rows(handle, &mut records)?;
+            print_snapshot(
+                handle,
+                overwritten,
+                rows.iter().map(RenameRecord::decode),
+                print_rename,
+            )
+        }
         View::Reads => {
             let mut records = [Default::default(); AUDIT_CAPACITY];
             let (rows, overwritten, total) =
@@ -91,6 +105,16 @@ fn print_header(handle: usize, count: usize, overwritten: usize) {
     ]);
 }
 
+fn caller_fields(caller: LaunchParent, child: &mut [u8; 18]) -> (&'static [u8], &[u8]) {
+    match caller {
+        LaunchParent::Shell => (b" caller=shell", b""),
+        LaunchParent::Agent(handle) => {
+            *child = hex(handle);
+            (b" caller=agent caller_child=", child)
+        }
+    }
+}
+
 fn print_delegation(record: DelegationRecordWithTool<'_>) {
     let entry = record.delegation;
     let child;
@@ -104,14 +128,8 @@ fn print_delegation(record: DelegationRecordWithTool<'_>) {
         }
         Err(reason) => (b" denied=", denial_name(reason)),
     };
-    let caller_child;
-    let (caller, identity): (&[u8], &[u8]) = match entry.caller {
-        LaunchParent::Shell => (b" caller=shell", b""),
-        LaunchParent::Agent(handle) => {
-            caller_child = hex(handle);
-            (b" caller=agent caller_child=", &caller_child)
-        }
-    };
+    let mut caller_child = [0; 18];
+    let (caller, identity) = caller_fields(entry.caller, &mut caller_child);
     let request = entry.decision.request;
     let raw_id;
     let digest;
@@ -152,6 +170,35 @@ fn print_delegation(record: DelegationRecordWithTool<'_>) {
         },
         image_hash,
     ]);
+}
+
+fn print_rename(entry: RenameRecord<'_>) {
+    let decision: &[u8] = match entry.outcome {
+        Ok(()) => b" staged",
+        Err(RenameDenial::NoRenameGrant) => b" denied=no-rename-grant",
+        Err(RenameDenial::InvalidBasename) => b" denied=invalid-basename",
+        Err(RenameDenial::DestinationExists) => b" denied=destination-exists",
+        Err(RenameDenial::AlreadyStaged) => b" denied=already-staged",
+        Err(RenameDenial::InvalidSource) => b" denied=invalid-source",
+        Err(RenameDenial::GoalInactive) => b" denied=goal-inactive",
+        Err(RenameDenial::InvalidBuffer) => b" denied=invalid-buffer",
+    };
+    let mut text = [0; 4 * PATH_MAX_BYTES + 2];
+    let name: &[u8] = if let Some(name) = entry.basename {
+        text[0] = b'"';
+        let mut end = 1;
+        for byte in name.escape_ascii() {
+            text[end] = byte;
+            end += 1;
+        }
+        text[end] = b'"';
+        &text[..=end]
+    } else {
+        b"<unavailable>"
+    };
+    let mut child = [0; 18];
+    let (caller, identity) = caller_fields(entry.caller, &mut child);
+    print_line(&[b"name=", name, decision, caller, identity]);
 }
 
 fn print_reply(entry: ReplyRecord) {
