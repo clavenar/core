@@ -641,6 +641,34 @@ and `denied=helper-not-allowed`. The first shows `caller=shell`. The second
 shows `caller=agent caller_child=<handle>`, where the handle identifies the
 original `hello` launch even after its program slot is reused.
 
+### Revoke a goal's file grant
+
+At the `clv>` prompt, give `hello` a file, then revoke it while `hello` is
+suspended with the descriptor already in its handle table.
+
+```text
+goal create --read-bytes 18
+goal grant-file /hello.txt
+agent run --suspended hello
+goal revoke-file
+agent resume
+wait hello
+recv hello
+goal audit --reads
+cat /hello.txt
+goal close
+```
+
+`wait hello` reports exit 1 and `recv hello` prints `cannot read requested file`.
+The read audit shows `entries=0` and `read_bytes=0`. The shell's `cat`
+still prints `Hello from RamFS`.
+
+To check delegation, repeat the two-caller example above with
+`--allow-helper grep`. Replace the shell's `agent delegate` command with
+`goal revoke-file`, then run `agent resume`, `wait hello` and `goal audit`.
+The audit shows `denied=no-delegable-file caller=agent`. If `grep` already
+holds a handle when the shell revokes the grant, its next read fails as well.
+
 ### Native syscall ABI
 
 The user program passes the call number in `a7` and executes `ecall`. Call 0
@@ -909,6 +937,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 57 `goal_read_audit` | Same arguments as call 52 | Retained read entry count (0–4), overwritten count in `a1` and lifetime bytes delivered in `a2`, or -1 on failure |
 | 58 `agent_run_with_request` | `a0` goal, `a1` program, `a2` flags, `a3` optional agent reply allowance, `a4` request address, `a5` request length | Fresh agent handle, with its child launch handle in `a1` |
 | 59 `goal_audit_with_caller` | Same arguments as call 52 | Retained delegation entry count (0–4), with overwritten count in `a1`, or -1 on failure |
+| 60 `goal_revoke_file` | `a0` goal handle | 0 for an owned goal, including a repeat call, or -1 for an invalid handle or caller |
 
 The shell owns the goal and controls its agents. Calls 49, 51 and 56 also
 accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
@@ -945,6 +974,18 @@ get independent cursors on the same retained file, even after pathname reuse.
 The kernel releases the goal's reference when all places have been used or the
 goal finishes. Each child can close its own handle. Exit, fault or cancellation
 closes any handle it still holds.
+
+Call 60 withdraws the goal's retained file and closes all descriptors
+derived from that grant, including copies already held by helpers. Only the
+owning shell can call it. Each read and revocation runs to completion on
+the boot hart. Bytes delivered earlier stay charged. A later read using a
+revoked descriptor fails before copying or charging bytes. Other opens of
+the same file keep their own authority and cursor.
+
+Revocation succeeds when the goal has no outstanding grant. The owner can
+attach a fresh grant while the goal is still ready. After revocation in a
+running goal, later direct launches start with an empty handle table, and
+requests to delegate the withdrawn file fail.
 
 Call 50 lets the direct agent delegate to any eligible helper. Call 54 binds the
 agent's handle to one helper program for delegation. Ordinary direct children

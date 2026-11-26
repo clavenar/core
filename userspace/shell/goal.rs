@@ -22,6 +22,11 @@ pub(super) fn command(
     match split_word(arguments) {
         (b"create", arguments) => create(arguments, current),
         (b"grant-file", arguments) => grant_file(handle, arguments),
+        (b"revoke-file", b"") => match handle {
+            Some(handle) if goal::revoke_file(handle) => print(b"file revoked\r\n"),
+            Some(_) => print(b"cannot revoke file\r\n"),
+            None => print(b"no current goal\r\n"),
+        },
         (b"run", arguments) => children.run_in_goal(handle, arguments),
         (b"audit", option @ (b"" | b"--replies" | b"--reads")) => match handle {
             Some(handle) => audit::show(handle, option),
@@ -49,7 +54,7 @@ pub(super) fn command(
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N] | grant-file [--delegable | --delegate-to <program>] <path> | run [--reply-bytes N] <program> | budget | audit [--replies | --reads] | status | cancel | close\r\n"),
+        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N] | grant-file [--delegable | --delegate-to <program>] <path> | revoke-file | run [--reply-bytes N] <program> | budget | audit [--replies | --reads] | status | cancel | close\r\n"),
     }
 }
 

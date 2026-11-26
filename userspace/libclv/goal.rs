@@ -7,8 +7,8 @@ use clv_abi::{
     SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE,
     SYS_GOAL_CREATE, SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET,
     SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO,
-    SYS_GOAL_READ_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET,
-    SYS_GOAL_STATUS,
+    SYS_GOAL_READ_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, syscall, syscall_result};
@@ -79,6 +79,11 @@ pub fn grant_file_with_recipient(goal: usize, fd: usize, recipient: Option<FileR
         Some(FileRecipient::Program(program)) => (SYS_GOAL_GRANT_FILE_TO, program as usize),
     };
     syscall(call, goal, fd, selector) == 0
+}
+
+/// Withdraws the goal's file grant and closes every handle derived from it.
+pub fn revoke_file(goal: usize) -> bool {
+    syscall(SYS_GOAL_REVOKE_FILE, goal, 0, 0) == 0
 }
 
 pub fn budget(goal: usize) -> Option<ReplyBudget> {

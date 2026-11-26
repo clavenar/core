@@ -113,7 +113,7 @@ impl Goal {
         let slot = self.free_slot()?;
         let replies = ReplyReservation::new(self.budget().available, reply_bytes)?;
         let child_fs = match &self.file {
-            Some(file) => file.open_for_child(fs, agent.is_some())?,
+            Some(file) => file.open_for_child(fs, self.handle, agent.is_some())?,
             None => TaskFs::empty(),
         };
         let role = agent.map_or(MemberRole::Child, MemberRole::Agent);
@@ -255,6 +255,16 @@ impl Scheduler {
             return None;
         }
         goal.file = Some(self.tasks[self.current].fs.retain_file(fs, fd, recipient)?);
+        Some(())
+    }
+
+    pub(crate) fn revoke_goal_file(&mut self, handle: usize, fs: &mut RamFs) -> Option<()> {
+        self.shell_goal(handle)?;
+        self.goal.as_mut()?.release_file(fs);
+        // A full goal has already released its pin. Its issued handles still carry its ID.
+        for task in &mut self.tasks {
+            task.fs.revoke_goal_file(fs, handle);
+        }
         Some(())
     }
 

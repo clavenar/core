@@ -19,7 +19,11 @@ impl Node {
 enum Access {
     ReadOnly,
     ReadWrite,
-    ReadAndDelegate(FileRecipient),
+    /// A read-only handle derived from this goal's grant, including helper copies.
+    GoalFile {
+        goal: usize,
+        delegate_to: Option<FileRecipient>,
+    },
 }
 
 struct Handle {
@@ -58,10 +62,15 @@ pub(crate) struct FileGrant {
 }
 
 impl FileGrant {
-    pub(crate) fn open_for_child(&self, fs: &mut RamFs, is_agent: bool) -> Option<TaskFs> {
-        let access = match (is_agent, self.recipient) {
-            (true, Some(recipient)) => Access::ReadAndDelegate(recipient),
-            _ => Access::ReadOnly,
+    pub(crate) fn open_for_child(
+        &self,
+        fs: &mut RamFs,
+        goal: usize,
+        is_agent: bool,
+    ) -> Option<TaskFs> {
+        let access = Access::GoalFile {
+            goal,
+            delegate_to: if is_agent { self.recipient } else { None },
         };
         TaskFs::from_grant(fs, self.node, access)
     }
@@ -113,12 +122,15 @@ impl TaskFs {
         fs: &mut RamFs,
         helper: Program,
     ) -> Result<Self, DelegationDenial> {
-        let (node, recipient) = self
+        let (node, goal, recipient) = self
             .slots
             .iter()
             .flatten()
             .find_map(|handle| match handle.access {
-                Access::ReadAndDelegate(recipient) => Some((handle.node, recipient)),
+                Access::GoalFile {
+                    goal,
+                    delegate_to: Some(recipient),
+                } => Some((handle.node, goal, recipient)),
                 _ => None,
             })
             .ok_or(DelegationDenial::NoDelegableFile)?;
@@ -127,7 +139,11 @@ impl TaskFs {
         {
             return Err(DelegationDenial::FileRecipientNotAllowed);
         }
-        Self::from_grant(fs, node, Access::ReadOnly).ok_or(DelegationDenial::FileHandlesExhausted)
+        let access = Access::GoalFile {
+            goal,
+            delegate_to: None,
+        };
+        Self::from_grant(fs, node, access).ok_or(DelegationDenial::FileHandlesExhausted)
     }
 
     fn grant_node(&self, fd: usize, kind: GrantKind) -> Option<Node> {
@@ -290,6 +306,16 @@ impl TaskFs {
         let handle = self.slots[slot].take()?;
         fs.release(handle.node);
         Some(0)
+    }
+
+    pub(crate) fn revoke_goal_file(&mut self, fs: &mut RamFs, goal: usize) {
+        for slot in &mut self.slots {
+            if let Some(handle) = slot.take_if(|handle| {
+                matches!(handle.access, Access::GoalFile { goal: source, .. } if source == goal)
+            }) {
+                fs.release(handle.node);
+            }
+        }
     }
 
     pub(crate) fn close_all(&mut self, fs: &mut RamFs) {

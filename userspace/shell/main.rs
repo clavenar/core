@@ -80,7 +80,7 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<g
               grep -F <pattern> <path>  recv <program>  wait <program>  event\r\n\
               goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N]\r\n\
               goal run [--reply-bytes N] <program>\r\n\
-              goal grant-file [--delegable | --delegate-to <program>] <path>\r\n\
+              goal grant-file [--delegable | --delegate-to <program>] <path>  goal revoke-file\r\n\
               goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n\
               agent run [--suspended] [--reply-bytes N] <program>\r\n\
               agent run hello --delegate --with-file --reply-bytes N grep -F <pattern>\r\n\
