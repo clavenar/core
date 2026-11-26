@@ -1,10 +1,11 @@
-use clv_abi::audit::{AUDIT_CAPACITY, DelegationRecord, EncodedRecord};
+use clv_abi::audit::{AUDIT_CAPACITY, DelegationRecord, ReplyRecord};
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
 use clv_abi::{
     SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
     SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
-    SYS_GOAL_GRANT_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET,
+    SYS_GOAL_STATUS,
 };
 
 use super::{ecall, syscall, syscall_result};
@@ -46,16 +47,29 @@ pub fn budget(goal: usize) -> Option<ReplyBudget> {
     ReplyBudget::from_registers(flags, available, reserved, spent)
 }
 
-pub struct AuditSnapshot {
-    pub entries: [Option<DelegationRecord>; AUDIT_CAPACITY],
+pub struct AuditSnapshot<Record = DelegationRecord> {
+    pub entries: [Option<Record>; AUDIT_CAPACITY],
     pub overwritten: usize,
 }
 
 /// Reads the retained decisions in launch-attempt order without consuming them.
 pub fn audit(goal: usize) -> Option<AuditSnapshot> {
-    let mut records: [EncodedRecord; AUDIT_CAPACITY] = Default::default();
+    read_audit(SYS_GOAL_AUDIT, goal, DelegationRecord::decode)
+}
+
+/// Reads the goal members' reply-budget decisions in send-attempt order.
+pub fn reply_audit(goal: usize) -> Option<AuditSnapshot<ReplyRecord>> {
+    read_audit(SYS_GOAL_REPLY_AUDIT, goal, ReplyRecord::decode)
+}
+
+fn read_audit<Record: Copy, const WORDS: usize>(
+    number: usize,
+    goal: usize,
+    decode: impl Fn(&[[u8; 8]; WORDS]) -> Option<Record>,
+) -> Option<AuditSnapshot<Record>> {
+    let mut records = [[[0; 8]; WORDS]; AUDIT_CAPACITY];
     let (count, overwritten, _, _) = ecall(
-        SYS_GOAL_AUDIT,
+        number,
         goal,
         records.as_mut_ptr().expose_provenance(),
         core::mem::size_of_val(&records),
@@ -64,7 +78,7 @@ pub fn audit(goal: usize) -> Option<AuditSnapshot> {
     );
     let mut entries = [None; AUDIT_CAPACITY];
     for (entry, record) in entries.iter_mut().zip(records.get(..count)?) {
-        *entry = Some(DelegationRecord::decode(record)?);
+        *entry = Some(decode(record)?);
     }
     Some(AuditSnapshot {
         entries,

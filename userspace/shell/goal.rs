@@ -23,10 +23,11 @@ pub(super) fn command(
         (b"create", arguments) => create(arguments, current),
         (b"grant-file", arguments) => grant_file(handle, arguments),
         (b"run", arguments) => children.run_in_goal(handle, arguments),
-        (b"audit", b"") => match handle {
-            Some(handle) => audit::show(handle, children),
+        (b"audit", option @ (b"" | b"--replies")) => match handle {
+            Some(handle) => audit::show(handle, children, option == b"--replies"),
             None => print(b"no current goal\r\n"),
         },
+        (b"audit", _) => print(b"usage: goal audit [--replies]\r\n"),
         (b"budget", b"") => match handle.and_then(goal::budget) {
             Some(budget) => print_budget(budget),
             None => print(b"no current goal\r\n"),
@@ -48,7 +49,7 @@ pub(super) fn command(
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] | grant-file [--delegable] <path> | run [--reply-bytes N] <hello|echo> | budget | audit | status | cancel | close\r\n"),
+        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] | grant-file [--delegable] <path> | run [--reply-bytes N] <hello|echo> | budget | audit [--replies] | status | cancel | close\r\n"),
     }
 }
 
@@ -107,13 +108,14 @@ fn decimal(mut value: usize, buf: &mut [u8; DIGITS]) -> &[u8] {
     }
 }
 
-fn print_budget(budget: ReplyBudget) {
-    fn amount(value: Option<usize>, buf: &mut [u8; DIGITS]) -> &[u8] {
-        match value {
-            Some(value) => decimal(value, buf),
-            None => b"unlimited",
-        }
+fn amount(value: Option<usize>, buf: &mut [u8; DIGITS]) -> &[u8] {
+    match value {
+        Some(value) => decimal(value, buf),
+        None => b"unlimited",
     }
+}
+
+fn print_budget(budget: ReplyBudget) {
     print_line(&[
         b"available=",
         amount(budget.available, &mut [0; DIGITS]),

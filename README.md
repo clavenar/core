@@ -330,6 +330,34 @@ The goal retains its four most recent decisions in chronological order.
 the same entries again after `wait`, `event`, or `goal cancel`, until you
 close the goal. Each new goal starts with an empty audit.
 
+`goal audit --replies` shows whether each child's reply fit its own remaining
+allowance. For example, the `echo` helper tries to send the 10 bytes in
+`echo ready`.
+
+```text
+goal create --children 2 --reply-bytes 24
+agent run --suspended --reply-bytes 16 hello
+agent delegate --reply-bytes 9 echo
+wait echo
+goal audit
+goal audit --replies
+goal budget
+goal cancel
+goal close
+```
+
+Repeat with a 10-byte allowance in the `agent delegate` command. `goal audit`
+shows an accepted launch in both runs. The reply audit identifies that same
+child handle and shows the decision at the time of the send.
+
+| Helper allowance | Exit status | Reply audit after the child handle | Goal budget after the wait |
+| --- | --- | --- | --- |
+| 9 | 1 | `bytes=10 remaining_before=9 denied=insufficient-reply-bytes` | `available=8 reserved=16 spent=0` |
+| 10 | 0 | `bytes=10 remaining_before=10 sent` | `available=8 reserved=6 spent=10` |
+
+Each goal keeps the last four reply-budget decisions independently of its
+delegation history. Both histories can be read repeatedly until `goal close`.
+
 You can cancel a ready goal directly at the shell prompt.
 
 ```text
@@ -672,6 +700,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 50 `goal_grant_delegable_file` | `a0` goal handle, `a1` shell file handle | 0 when attached with permission for the goal's agent to delegate read access, or -1 on rejection |
 | 51 `agent_delegate_with_file` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle with read access to the agent's file, or -1 on rejection |
 | 52 `goal_audit` | `a0` goal handle, `a1` shell stack destination, `a2` capacity in bytes | Retained entry count (0–4), with overwritten count in `a1`, or -1 on failure |
+| 53 `goal_reply_audit` | Same arguments as call 52 | Retained reply-budget entry count (0–4), with overwritten reply entry count in `a1`, or -1 on failure |
 
 Only the shell can use these calls. A stale or invalid handle or a call
 from another task returns -1 in `a0`. Calls 33 and 43 create single-child
@@ -728,7 +757,16 @@ On denial, the code identifies the first failed check and the handle is zero.
 | 7 | Agent has no open delegable file |
 | 8 | RamFS file handles exhausted |
 
-The kernel copies all retained entries, oldest first, in one read. A short
+Call 53 returns the decisions recorded when a goal member's `message_send`
+or `reply_send` reaches the budget check. The kernel validates the mailbox,
+message arguments and user buffer first. Each 32-byte entry contains four
+little-endian RV64 words in order. They hold the caller's original child
+launch handle, byte count submitted to the budget check, remaining allowance
+before the send, and flags. For a sent reply, the flags are 0 for a finite
+allowance or 1 for an unlimited allowance (remaining word zero). A value of
+2 means the reservation was too small. A valid zero-byte send gets an entry.
+
+Calls 52 and 53 each copy all retained entries, oldest first, in one read. A short
 buffer or an invalid destination range returns -1 before copying any bytes.
 Zero capacity succeeds for an empty audit. Reads preserve the entries and
 the overwritten count, which saturates at the largest RV64 unsigned value.

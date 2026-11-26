@@ -28,6 +28,10 @@ impl ReplyReservation {
         Some((parent, helper))
     }
 
+    pub(super) fn remaining(&self) -> Option<usize> {
+        self.remaining
+    }
+
     pub(super) fn charge(&mut self, bytes: usize) -> Option<()> {
         if let Some(remaining) = &mut self.remaining {
             *remaining = remaining.checked_sub(bytes)?;

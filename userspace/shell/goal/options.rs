@@ -56,9 +56,18 @@ impl GoalOptions {
 }
 
 fn count(arguments: &[u8]) -> Option<(usize, &[u8])> {
-    let (value, rest) = split_word(arguments);
-    if !value.first()?.is_ascii_digit() {
+    let (digits, rest) = split_word(arguments);
+    if digits.is_empty() {
         return None;
     }
-    Some((core::str::from_utf8(value).ok()?.parse().ok()?, rest))
+    let mut value = 0usize;
+    for &digit in digits {
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        value = value
+            .checked_mul(10)?
+            .checked_add(usize::from(digit - b'0'))?;
+    }
+    Some((value, rest))
 }

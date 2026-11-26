@@ -1,36 +1,10 @@
-use clv_abi::audit::{
-    AUDIT_CAPACITY, DelegationDenial, DelegationRecord, DelegationRequest, EncodedRecord,
-};
+use clv_abi::audit::{DelegationDenial, DelegationRecord, DelegationRequest};
 
 use super::{Goal, MemberRole};
 use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::scheduler::{Scheduler, Task, TaskState};
 
-#[derive(Default)]
-pub(super) struct DelegationAudit {
-    entries: [EncodedRecord; AUDIT_CAPACITY],
-    len: usize,
-    overwritten: usize,
-}
-
-impl DelegationAudit {
-    fn record(&mut self, entry: DelegationRecord) {
-        if self.len == self.entries.len() {
-            self.entries.copy_within(1.., 0);
-            self.overwritten = self.overwritten.saturating_add(1);
-        } else {
-            self.len += 1;
-        }
-        self.entries[self.len - 1] = entry.encode();
-    }
-}
-
 impl Scheduler {
-    pub(crate) fn goal_audit(&self, handle: usize) -> Option<(&[EncodedRecord], usize)> {
-        let audit = &self.shell_goal(handle)?.audit;
-        Some((&audit.entries[..audit.len], audit.overwritten))
-    }
-
     pub(crate) fn delegate(&mut self, fs: &mut RamFs, request: DelegationRequest) -> Option<usize> {
         let (_, agent) = self.agent_member(request.agent)?;
         let parent = agent.handle;
@@ -48,7 +22,8 @@ impl Scheduler {
             Ok((launch, _)) => Ok(launch.handle),
             Err(reason) => Err(*reason),
         };
-        goal.audit.record(DelegationRecord { request, outcome });
+        goal.delegation_audit
+            .record(DelegationRecord { request, outcome }.encode());
         let (launch, child_fs) = admission.ok()?;
         Some(self.install_child(launch, child_fs, None, None, TaskState::Runnable))
     }

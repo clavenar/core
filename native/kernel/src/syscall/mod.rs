@@ -8,10 +8,10 @@ use clv_abi::{
     SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL,
     SYS_GOAL_CLOSE, SYS_GOAL_CREATE, SYS_GOAL_CREATE_WITH_OPTIONS,
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
-    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
-    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
-    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
-    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
+    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE,
+    SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR,
+    SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
     SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_PIPE,
     SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE,
     SYSCALL_ERROR,
@@ -128,19 +128,14 @@ pub(crate) fn dispatch(
             frame.registers[REG_A3] = spent;
             flags
         }),
-        SYS_GOAL_AUDIT => {
-            scheduler
-                .goal_audit(a0)
-                .map_or(SYSCALL_ERROR, |(entries, overwritten)| {
-                    let bytes = entries.as_flattened().as_flattened();
-                    if stack.copy_to_user(bytes, a1, a2) {
-                        frame.registers[REG_A1] = overwritten;
-                        entries.len()
-                    } else {
-                        SYSCALL_ERROR
-                    }
-                })
-        }
+        SYS_GOAL_AUDIT | SYS_GOAL_REPLY_AUDIT => scheduler
+            .read_goal_audit(a0, number == SYS_GOAL_REPLY_AUDIT, |bytes| {
+                stack.copy_to_user(bytes, a1, a2)
+            })
+            .map_or(SYSCALL_ERROR, |(count, overwritten)| {
+                frame.registers[REG_A1] = overwritten;
+                count
+            }),
         SYS_GOAL_GRANT_FILE | SYS_GOAL_GRANT_DELEGABLE_FILE => scheduler
             .grant_goal_file(a0, a1, number == SYS_GOAL_GRANT_DELEGABLE_FILE, fs)
             .map_or(SYSCALL_ERROR, |()| 0),

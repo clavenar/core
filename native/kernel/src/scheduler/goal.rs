@@ -1,10 +1,12 @@
+mod audit;
 mod budget;
 mod delegation;
 
+use self::audit::AuditHistory;
 use self::budget::ReplyReservation;
-use self::delegation::DelegationAudit;
 use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult};
+use clv_abi::audit::{EncodedRecord, EncodedReplyRecord, ReplyRecord};
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{CancelResult, CloseResult, GoalStatus, MAX_CHILDREN};
 
@@ -50,7 +52,8 @@ pub(super) struct Goal {
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
     file: Option<FileGrant>,
-    audit: DelegationAudit,
+    delegation_audit: AuditHistory<EncodedRecord>,
+    reply_audit: AuditHistory<EncodedReplyRecord>,
 }
 
 impl Goal {
@@ -153,10 +156,19 @@ impl Goal {
     }
 
     pub(super) fn charge_reply(&mut self, child: usize, bytes: usize) -> Option<()> {
-        if let Some(member) = self.live_member_mut(child) {
-            member.replies.charge(bytes)?;
-        }
-        Some(())
+        let Some(member) = self.live_member_mut(child) else {
+            return Some(());
+        };
+        let remaining_before = member.replies.remaining();
+        let charged = member.replies.charge(bytes);
+        let record = ReplyRecord {
+            child,
+            bytes,
+            remaining_before,
+            sent: charged.is_some(),
+        };
+        self.reply_audit.record(record.encode());
+        charged
     }
 
     pub(super) fn finish_child(
@@ -203,7 +215,8 @@ impl Scheduler {
             members: [const { None }; MAX_CHILDREN],
             cancelled_before_launch: false,
             file: None,
-            audit: DelegationAudit::default(),
+            delegation_audit: AuditHistory::default(),
+            reply_audit: AuditHistory::default(),
         });
         Some(handle)
     }
