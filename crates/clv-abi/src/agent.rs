@@ -1,11 +1,13 @@
 use crate::goal::GoalStatus;
-use crate::{MESSAGE_MAX_BYTES, Program};
+use crate::{MESSAGE_MAX_BYTES, Program, RequestKind};
 
 const SUSPENDED: usize = 6;
 pub const RUN_SUSPENDED: usize = 1;
 pub const RUN_REPLY_LIMIT: usize = 2;
 /// Selects a one-byte PlanIntent in place of the default FileDelegation payload.
 pub const RUN_PLAN_INTENT: usize = 4;
+/// Selects the two-byte definition ID in a PlanDefinition request.
+pub const RUN_PLAN_DEFINITION: usize = 8;
 /// A zero agent handle on a delegation call selects the calling task's live agent.
 pub const CURRENT_AGENT: usize = 0;
 
@@ -13,18 +15,93 @@ pub const DELEGATION_HEADER_BYTES: usize = 16;
 pub const DELEGATION_REQUEST_MAX_BYTES: usize = DELEGATION_HEADER_BYTES + MESSAGE_MAX_BYTES;
 
 /// One-byte intent delivered to a user-space planner.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PlanIntent {
     FindGreeting = 1,
 }
 
 impl PlanIntent {
-    pub fn decode(bytes: &[u8]) -> Option<Self> {
-        match bytes {
-            [id] if *id == Self::FindGreeting as u8 => Some(Self::FindGreeting),
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::FindGreeting => "find-greeting",
+        }
+    }
+
+    pub const fn program(self) -> Program {
+        match self {
+            Self::FindGreeting => Program::Hello,
+        }
+    }
+
+    pub const fn from_raw(id: usize) -> Option<Self> {
+        match id {
+            id if id == Self::FindGreeting as usize => Some(Self::FindGreeting),
             _ => None,
         }
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let [id] = bytes else { return None };
+        Self::from_raw(usize::from(*id))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DefinitionId {
+    pub intent: PlanIntent,
+    pub revision: u8,
+}
+
+pub const FIND_GREETING_V1: DefinitionId = DefinitionId {
+    intent: PlanIntent::FindGreeting,
+    revision: 1,
+};
+
+impl DefinitionId {
+    pub const fn encode(self) -> [u8; 2] {
+        [self.intent as u8, self.revision]
+    }
+
+    /// The original one-byte intent names revision 1 for the lifetime of its ABI.
+    pub fn from_request(kind: RequestKind, bytes: &[u8]) -> Option<Self> {
+        match (kind, bytes) {
+            (RequestKind::PlanIntent, [id]) if *id == FIND_GREETING_V1.intent as u8 => {
+                Some(FIND_GREETING_V1)
+            }
+            (RequestKind::PlanDefinition, [id, revision]) => Some(Self {
+                intent: PlanIntent::from_raw(usize::from(*id))?,
+                revision: *revision,
+            }),
+            _ => None,
+        }
+    }
+}
+
+pub const SHA256_BYTES: usize = 32;
+/// Intent, revision and SHA-256. An all-zero record identifies an unpinned agent.
+pub type EncodedDefinitionPin = [u8; 2 + SHA256_BYTES];
+pub const NO_DEFINITION: EncodedDefinitionPin = [0; 2 + SHA256_BYTES];
+
+pub struct DefinitionPin<'a> {
+    pub id: DefinitionId,
+    pub sha256: &'a [u8; SHA256_BYTES],
+}
+
+impl<'a> DefinitionPin<'a> {
+    pub fn encode(&self) -> EncodedDefinitionPin {
+        let mut bytes = [0; 2 + SHA256_BYTES];
+        bytes[..2].copy_from_slice(&self.id.encode());
+        bytes[2..].copy_from_slice(self.sha256);
+        bytes
+    }
+
+    pub fn decode(bytes: &'a EncodedDefinitionPin) -> Option<Self> {
+        let (id, hash) = bytes.split_first_chunk::<2>()?;
+        Some(Self {
+            id: DefinitionId::from_request(RequestKind::PlanDefinition, id)?,
+            sha256: hash.try_into().ok()?,
+        })
     }
 }
 

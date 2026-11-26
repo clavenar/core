@@ -269,12 +269,26 @@ fn agent_run_args(
         (Program::Hello, (b"--delegate", args)) => Some(agent::RunRequest::DelegateWithFile(
             Helper::parse(args)?.file_request()?,
         )),
-        (Program::Hello, (b"--mock", b"find-greeting")) => {
-            Some(agent::RunRequest::Plan(agent::PlanIntent::FindGreeting))
+        (Program::Hello, (b"--mock", name)) => {
+            Some(agent::RunRequest::Definition(mock_definition(name)?))
         }
         _ => return None,
     };
     Some((options, program, request))
+}
+
+fn mock_definition(name: &[u8]) -> Option<agent::DefinitionId> {
+    let default = agent::FIND_GREETING_V1;
+    let suffix = name.strip_prefix(default.intent.name().as_bytes())?;
+    let revision = match suffix {
+        b"" => default.revision,
+        [b'@', digits @ ..] => u8::try_from(super::number(digits)?).ok()?,
+        _ => return None,
+    };
+    Some(agent::DefinitionId {
+        revision,
+        ..default
+    })
 }
 
 fn goal_program(arguments: &[u8], command: GoalCommand) -> Option<(GoalOptions, Program, &[u8])> {

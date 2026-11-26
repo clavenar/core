@@ -27,6 +27,7 @@ impl MessageKind {
                 (DELEGATION_HEADER_BYTES..=DELEGATION_REQUEST_MAX_BYTES).contains(&length)
             }
             Self::Request(RequestKind::PlanIntent) => length == 1,
+            Self::Request(RequestKind::PlanDefinition) => length == 2,
             Self::Reply(
                 ReplyKind::Denied
                 | ReplyKind::ReadFailed

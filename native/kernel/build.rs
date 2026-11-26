@@ -1,3 +1,6 @@
+#[path = "build/definition.rs"]
+mod definition;
+
 use std::env;
 use std::fmt::Write;
 use std::fs;
@@ -8,6 +11,10 @@ fn main() {
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
     let output = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let userspace = root.join("userspace");
+    definition::build(
+        &userspace.join("hello/definitions/find-greeting-v1.toml"),
+        &output,
+    );
     build_library("clv_abi", &root.join("crates/clv-abi/src"), &output, &[]);
     build_library("clv", &userspace.join("libclv"), &output, &["clv_abi"]);
     let linker_script = userspace.join("user.ld");

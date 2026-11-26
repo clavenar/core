@@ -129,10 +129,27 @@ fn split_literal(input: &[u8]) -> Option<(&[u8], &[u8])> {
     (rest.is_empty() || rest.starts_with(b" ")).then(|| (literal, rest.trim_ascii_start()))
 }
 
+fn number(digits: &[u8]) -> Option<usize> {
+    if digits.is_empty() {
+        return None;
+    }
+    let mut value = 0usize;
+    for &digit in digits {
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        value = value
+            .checked_mul(10)?
+            .checked_add(usize::from(digit - b'0'))?;
+    }
+    Some(value)
+}
+
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 fn hex(mut value: usize) -> [u8; 18] {
     let mut bytes = *b"0x0000000000000000";
     for digit in bytes[2..].iter_mut().rev() {
-        *digit = b"0123456789abcdef"[value & 0xf];
+        *digit = HEX_DIGITS[value & 0xf];
         value >>= 4;
     }
     bytes

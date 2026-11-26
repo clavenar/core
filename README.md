@@ -700,7 +700,8 @@ An empty match result is forwarded as an empty `Matches` reply with exit 1.
 
 ### Run the mock planner
 
-`agent run hello --mock find-greeting` sends a one-byte intent to `hello`.
+`agent run hello --mock find-greeting` selects revision 1 and sends its
+two-byte definition ID to `hello`.
 Its deterministic planner chooses `grep -F Hello` and requests 18 reply
 bytes for the helper. The kernel checks the live grant when `hello`
 requests the delegation. Both `Hello` and `RamFS` occur in `/hello.txt`.
@@ -731,6 +732,42 @@ Repeat the sequence, changing only the grant command to
 On success, `grep` sends 18 bytes and `hello` forwards them, then exits 0.
 On denial, `hello` sends an empty failure reply and exits 1. Both
 delegation records identify the requesting `hello` launch in `caller_child`.
+
+### Inspect a pinned agent definition
+
+The build compiles the helper request from the TOML definition and records
+the SHA-256 of the exact file bytes. The kernel binds that identity to the
+agent at launch. `agent status` reports the pin from suspension through
+completion or cancellation, until the owner closes the goal. [Definition source](userspace/hello/definitions/find-greeting-v1.toml)
+
+```text
+goal create --children 2 --allow-helper grep --read-bytes 18 --reply-bytes 36
+goal grant-file --delegate-to grep --argument Hello /hello.txt
+agent run hello --mock find-greeting@2
+goal status
+goal budget
+agent run --suspended hello --mock find-greeting@1
+agent status
+agent resume
+wait hello
+recv hello
+agent status
+goal audit
+goal close
+```
+
+Revision 2 prints `cannot start agent`. The goal remains `Ready` with
+`available=36 reserved=0 spent=0`. Revision 1 starts in the same goal.
+Both status snapshots show `definition=find-greeting@1 sha256=` followed
+by the same 64 hex digits. Compare those digits on the build host with
+`sha256sum userspace/hello/definitions/find-greeting-v1.toml` from the
+repository root. The agent returns `Hello from RamFS`.
+
+Repeat the sequence with `goal revoke-file` immediately before `agent resume`.
+The pin stays visible. The delegation audit shows `denied=no-delegable-file
+caller=agent`, and `recv hello` prints `cannot delegate child`. Before
+`goal close`, `goal audit --reads` and `goal budget` show zero bytes read
+and zero reply bytes spent.
 
 ### Share a read allowance across two helper launches
 
@@ -1090,6 +1127,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 60 `goal_revoke_file` | `a0` goal handle | 0 for an owned goal, including a repeat call, or -1 for an invalid handle or caller |
 | 61 `goal_read_audit_with_limit` | Same arguments as call 57 | Same count, overwritten count and lifetime read bytes as call 57, with the effective limit identified in each entry |
 | 62 `goal_grant_file_to_with_arg` | `a0` goal handle, `a1` shell file handle, `a2` helper selector, `a3` literal address, `a4` literal length (0–64 bytes) | 0 when the file and its argument restriction are attached, -1 on rejection |
+| 63 `agent_status_with_definition` | `a0` agent handle, `a1` shell stack destination, `a2` capacity in bytes | Same status registers as call 39, plus a 34-byte definition record in the buffer |
 
 The shell owns the goal and controls its agents. Calls 49, 51 and 56 also
 accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
@@ -1113,17 +1151,26 @@ The agent run calls also create and bind the agent in that operation. Direct
 children inherit any file granted to the goal. Call 58 queues a typed
 request before the agent starts. Bit 0 starts it suspended. Bit 1 selects
 the explicit agent reply allowance in `a3`. Otherwise the agent inherits
-the available balance. Bit 2 selects the request format.
+the available balance. Bits 2 and 3 select the request format.
 
-| Bit 2 | Request kind | Payload |
+| Format flags | Request kind | Payload |
 | --- | --- | --- |
-| Clear | `DelegateWithFile` (tag 4) | Two little-endian RV64 words for the helper selector and its reply allowance, followed by 0–64 literal argument bytes |
-| Set | `PlanIntent` (tag 5) | One byte identifying the intent. `hello` recognizes 1 as `find-greeting`. |
+| Both clear | `DelegateWithFile` (tag 4) | Two little-endian RV64 words for the helper selector and its reply allowance, followed by 0–64 literal argument bytes |
+| Bit 2 only | `PlanIntent` (tag 5) | One intent byte. Intent 1 for `hello` pins `find-greeting@1`. Other legacy intents retain their original delivery behavior. |
+| Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. The built-in pair `[1, 1]` selects `find-greeting@1` for `hello`. |
 
-Unknown flag bits, an unreadable buffer or the wrong length fail before
-agent admission. User space interprets the payload. An unknown intent makes
-`hello` send an empty `DelegationFailed` reply and exit 1. For either
-request format, the kernel checks the helper when the agent requests delegation.
+Unknown flag bits, both format bits set, an unreadable buffer or the wrong
+length fail before admission. For tag 6 the kernel also verifies that the
+definition exists for the selected executable before consuming handles,
+reserving bytes or launching the child. The kernel supplies the digest
+from its boot image. The agent interprets the workflow and the kernel
+checks the live grant when the agent requests delegation.
+
+Call 63 returns lifecycle state and the original agent's definition pin in
+one snapshot. The first two bytes hold the intent and revision. The next
+32 hold the binary SHA-256 in digest order. An unpinned launch returns
+34 zero bytes. Only the shell that owns the agent can inspect it. A stale
+handle, a short buffer or an invalid destination returns -1 before copying.
 
 Calls 47, 50, 54 and 62 accept one regular file while the goal is ready. The kernel
 retains the file independently of the shell's descriptor, cursor and pathname. Closing

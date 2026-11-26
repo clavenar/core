@@ -1,4 +1,4 @@
-use crate::split_word;
+use crate::{number, split_word};
 use clv_abi::Program;
 use clv_abi::goal::{MAX_CHILDREN, ReadLimits};
 
@@ -95,18 +95,9 @@ impl GoalOptions {
 
 fn parse_count<'a>(arguments: &'a [u8], slot: &mut Option<usize>) -> Option<&'a [u8]> {
     let (digits, rest) = split_word(arguments);
-    if digits.is_empty() || slot.is_some() {
+    if slot.is_some() {
         return None;
     }
-    let mut value = 0usize;
-    for &digit in digits {
-        if !digit.is_ascii_digit() {
-            return None;
-        }
-        value = value
-            .checked_mul(10)?
-            .checked_add(usize::from(digit - b'0'))?;
-    }
-    *slot = Some(value);
+    *slot = Some(number(digits)?);
     Some(rest)
 }

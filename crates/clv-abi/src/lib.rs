@@ -72,6 +72,7 @@ pub const SYS_GOAL_AUDIT_WITH_CALLER: usize = 59;
 pub const SYS_GOAL_REVOKE_FILE: usize = 60;
 pub const SYS_GOAL_READ_AUDIT_WITH_LIMIT: usize = 61;
 pub const SYS_GOAL_GRANT_FILE_TO_WITH_ARG: usize = 62;
+pub const SYS_AGENT_STATUS_WITH_DEFINITION: usize = 63;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
@@ -84,6 +85,7 @@ pub enum RequestKind {
     Argument = 3,
     DelegateWithFile = 4,
     PlanIntent = 5,
+    PlanDefinition = 6,
 }
 
 impl RequestKind {
@@ -94,6 +96,7 @@ impl RequestKind {
             value if value == Self::Argument as usize => Some(Self::Argument),
             value if value == Self::DelegateWithFile as usize => Some(Self::DelegateWithFile),
             value if value == Self::PlanIntent as usize => Some(Self::PlanIntent),
+            value if value == Self::PlanDefinition as usize => Some(Self::PlanDefinition),
             _ => None,
         }
     }

@@ -20,13 +20,13 @@ impl Scheduler {
             let child = self.tasks[self.current].launch.as_ref()?.handle;
             let goal = self.goal.as_ref()?;
             let member = goal.members().find(|member| member.is_live(child))?;
-            let MemberRole::Agent(handle) = member.role else {
+            let MemberRole::Agent(binding) = member.role else {
                 return None;
             };
-            request.agent = handle;
+            request.agent = binding.handle;
             (goal, member, LaunchParent::Agent(child))
         } else {
-            let (goal, member) = self.agent_member(request.agent)?;
+            let (goal, member, _) = self.agent_member(request.agent)?;
             (goal, member, LaunchParent::Shell)
         };
         let parent = agent.handle;

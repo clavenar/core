@@ -3,11 +3,13 @@ mod options;
 
 use clv::goal::{self, CancelResult, CloseResult, FileRecipient, GoalStatus, ReplyBudget};
 use clv::{agent, fs, print};
+use clv_abi::agent::{NO_DEFINITION, SHA256_BYTES};
 use clv_abi::{CompletionKind, OPEN_READ, Program};
 pub(super) use options::{GoalCommand, GoalOptions};
 
 use super::{
-    children::Children, hex, print_handle, print_line, print_usage, split_literal, split_word,
+    HEX_DIGITS, children::Children, hex, print_handle, print_line, print_usage, split_literal,
+    split_word,
 };
 
 const CREATE_HELP: &[u8] = b"goal create [--children 1|2|3] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N] [--helper-read-bytes N]\r\n";
@@ -22,7 +24,7 @@ pub(super) fn help() {
 }
 
 pub(super) const AGENT_RUN_HELP: &[u8] = b"agent run [--suspended] [--reply-bytes N] <program> [request]\r\n\
-      hello accepts --mock find-greeting | --delegate --with-file --reply-bytes N grep -F <pattern>\r\n";
+      hello accepts --mock find-greeting[@REV] | --delegate --with-file --reply-bytes N grep -F <pattern>\r\n";
 pub(super) const AGENT_DELEGATE_HELP: &[u8] =
     b"agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n";
 
@@ -206,29 +208,10 @@ pub(super) fn agent_command(
             };
             if let Some(launch) = children.run_agent(goal.handle, arguments) {
                 goal.agent = Some(launch.agent);
-                print_line(&[
-                    b"agent=",
-                    &hex(launch.agent),
-                    b" child=",
-                    &hex(launch.child),
-                ]);
+                print_agent_handles(launch.agent, b" child=", launch.child);
             }
         }
-        (b"status", b"") => {
-            if let Some(handle) = agent_handle
-                && let Some(snapshot) = agent::status(handle)
-            {
-                print_line(&[b"agent=", &hex(handle), b" goal=", &hex(snapshot.goal)]);
-                match snapshot.status {
-                    GoalStatus::Running { child } if snapshot.suspended => {
-                        print_handle(b"Suspended child=", child)
-                    }
-                    status => print_status(status),
-                }
-            } else {
-                print(b"no current agent\r\n");
-            }
-        }
+        (b"status", b"") => print_agent_status(agent_handle),
         (action @ (b"suspend" | b"resume"), b"") => {
             let suspending = action == b"suspend";
             let control = if suspending {
@@ -247,6 +230,42 @@ pub(super) fn agent_command(
             print(b"usage: ");
             agent_help();
         }
+    }
+}
+
+fn print_agent_handles(agent: usize, label: &[u8], related: usize) {
+    print_line(&[b"agent=", &hex(agent), label, &hex(related)]);
+}
+
+fn print_agent_status(agent_handle: Option<usize>) {
+    let mut definition = NO_DEFINITION;
+    if let Some(handle) = agent_handle
+        && let Some((snapshot, pin)) = agent::status_with_definition(handle, &mut definition)
+    {
+        print_agent_handles(handle, b" goal=", snapshot.goal);
+        if let Some(pin) = pin {
+            let mut hash = [0; 2 * SHA256_BYTES];
+            for (&byte, pair) in pin.sha256.iter().zip(hash.chunks_exact_mut(2)) {
+                pair[0] = HEX_DIGITS[usize::from(byte >> 4)];
+                pair[1] = HEX_DIGITS[usize::from(byte & 15)];
+            }
+            print_line(&[
+                b"definition=",
+                pin.id.intent.name().as_bytes(),
+                b"@",
+                decimal(usize::from(pin.id.revision), &mut [0; DIGITS]),
+                b" sha256=",
+                &hash,
+            ]);
+        }
+        match snapshot.status {
+            GoalStatus::Running { child } if snapshot.suspended => {
+                print_handle(b"Suspended child=", child)
+            }
+            status => print_status(status),
+        }
+    } else {
+        print(b"no current agent\r\n");
     }
 }
 

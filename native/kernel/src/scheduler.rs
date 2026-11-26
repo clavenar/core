@@ -1,6 +1,8 @@
+mod definition;
 mod goal;
 mod pipe;
 
+use self::definition::AgentBinding;
 use self::goal::Goal;
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
@@ -227,6 +229,7 @@ impl Scheduler {
         request: Option<Message>,
     ) -> Option<AgentLaunch> {
         let agent = self.next_handle;
+        let binding = AgentBinding::resolve(agent, program, request.as_ref())?;
         let child = self.start_child(
             fs,
             program,
@@ -235,7 +238,7 @@ impl Scheduler {
                 reply_bytes,
             },
             request,
-            Some(agent),
+            Some(binding),
             TaskState::for_agent(suspended),
         )?;
         Some(AgentLaunch { agent, child })
@@ -284,14 +287,18 @@ impl Scheduler {
         program: usize,
         scope: LaunchScope,
         request: Option<Message>,
-        agent: Option<usize>,
+        agent: Option<AgentBinding>,
         initial_state: TaskState,
     ) -> Option<usize> {
         if self.current != SHELL_TASK_INDEX {
             return None;
         }
         let launch = self
-            .prepare_launch(Program::from_raw(program)?, agent, LaunchParent::Shell)
+            .prepare_launch(
+                Program::from_raw(program)?,
+                agent.map(|binding| binding.handle),
+                LaunchParent::Shell,
+            )
             .ok()?;
         let task_fs = match scope {
             LaunchScope::Plain => TaskFs::empty(),

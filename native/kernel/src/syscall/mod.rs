@@ -1,4 +1,7 @@
-use clv_abi::agent::{AgentLaunch, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_SUSPENDED};
+use clv_abi::agent::{
+    AgentLaunch, NO_DEFINITION, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
+    RUN_SUSPENDED,
+};
 use clv_abi::audit::{DelegationDenial, DelegationRequest};
 use clv_abi::goal::{CreateOptions, FileRecipient, ReadLimits};
 use clv_abi::{
@@ -6,9 +9,9 @@ use clv_abi::{
     PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, Program, ReplyKind, RequestKind,
     SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE, SYS_AGENT_DELEGATE_WITH_FILE_ARG,
     SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET,
-    SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STATUS, SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE,
-    SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
-    SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
+    SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION,
+    SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE, SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT,
+    SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
     SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
     SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
     SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_REPLY_AUDIT,
@@ -217,30 +220,32 @@ pub(crate) fn dispatch(
             frame,
             scheduler.run_agent(fs, a0, a1, a3 == 1, Some(a2), None),
         ),
-        SYS_AGENT_RUN_WITH_REQUEST
-            if a2 & !(RUN_SUSPENDED | RUN_REPLY_LIMIT | RUN_PLAN_INTENT) == 0 =>
-        {
-            let kind = if a2 & RUN_PLAN_INTENT != 0 {
-                RequestKind::PlanIntent
-            } else {
-                RequestKind::DelegateWithFile
+        SYS_AGENT_RUN_WITH_REQUEST => {
+            let kind = match a2 & !(RUN_SUSPENDED | RUN_REPLY_LIMIT) {
+                0 => Some(RequestKind::DelegateWithFile),
+                RUN_PLAN_INTENT => Some(RequestKind::PlanIntent),
+                RUN_PLAN_DEFINITION => Some(RequestKind::PlanDefinition),
+                _ => None,
             };
-            let launch = copy_request(
-                scheduler,
-                kind,
-                frame.registers[REG_A4],
-                frame.registers[REG_A5],
-            )
-            .and_then(|request| {
-                scheduler.run_agent(
-                    fs,
-                    a0,
-                    a1,
-                    a2 & RUN_SUSPENDED != 0,
-                    (a2 & RUN_REPLY_LIMIT != 0).then_some(a3),
-                    Some(request),
-                )
-            });
+            let launch = kind
+                .and_then(|kind| {
+                    copy_request(
+                        scheduler,
+                        kind,
+                        frame.registers[REG_A4],
+                        frame.registers[REG_A5],
+                    )
+                })
+                .and_then(|request| {
+                    scheduler.run_agent(
+                        fs,
+                        a0,
+                        a1,
+                        a2 & RUN_SUSPENDED != 0,
+                        (a2 & RUN_REPLY_LIMIT != 0).then_some(a3),
+                        Some(request),
+                    )
+                });
             write_agent_launch(frame, launch)
         }
         SYS_AGENT_DELEGATE | SYS_AGENT_DELEGATE_WITH_FILE | SYS_AGENT_DELEGATE_WITH_FILE_ARG => {
@@ -266,10 +271,19 @@ pub(crate) fn dispatch(
                 .delegate(fs, request, argument)
                 .unwrap_or(SYSCALL_ERROR)
         }
-        SYS_AGENT_STATUS => scheduler.agent_status(a0).map_or(SYSCALL_ERROR, |agent| {
-            frame.registers[REG_A3] = agent.goal;
-            write_status(frame, agent.registers())
-        }),
+        SYS_AGENT_STATUS | SYS_AGENT_STATUS_WITH_DEFINITION => {
+            scheduler
+                .agent_status(a0)
+                .map_or(SYSCALL_ERROR, |(agent, pin)| {
+                    if number == SYS_AGENT_STATUS_WITH_DEFINITION
+                        && !stack.copy_to_user(pin.unwrap_or(&NO_DEFINITION), a1, a2)
+                    {
+                        return SYSCALL_ERROR;
+                    }
+                    frame.registers[REG_A3] = agent.goal;
+                    write_status(frame, agent.registers())
+                })
+        }
         SYS_AGENT_SUSPEND | SYS_AGENT_RESUME => scheduler
             .set_agent_suspended(a0, number == SYS_AGENT_SUSPEND)
             .map_or(SYSCALL_ERROR, |result| result as usize),

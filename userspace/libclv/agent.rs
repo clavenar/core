@@ -1,14 +1,16 @@
 pub use clv_abi::agent::{
-    AgentLaunch, AgentStatus, CURRENT_AGENT, ControlResult, FileDelegation, PlanIntent,
+    AgentLaunch, AgentStatus, CURRENT_AGENT, ControlResult, DefinitionId, DefinitionPin,
+    FIND_GREETING_V1, FileDelegation, PlanIntent,
 };
 use clv_abi::agent::{
-    DELEGATION_REQUEST_MAX_BYTES, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_SUSPENDED,
+    DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT,
+    RUN_REPLY_LIMIT, RUN_SUSPENDED,
 };
 use clv_abi::{
     MESSAGE_MAX_BYTES, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
     SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
     SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STATUS,
-    SYS_AGENT_SUSPEND,
+    SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -69,6 +71,7 @@ pub fn run_with_request(
 pub enum RunRequest<'a> {
     DelegateWithFile(FileDelegation<'a>),
     Plan(PlanIntent),
+    Definition(DefinitionId),
 }
 
 /// Launches an agent with an optional typed request in its mailbox.
@@ -93,6 +96,11 @@ pub fn launch(
             flags |= RUN_PLAN_INTENT;
             buffer[0] = intent as u8;
             &buffer[..1]
+        }
+        RunRequest::Definition(id) => {
+            flags |= RUN_PLAN_DEFINITION;
+            buffer[..2].copy_from_slice(&id.encode());
+            &buffer[..2]
         }
     };
     let (agent, child, ..) = ecall6(
@@ -158,6 +166,28 @@ pub fn delegate_from_current(request: &FileDelegation<'_>) -> Option<usize> {
 pub fn status(agent: usize) -> Option<AgentStatus> {
     let (state, child, value, goal) = ecall(SYS_AGENT_STATUS, agent, 0, 0, 0, 0);
     AgentStatus::from_registers(state, child, value, goal)
+}
+
+/// Reads an agent's original launch state and its optional definition pin together.
+pub fn status_with_definition(
+    agent: usize,
+    bytes: &mut EncodedDefinitionPin,
+) -> Option<(AgentStatus, Option<DefinitionPin<'_>>)> {
+    let (state, child, value, goal) = ecall(
+        SYS_AGENT_STATUS_WITH_DEFINITION,
+        agent,
+        bytes.as_mut_ptr().expose_provenance(),
+        bytes.len(),
+        0,
+        0,
+    );
+    let status = AgentStatus::from_registers(state, child, value, goal)?;
+    let pin = if bytes[0] == 0 {
+        None
+    } else {
+        Some(DefinitionPin::decode(bytes)?)
+    };
+    Some((status, pin))
 }
 
 pub fn suspend(agent: usize) -> Option<ControlResult> {

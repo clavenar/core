@@ -7,20 +7,20 @@ use self::audit::AuditHistory;
 use self::budget::ReplyReservation;
 use self::reads::ReadBudget;
 use clv_abi::TaskCompletion;
-use clv_abi::agent::{AgentStatus, ControlResult};
+use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin};
 use clv_abi::audit::{EncodedRecordWithCaller, EncodedReplyRecord, ReplyRecord};
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
     CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus, MAX_CHILDREN, ReadLimits,
 };
 
-use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
+use super::{AgentBinding, SHELL_TASK_INDEX, Scheduler, TaskState};
 use crate::fs::ramfs::{FileGrant, GrantArgument, RamFs, TaskFs};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MemberRole {
     Child,
-    Agent(usize),
+    Agent(AgentBinding),
     /// The original launch handle of the agent funding this helper.
     Helper {
         parent: usize,
@@ -95,7 +95,7 @@ impl Goal {
         &mut self,
         handle: usize,
         child: usize,
-        agent: Option<usize>,
+        agent: Option<AgentBinding>,
         reply_bytes: Option<usize>,
         fs: &mut RamFs,
     ) -> Option<TaskFs> {
@@ -277,26 +277,32 @@ impl Scheduler {
         Some(())
     }
 
-    fn agent_member(&self, handle: usize) -> Option<(&Goal, &Member)> {
+    fn agent_member(&self, handle: usize) -> Option<(&Goal, &Member, AgentBinding)> {
         if self.current != SHELL_TASK_INDEX {
             return None;
         }
         let goal = self.goal.as_ref()?;
-        let member = goal
-            .members()
-            .find(|member| member.role == MemberRole::Agent(handle))?;
-        Some((goal, member))
+        goal.members().find_map(|member| match member.role {
+            MemberRole::Agent(binding) if binding.handle == handle => Some((goal, member, binding)),
+            _ => None,
+        })
     }
 
-    pub(crate) fn agent_status(&self, handle: usize) -> Option<AgentStatus> {
-        let (goal, member) = self.agent_member(handle)?;
+    pub(crate) fn agent_status(
+        &self,
+        handle: usize,
+    ) -> Option<(AgentStatus, Option<&'static EncodedDefinitionPin>)> {
+        let (goal, member, binding) = self.agent_member(handle)?;
         let suspended = member.completion.is_none()
             && self.tasks[self.launch_index(member.handle)?].state == TaskState::Suspended;
-        Some(AgentStatus {
-            goal: goal.handle,
-            status: member.status(),
-            suspended,
-        })
+        Some((
+            AgentStatus {
+                goal: goal.handle,
+                status: member.status(),
+                suspended,
+            },
+            binding.definition,
+        ))
     }
 
     pub(crate) fn set_agent_suspended(
@@ -304,7 +310,7 @@ impl Scheduler {
         handle: usize,
         suspended: bool,
     ) -> Option<ControlResult> {
-        let (_, member) = self.agent_member(handle)?;
+        let (_, member, _) = self.agent_member(handle)?;
         if member.completion.is_some() {
             return Some(ControlResult::AlreadyFinished);
         }

@@ -1,0 +1,8 @@
+name = "find-greeting"
+revision = 1
+agent = "hello"
+
+[delegate_with_file]
+program = "grep"
+argument = "Hello"
+reply_bytes = 18
