@@ -1,6 +1,7 @@
 use crate::{CompletionKind, NO_CHILD_HANDLE, Program};
 
-pub const MAX_CHILDREN: usize = 2;
+/// Maximum number of successful member launches over the lifetime of a goal.
+pub const MAX_CHILDREN: usize = 3;
 
 /// Cumulative RamFS byte limits for the whole goal and for its delegated helpers together.
 #[derive(Clone, Copy, Default)]

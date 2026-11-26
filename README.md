@@ -112,9 +112,10 @@ is still available, both waits report status 0, and the last `event` prints
 `no child event`.
 
 The shell can own one goal at a time. By default a goal can launch one child.
-`goal create --children 2` allows a second launch while the first is still
-live. The goal finishes when its last live member stops. Each successful
-launch uses one place for the lifetime of the goal.
+`goal create --children 2` or `--children 3` allows further launches while
+at least one member is live. Each successful launch uses one place for the
+lifetime of the goal, including the agent itself. The goal finishes when its
+last live member stops.
 `goal create` prints the new goal handle. `goal run hello` or `goal run echo`
 prints the ordinary child's launch handle. `goal status` reports `Ready`,
 `Running`, `Completed`, `Failed`, or `Cancelled`. The kernel keeps each
@@ -232,8 +233,8 @@ goal close
 
 Use `agent delegate --reply-bytes N <program>` to start a helper with
 bytes from the current agent's remaining reservation. The shell can do this
-while the agent is running or suspended. The helper uses the goal's second
-and final launch slot. Its RamFS handle table starts empty by default.
+while the agent is running or suspended. Each helper uses one launch slot
+and starts with an empty RamFS handle table by default.
 
 ```text
 goal create --children 2 --reply-bytes 64
@@ -657,6 +658,43 @@ To inspect the goal before delegation, add `--suspended` before `hello` and
 run `goal audit`. It shows zero entries until you issue `agent resume`.
 An empty match result is forwarded as an empty `Matches` reply with exit 1.
 
+### Share a read allowance across two helper launches
+
+Two different helper programs can run at the same time. Each program has
+one task slot, so two launches of `grep` run in sequence.
+At a fresh `clv>` prompt, let the shell launch the first `grep` while
+`hello` is suspended. Collect its wait result, reply and completion event
+so the running agent can reuse the `grep` program slot for the second search.
+
+```text
+goal create --children 3 --allow-helper grep --read-bytes 36 --helper-read-bytes 18 --reply-bytes 54
+goal grant-file --delegate-to grep /hello.txt
+agent run --suspended hello --delegate --with-file --reply-bytes 18 grep -F RamFS
+agent delegate --with-file --reply-bytes 18 grep -F RamFS
+wait grep
+recv grep
+event
+agent resume
+wait hello
+recv hello
+goal audit
+goal audit --reads
+goal budget
+goal close
+```
+
+Both launches are accepted. `goal audit` shows distinct child handles,
+first with `caller=shell`, then with `caller=agent`. Each helper receives a
+read-only file handle at offset zero. The first returns `Hello from RamFS`
+and spends all 18 helper bytes. The second gets `limit=helper` in the read
+audit. The agent forwards the failure, so `recv hello` prints
+`cannot read requested file`. The read total is
+`read_bytes=18` and the reply budget is `available=36 reserved=0 spent=18`.
+
+Repeat with `--helper-read-bytes 36`. Both searches return `Hello from RamFS`
+and the read total is `read_bytes=36`. The two helpers each send 18 bytes
+and the agent forwards the second result, bringing reply spending to 54 bytes.
+
 ### Identify who requested a delegation
 
 At the QEMU prompt, start `hello` suspended in a goal that permits only
@@ -963,7 +1001,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 45 `goal_run_with_reply_budget` | `a0` goal handle, `a1` program selector, `a2` requested reply bytes | Fresh ordinary child launch handle |
 | 46 `agent_run_with_reply_budget` | Same as call 45, plus `a3` start mode (0 runnable, 1 suspended) | Fresh agent handle, with the child launch handle in `a1` |
 | 47 `goal_grant_file` | `a0` goal handle, `a1` open RamFS file handle owned by the shell | 0 when attached, -1 on rejection |
-| 48 `goal_create_with_options` | `a0` child limit (1 or 2), `a1` option flags, `a2` total reply bytes if bit 0 is set, `a3` allowed helper selector if bit 1 is set, `a4` total RamFS read bytes if bit 2 is set, `a5` helper RamFS read bytes if bit 3 is set | Fresh goal handle, or -1 on rejection |
+| 48 `goal_create_with_options` | `a0` lifetime child limit (1, 2 or 3), `a1` option flags, `a2` total reply bytes if bit 0 is set, `a3` allowed helper selector if bit 1 is set, `a4` total RamFS read bytes if bit 2 is set, `a5` helper RamFS read bytes if bit 3 is set | Fresh goal handle, or -1 on rejection |
 | 49 `agent_delegate` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle, or -1 on rejection |
 | 50 `goal_grant_delegable_file` | `a0` goal handle, `a1` shell file handle | 0 when attached with permission for the goal's agent to delegate read access, or -1 on rejection |
 | 51 `agent_delegate_with_file` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle with read access to the agent's file, or -1 on rejection |
@@ -983,8 +1021,9 @@ accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
 agent. The kernel resolves its original launch and agent handle. Only the shell
 can delegate by supplying an explicit agent handle. An unauthorized caller
 or a stale handle returns -1 in `a0`. Calls 33 and 43 create single-child
-goals with unrestricted helper selection and unlimited reads. Call 48 also
-supports two children. Each option register is ignored when its flag is clear.
+goals with unrestricted helper selection and unlimited reads. Call 48
+accepts up to three lifetime launches. Each option register is ignored when
+its flag is clear.
 Setting bit 2 or bit 3 with its register zero creates a zero-byte goal or
 helper allowance respectively. Omitting either flag leaves that allowance unlimited.
 Unknown flag bits or an unknown selected helper return -1 before
@@ -1128,18 +1167,18 @@ reports tag 1 throughout a live child's suspension.
 | 4 | Failed | Child handle | Fault cause |
 | 5 | Cancelled | Cancelled child handle, or 0 if cancelled while ready | 0 |
 
-For two members, `goal_status` reports the earliest-launched live child
-while either is running or suspended. After both stop, it reports a
-cancelled member first, then a member that failed, then a successful member.
+`goal_status` reports the earliest-launched live member. Once all members
+have stopped, it reports a cancelled member first, then a member that failed,
+then a successful member.
 Launch order breaks ties. `agent_status` always reports the agent's own
-child, including after that child stops while its sibling runs.
+child, including after that child stops while a sibling runs.
 
-If an agent exits or faults with its helper still live, the kernel records
-the agent's completion and then cancels the helper before scheduling another
-task. For a shell-issued delegation the shell can collect both events and
-wait results. For an agent-issued delegation it can collect the agent's.
-In either case `goal_status` reports the cancelled helper and `agent_status`
-reports the agent's exit status or fault cause.
+If an agent exits or faults, the kernel records its completion and cancels
+all its live helpers in launch order before scheduling another task. Each
+helper releases its unused reply reservation. The shell can collect events
+and wait results for the agent and for each helper the shell launched.
+An agent-issued helper's results belong to that agent. `agent_status`
+retains the agent's own exit status or fault cause.
 
 Repeating suspend or resume on a live agent already in the requested state
 succeeds. A paused child keeps its slot and any queued reply. Suspension and

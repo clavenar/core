@@ -326,7 +326,7 @@ impl Scheduler {
                 goal.release_file(fs);
                 goal.cancelled_before_launch = true;
             }
-            GoalStatus::Running { .. } => self.cancel_running_children(fs)?,
+            GoalStatus::Running { .. } => self.cancel_running_children(fs, |_| true)?,
             GoalStatus::Cancelled { .. } => {}
             GoalStatus::Completed { .. } | GoalStatus::Failed { .. } => {
                 return Some(CancelResult::AlreadyFinished);
@@ -336,7 +336,7 @@ impl Scheduler {
     }
 
     pub(super) fn release_shell_goal(&mut self, fs: &mut RamFs) {
-        let _ = self.cancel_running_children(fs);
+        let _ = self.cancel_running_children(fs, |_| true);
         self.drop_goal(fs);
     }
 
@@ -346,24 +346,21 @@ impl Scheduler {
         }
     }
 
-    pub(super) fn cancel_delegated_helper(&mut self, parent: usize, fs: &mut RamFs) {
-        let Some(goal) = &self.goal else {
-            return;
-        };
-        let role = MemberRole::Helper { parent };
-        let helper = goal
-            .members()
-            .find(|member| member.role == role && member.completion.is_none());
-        if let Some(index) = helper.and_then(|member| self.launch_index(member.handle)) {
-            self.stop_task(index, fs, TaskCompletion::Cancelled);
-        }
+    pub(super) fn cancel_delegated_helpers(&mut self, parent: usize, fs: &mut RamFs) {
+        let _ = self.cancel_running_children(fs, |role| role == MemberRole::Helper { parent });
     }
 
-    fn cancel_running_children(&mut self, fs: &mut RamFs) -> Option<()> {
+    fn cancel_running_children(
+        &mut self,
+        fs: &mut RamFs,
+        include: impl Fn(MemberRole) -> bool,
+    ) -> Option<()> {
         let goal = self.goal.as_ref()?;
         let mut targets = [None; MAX_CHILDREN];
-        // Resolve every live launch before stopping any member.
-        let live = goal.members().filter(|member| member.completion.is_none());
+        // Resolve the original launch handles before stopping any of the selected members.
+        let live = goal
+            .members()
+            .filter(|member| member.completion.is_none() && include(member.role));
         for (target, member) in targets.iter_mut().zip(live) {
             let index = self.launch_index(member.handle)?;
             if self.tasks[index].state == TaskState::Stopped {

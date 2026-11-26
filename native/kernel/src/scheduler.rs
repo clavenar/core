@@ -524,7 +524,7 @@ impl Scheduler {
                 }
             }
         } else if let Some(launch) = &self.tasks[self.current].launch {
-            self.cancel_delegated_helper(launch.handle, fs);
+            self.cancel_delegated_helpers(launch.handle, fs);
         }
         self.switch(frame)
     }

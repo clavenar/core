@@ -8,7 +8,7 @@ pub(super) use options::{GoalCommand, GoalOptions};
 
 use super::{children::Children, hex, print_handle, print_line, split_word};
 
-const CREATE_HELP: &[u8] = b"goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N] [--helper-read-bytes N]\r\n";
+const CREATE_HELP: &[u8] = b"goal create [--children 1|2|3] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N] [--helper-read-bytes N]\r\n";
 
 pub(super) fn help() {
     print(CREATE_HELP);
