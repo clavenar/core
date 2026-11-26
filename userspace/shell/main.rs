@@ -2,11 +2,13 @@
 #![no_main]
 
 mod children;
+mod command;
 mod files;
 mod goal;
 
 use children::Children;
 use clv::print;
+use command::Command;
 use core::panic::PanicInfo;
 
 const LINE_LIMIT: usize = 128;
@@ -71,8 +73,8 @@ extern "C" fn _start() -> ! {
 
 fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<goal::CurrentGoal>) {
     let (command, arguments) = split_word(line.trim_ascii());
-    match command {
-        b"help" if arguments.is_empty() => {
+    match Command::parse(command) {
+        Command::Help if arguments.is_empty() => {
             print(
                 b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\n\
               run <program>  run hello <dir>\r\n\
@@ -83,27 +85,27 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<g
             goal::help();
             goal::agent_help();
         }
-        b"pwd" if arguments.is_empty() => files::pwd(),
-        b"cd" => files::cd(arguments),
-        b"ls" => files::ls(arguments),
-        b"mkdir" => files::mkdir(arguments),
-        b"rmdir" => files::rmdir(arguments),
-        b"cat" => files::cat(arguments),
-        b"write" => files::write_file(arguments),
-        b"rm" => files::rm(arguments),
-        b"run" => children.run(arguments),
-        b"ask" => children.ask(arguments),
-        b"askat" => children.ask_at(arguments),
-        b"askfile" => children.ask_file(arguments),
-        b"grep" => children.grep(arguments),
-        b"recv" => children.recv(arguments),
-        b"wait" => children.wait(arguments),
-        b"event" if arguments.is_empty() => children.event(),
-        b"event" => print(b"usage: event\r\n"),
-        b"goal" => goal::command(arguments, current_goal, children),
-        b"agent" => goal::agent_command(arguments, current_goal, children),
-        b"exit" if arguments.is_empty() => clv::exit(0),
-        b"" => {}
+        Command::Pwd if arguments.is_empty() => files::pwd(),
+        Command::Cd => files::cd(arguments),
+        Command::Ls => files::ls(arguments),
+        Command::Mkdir => files::mkdir(arguments),
+        Command::Rmdir => files::rmdir(arguments),
+        Command::Cat => files::cat(arguments),
+        Command::Write => files::write_file(arguments),
+        Command::Rm => files::rm(arguments),
+        Command::Run => children.run(arguments),
+        Command::Ask => children.ask(arguments),
+        Command::AskAt => children.ask_at(arguments),
+        Command::AskFile => children.ask_file(arguments),
+        Command::Grep => children.grep(arguments),
+        Command::Recv => children.recv(arguments),
+        Command::Wait => children.wait(arguments),
+        Command::Event if arguments.is_empty() => children.event(),
+        Command::Event => print(b"usage: event\r\n"),
+        Command::Goal => goal::command(arguments, current_goal, children),
+        Command::Agent => goal::agent_command(arguments, current_goal, children),
+        Command::Exit if arguments.is_empty() => clv::exit(0),
+        Command::Empty => {}
         _ => print(b"unknown command\r\n"),
     }
 }

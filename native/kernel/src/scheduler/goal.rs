@@ -2,10 +2,12 @@ mod audit;
 mod budget;
 mod delegation;
 mod reads;
+mod rename;
 
 use self::audit::AuditHistory;
 use self::budget::ReplyReservation;
 use self::reads::ReadBudget;
+use self::rename::PendingRename;
 use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin};
 use clv_abi::audit::{EncodedRecordWithTool, EncodedReplyRecord, ReplyRecord};
@@ -16,7 +18,7 @@ use clv_abi::goal::{
 use clv_abi::tool::ToolId;
 
 use super::{AgentBinding, SHELL_TASK_INDEX, Scheduler, TaskState};
-use crate::fs::ramfs::{FileGrant, GrantArgument, RamFs, StagedRename, TaskFs};
+use crate::fs::ramfs::{FileGrant, GrantArgument, RamFs, TaskFs};
 
 pub(crate) enum DelegationTarget {
     Program { selector: usize, with_file: bool },
@@ -73,7 +75,7 @@ pub(super) struct Goal {
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
     file: Option<FileGrant>,
-    rename: Option<StagedRename>,
+    rename: Option<PendingRename>,
     delegation_audit: AuditHistory<EncodedRecordWithTool>,
     reply_audit: AuditHistory<EncodedReplyRecord>,
 }
@@ -172,12 +174,6 @@ impl Goal {
         }
     }
 
-    fn discard_rename(&mut self, fs: &mut RamFs) {
-        if let Some(rename) = self.rename.take() {
-            rename.discard(fs);
-        }
-    }
-
     fn live_member_mut(&mut self, child: usize) -> Option<&mut Member> {
         self.members
             .iter_mut()
@@ -270,27 +266,6 @@ impl Scheduler {
 
     pub(crate) fn goal_budget(&self, handle: usize) -> Option<ReplyBudget> {
         Some(self.shell_goal(handle)?.budget())
-    }
-
-    pub(crate) fn stage_goal_rename(
-        &mut self,
-        handle: usize,
-        fs: &mut RamFs,
-        fd: usize,
-        new_name: &[u8],
-    ) -> Option<usize> {
-        let goal = self.shell_goal(handle)?;
-        if goal.rename.is_some() || !goal.is_active() {
-            return None;
-        }
-        self.goal.as_mut()?.rename =
-            Some(self.tasks[self.current].fs.stage_rename(fs, fd, new_name)?);
-        Some(0)
-    }
-
-    pub(crate) fn goal_diff(&self, handle: usize) -> Option<(&[u8], usize)> {
-        let rename = self.shell_goal(handle)?.rename.as_ref();
-        Some(rename.map_or((&[][..], 0), StagedRename::diff))
     }
 
     pub(crate) fn grant_goal_file(

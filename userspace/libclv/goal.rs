@@ -4,17 +4,18 @@ use clv_abi::audit::{
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
-    CancelResult, CloseResult, CreateOptions, FileRecipient, GoalDiff, GoalStatus, ReadLimits,
+    CancelResult, CloseResult, CommitResult, CreateOptions, FileRecipient, GoalDiff, GoalStatus,
+    ReadLimits, ReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
     MESSAGE_MAX_BYTES, PATH_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
-    SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
-    SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF,
-    SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO,
+    SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
+    SYS_GOAL_CREATE, SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET,
+    SYS_GOAL_DIFF, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO,
     SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT,
-    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET,
-    SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
+    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -136,8 +137,18 @@ pub fn stage_rename(goal: usize, fd: usize, new_name: &[u8]) -> bool {
 
 /// Reads the pending change into the owner's stack buffer without consuming it.
 pub fn diff(goal: usize, buffer: &mut [u8]) -> Option<GoalDiff<'_>> {
-    let (count, source_len, ..) = ecall(
-        SYS_GOAL_DIFF,
+    read_diff(SYS_GOAL_DIFF, goal, buffer).map(|(diff, _)| diff)
+}
+
+/// A completed goal can return a single-use commit token along with its diff.
+pub fn review(goal: usize, buffer: &mut [u8]) -> Option<(GoalDiff<'_>, Option<ReviewToken>)> {
+    let (diff, token) = read_diff(SYS_GOAL_REVIEW, goal, buffer)?;
+    Some((diff, ReviewToken::new(token)))
+}
+
+fn read_diff(number: usize, goal: usize, buffer: &mut [u8]) -> Option<(GoalDiff<'_>, usize)> {
+    let (count, source_len, token, _) = ecall(
+        number,
         goal,
         buffer.as_mut_ptr().expose_provenance(),
         buffer.len(),
@@ -145,10 +156,19 @@ pub fn diff(goal: usize, buffer: &mut [u8]) -> Option<GoalDiff<'_>> {
         0,
     );
     let names = buffer.get(..count)?;
-    match names.split_at_checked(source_len)? {
-        ([], []) => Some(GoalDiff::Empty),
-        ([], _) | (_, []) => None,
-        (source, new_name) => Some(GoalDiff::Rename { source, new_name }),
+    let diff = match names.split_at_checked(source_len)? {
+        ([], []) => GoalDiff::Empty,
+        ([], _) | (_, []) => return None,
+        (source, new_name) => GoalDiff::Rename { source, new_name },
+    };
+    Some((diff, token))
+}
+
+pub fn commit(goal: usize, token: ReviewToken) -> Option<CommitResult> {
+    match syscall(SYS_GOAL_COMMIT, goal, token.get(), 0) {
+        n if n == CommitResult::Committed as usize => Some(CommitResult::Committed),
+        n if n == CommitResult::Conflict as usize => Some(CommitResult::Conflict),
+        _ => None,
     }
 }
 

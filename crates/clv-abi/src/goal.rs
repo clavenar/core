@@ -7,6 +7,16 @@ pub const MAX_CHILDREN: usize = 3;
 /// Maximum combined byte length of a canonical source path and a destination basename.
 pub const RENAME_DIFF_MAX_BYTES: usize = 512;
 
+/// A boot-local handle for one reviewed change. Zero denotes a preview without a token.
+pub type ReviewToken = core::num::NonZeroUsize;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum CommitResult {
+    Committed = 0,
+    Conflict = 1,
+}
+
 pub enum GoalDiff<'a> {
     Empty,
     Rename {

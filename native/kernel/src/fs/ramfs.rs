@@ -38,7 +38,7 @@ enum PathBase {
     Confined(DirectoryId),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Node {
     Directory(DirectoryId),
     BootFile(usize),
@@ -107,10 +107,21 @@ impl WritableFile {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Revision(u64);
+
+impl Revision {
+    fn advance(&mut self) -> Option<()> {
+        self.0 = self.0.checked_add(1)?;
+        Some(())
+    }
+}
+
 pub(crate) struct RamFs {
     directories: [Option<Directory>; DIRECTORY_COUNT],
     writable: [Option<WritableFile>; WRITABLE_FILE_COUNT],
     next_handle_id: usize,
+    revision: Revision,
 }
 
 impl RamFs {
@@ -119,6 +130,7 @@ impl RamFs {
             directories: [const { None }; DIRECTORY_COUNT],
             writable: [const { None }; WRITABLE_FILE_COUNT],
             next_handle_id: 0,
+            revision: Revision(0),
         }
     }
 
@@ -137,6 +149,7 @@ impl RamFs {
                 Node::WritableFile(index) if !requires_directory => {
                     let file = self.writable[index].as_mut()?;
                     if writable {
+                        self.revision.advance()?;
                         file.contents.fill(0);
                         file.length = 0;
                     }
@@ -150,7 +163,9 @@ impl RamFs {
         }
 
         let index = self.writable.iter().position(Option::is_none)?;
-        self.writable[index] = Some(WritableFile::new(parent, name)?);
+        let file = WritableFile::new(parent, name)?;
+        self.revision.advance()?;
+        self.writable[index] = Some(file);
         Some(Node::WritableFile(index))
     }
 
@@ -164,10 +179,12 @@ impl RamFs {
             return None;
         }
         let index = self.directories.iter().position(Option::is_none)?;
-        self.directories[index] = Some(Directory {
+        let directory = Directory {
             parent,
             name: Name::new(name)?,
-        });
+        };
+        self.revision.advance()?;
+        self.directories[index] = Some(directory);
         Some(0)
     }
 
@@ -189,6 +206,7 @@ impl RamFs {
         if self.next_entry(directory, 0).is_some() || in_use(directory) {
             return None;
         }
+        self.revision.advance()?;
         self.directories[index] = None;
         Some(0)
     }
@@ -207,6 +225,7 @@ impl RamFs {
         };
         let slot = &mut self.writable[index];
         let file = slot.as_mut()?;
+        self.revision.advance()?;
         if file.open_handles == 0 {
             *slot = None;
         } else {
@@ -358,7 +377,11 @@ impl RamFs {
         }
         let file = self.writable[index].as_mut()?;
         let end = offset.checked_add(bytes.len())?;
-        file.contents.get_mut(offset..end)?.copy_from_slice(bytes);
+        let destination = file.contents.get_mut(offset..end)?;
+        if file.linked {
+            self.revision.advance()?;
+        }
+        destination.copy_from_slice(bytes);
         file.length = file.length.max(end);
         Some(bytes.len())
     }

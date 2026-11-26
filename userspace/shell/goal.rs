@@ -1,13 +1,15 @@
 mod audit;
 mod options;
-mod subcommand;
 
-use clv::goal::{self, CancelResult, CloseResult, FileRecipient, GoalStatus, ReplyBudget};
+use super::command::Subcommand;
+use clv::goal::{
+    self, CancelResult, CloseResult, CommitResult, FileRecipient, GoalStatus, ReplyBudget,
+    ReviewToken,
+};
 use clv::{agent, fs, print};
 use clv_abi::agent::{NO_DEFINITION, SHA256_BYTES};
 use clv_abi::{CompletionKind, OPEN_READ, Program};
 pub(super) use options::{GoalCommand, GoalOptions};
-use subcommand::Subcommand;
 
 use super::{
     HEX_DIGITS, children::Children, hex, print_handle, print_line, print_usage, split_literal,
@@ -24,7 +26,7 @@ pub(super) fn help() {
     print(b"goal run [--reply-bytes N] <program>\r\n");
     print(GRANT_HELP);
     print(RENAME_HELP);
-    print(b"goal diff  goal revoke-file  goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n");
+    print(b"goal diff  goal commit  goal revoke-file  goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n");
 }
 
 pub(super) const AGENT_RUN_HELP: &[u8] = b"agent run [--suspended] [--reply-bytes N] <program> [request]\r\n\
@@ -41,6 +43,7 @@ pub(super) fn agent_help() {
 pub(super) struct CurrentGoal {
     handle: usize,
     agent: Option<usize>,
+    review: Option<ReviewToken>,
 }
 
 pub(super) fn command(
@@ -54,8 +57,9 @@ pub(super) fn command(
         (Subcommand::Create, arguments) => create(arguments, current),
         (Subcommand::GrantFile, arguments) => grant_file(handle, arguments),
         (Subcommand::StageRename, arguments) => stage_rename(handle, arguments),
-        (Subcommand::Diff, b"") => match handle {
-            Some(handle) => show_diff(handle),
+        (action @ (Subcommand::Diff | Subcommand::Commit), b"") => match current {
+            Some(goal) if matches!(action, Subcommand::Diff) => show_diff(goal),
+            Some(goal) => commit(goal),
             None => print(b"no current goal\r\n"),
         },
         (Subcommand::RevokeFile, b"") => match handle {
@@ -73,7 +77,11 @@ pub(super) fn command(
             Some(status) => print_status(status),
             None => print(b"no current goal\r\n"),
         },
-        (Subcommand::Cancel, b"") => match handle.and_then(goal::cancel) {
+        (Subcommand::Cancel, b"") => match current.as_mut().and_then(|goal| {
+            let result = goal::cancel(goal.handle)?;
+            goal.review = None;
+            Some(result)
+        }) {
             Some(CancelResult::Cancelled) => print(b"goal cancelled\r\n"),
             Some(CancelResult::AlreadyFinished) => print(b"goal already finished\r\n"),
             None => print(b"no current goal\r\n"),
@@ -173,15 +181,28 @@ fn stage_rename(goal: Option<usize>, arguments: &[u8]) {
     }
 }
 
-fn show_diff(handle: usize) {
+fn show_diff(goal: &mut CurrentGoal) {
     let mut buffer = [0; clv_abi::goal::RENAME_DIFF_MAX_BYTES];
-    match goal::diff(handle, &mut buffer) {
-        Some(goal::GoalDiff::Empty) => print(b"no staged changes\r\n"),
-        Some(goal::GoalDiff::Rename { source, new_name }) => {
+    goal.review = None;
+    match goal::review(goal.handle, &mut buffer) {
+        Some((goal::GoalDiff::Empty, _)) => print(b"no staged changes\r\n"),
+        Some((goal::GoalDiff::Rename { source, new_name }, token)) => {
+            goal.review = token;
             print_line(&[b"rename ", source, b" -> ", new_name])
         }
         None => print(b"cannot read goal diff\r\n"),
     }
+}
+
+fn commit(goal: &mut CurrentGoal) {
+    let Some(token) = goal.review.take() else {
+        return print(b"run goal diff after completion\r\n");
+    };
+    print(match goal::commit(goal.handle, token) {
+        Some(CommitResult::Committed) => b"rename committed\r\n",
+        Some(CommitResult::Conflict) => b"commit conflict\r\n",
+        None => b"cannot commit goal\r\n",
+    });
 }
 
 fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
@@ -202,6 +223,7 @@ fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
             *current = Some(CurrentGoal {
                 handle,
                 agent: None,
+                review: None,
             });
             print_handle(b"goal created ", handle);
         }

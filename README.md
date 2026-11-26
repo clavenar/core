@@ -874,6 +874,49 @@ the pending change still refers to the original file. A completed or failed
 goal keeps its diff available for review. Cancelling the goal, closing it
 successfully, or exiting the owner releases the pending change.
 
+### Publish a reviewed RamFS rename
+
+After a goal completes successfully, run `goal diff` to review the staged
+rename. The shell saves the token returned with that diff. Entering
+`goal commit` authorizes that exact rename. At a fresh QEMU prompt, use
+`echo` to bring the goal to a successful completion.
+
+```text
+mkdir /work
+write /work/draft.txt hello
+goal create
+goal stage-rename /work/draft.txt final.txt
+goal run echo
+wait echo
+goal diff
+goal commit
+ls /work
+cat /work/final.txt
+goal diff
+goal close
+```
+
+The first diff prints `rename /work/draft.txt -> final.txt`. Commit reports
+`rename committed`. The directory now lists only `final.txt`, its contents
+are still `hello`, and the final diff says `no staged changes`. Open handles
+to the file keep their cursors and access rights.
+
+To see a conflict, reboot and repeat through the first `goal diff`. Then run
+
+```text
+write /work/draft.txt revised
+goal commit
+ls /work
+cat /work/draft.txt
+goal close
+```
+
+Commit reports `commit conflict`. The directory still lists `draft.txt`, and
+`cat` prints `revised`. RamFS records a single boot-local revision at staging,
+so even a public write in another directory invalidates the proposal. You can
+inspect the frozen diff after a conflict. Start a fresh goal to stage and
+review a rename against the updated filesystem.
+
 ### Share a read allowance across two helper launches
 
 Two different helper programs can run at the same time. Each program has
@@ -1237,6 +1280,8 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 65 `goal_audit_with_tool` | Same arguments as call 52 | Retained delegation count and overwritten count as in call 59, with 104 bytes per entry |
 | 66 `goal_stage_rename` | `a0` goal handle, `a1` owner's file handle, `a2` new basename address, `a3` length (1–64 bytes) | 0 when staged, or -1 on rejection |
 | 67 `goal_diff` | `a0` goal handle, `a1` stack destination, `a2` capacity in bytes | Total bytes copied in `a0`, source path length in `a1`. An empty diff returns zero in both registers. Failure returns -1 in `a0`. |
+| 68 `goal_review` | Same arguments as call 67 | Same diff and lengths as call 67, with a review token in `a2` or zero for a preview |
+| 69 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, or -1 for an invalid caller, goal, token, or unavailable revision |
 
 Calls 66 and 67 are restricted to the goal owner. Call 66 requires a linked
 writable RamFS file and an empty staging slot. It rejects an occupied name,
@@ -1246,6 +1291,22 @@ immediately by the destination basename, with no separator or terminator.
 A stack buffer of `RENAME_DIFF_MAX_BYTES` suffices for any diff. An empty
 diff also accepts zero capacity. A short buffer or an invalid nonempty
 destination range fails before copying any bytes.
+
+Call 68 can issue a token only to the owning shell, after the complete diff
+has been copied for a successfully completed goal. An empty diff, another
+goal state or an exhausted handle counter yields a preview. Repeated reviews
+of the same change return the outstanding token. Use call 67 for a read-only
+preview. Cancellation, successful close and owner exit discard both the
+proposal and any token.
+
+Call 69 checks the caller, goal state and token. It consumes a matching token
+and checks the original RamFS revision, retained source at its original name,
+and vacant destination in one syscall. Success updates only the file's name,
+advances the revision and clears the diff. A conflict preserves the public
+files and the staged diff. Reviewing it again uses the original base.
+Public file and directory creation or removal, truncating opens, nonempty
+writes to linked files and publication advance the revision. A mutation
+requiring a new revision fails if the counter is exhausted.
 
 The shell owns the goal and controls its agents. Calls 49, 51, 56 and 64 also
 accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
