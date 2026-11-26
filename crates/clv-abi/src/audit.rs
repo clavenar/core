@@ -12,6 +12,8 @@ pub type EncodedRecordWithCaller = [[u8; 8]; 7];
 pub type EncodedReplyRecord = [[u8; 8]; 4];
 /// Child, requested capacity, file bytes available for this call, prior allowance, flags.
 pub type EncodedReadRecord = [[u8; 8]; 5];
+/// Call 61 appends the scope of the effective read allowance.
+pub type EncodedReadRecordWithLimit = [[u8; 8]; 6];
 
 #[derive(Clone, Copy)]
 pub struct DelegationRequest {
@@ -172,6 +174,7 @@ pub struct ReadRecord {
     pub requested: usize,
     /// The smaller of the requested capacity and the bytes left in the file.
     pub bytes: usize,
+    /// The tightest remaining allowance applicable to this launch.
     pub remaining_before: Option<usize>,
     /// A delivered read charged `bytes`. A denied read charged zero.
     pub delivered: bool,
@@ -199,6 +202,40 @@ impl ReadRecord {
             remaining_before,
             delivered,
         })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ReadLimitScope {
+    Goal = 0,
+    Helper = 1,
+}
+
+#[derive(Clone, Copy)]
+pub struct ReadRecordWithLimit {
+    pub read: ReadRecord,
+    pub limit: ReadLimitScope,
+}
+
+impl ReadRecordWithLimit {
+    pub fn encode(self) -> EncodedReadRecordWithLimit {
+        let mut record = [[0; 8]; 6];
+        let [read @ .., limit] = &mut record;
+        *read = self.read.encode();
+        *limit = (self.limit as u64).to_le_bytes();
+        record
+    }
+
+    pub fn decode(record: &EncodedReadRecordWithLimit) -> Option<Self> {
+        let [read @ .., limit] = record;
+        let read = ReadRecord::decode(read)?;
+        let limit = match u64::from_le_bytes(*limit) {
+            0 => ReadLimitScope::Goal,
+            1 if read.remaining_before.is_some() => ReadLimitScope::Helper,
+            _ => return None,
+        };
+        Some(Self { read, limit })
     }
 }
 

@@ -8,6 +8,20 @@ pub(super) use options::{GoalCommand, GoalOptions};
 
 use super::{children::Children, hex, print_handle, print_line, split_word};
 
+const CREATE_HELP: &[u8] = b"goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N] [--helper-read-bytes N]\r\n";
+
+pub(super) fn help() {
+    print(CREATE_HELP);
+    print(b"goal run [--reply-bytes N] <program>\r\n\
+            goal grant-file [--delegable | --delegate-to <program>] <path>  goal revoke-file\r\n\
+            goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n");
+}
+
+pub(super) const AGENT_HELP: &[u8] = b"agent run [--suspended] [--reply-bytes N] <program>\r\n\
+      agent run hello --delegate --with-file --reply-bytes N grep -F <pattern>\r\n\
+      agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n\
+      agent status  agent suspend  agent resume\r\n";
+
 pub(super) struct CurrentGoal {
     handle: usize,
     agent: Option<usize>,
@@ -54,7 +68,10 @@ pub(super) fn command(
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N] | grant-file [--delegable | --delegate-to <program>] <path> | revoke-file | run [--reply-bytes N] <program> | budget | audit [--replies | --reads] | status | cancel | close\r\n"),
+        _ => {
+            print(b"usage: ");
+            help();
+        }
     }
 }
 
@@ -92,17 +109,16 @@ fn grant_file(goal: Option<usize>, arguments: &[u8]) {
 
 fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
     let Some((options, b"")) = GoalOptions::parse(arguments, GoalCommand::Create) else {
-        return print(
-            b"usage: goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N]\r\n",
-        );
+        print(b"usage: ");
+        return print(CREATE_HELP);
     };
-    let result = goal::create_with_read_limit(
+    let result = goal::create_with_read_limits(
         goal::CreateOptions {
             child_limit: options.children.unwrap_or(1),
             reply_limit: options.reply_bytes,
             allowed_helper: options.allowed_helper,
         },
-        options.read_bytes,
+        options.read_limits,
     );
     match result {
         Some(handle) => {
@@ -200,7 +216,10 @@ pub(super) fn agent_command(
                 None => print(b"no current agent\r\n"),
             }
         }
-        _ => print(b"usage: agent run [options] <program> [--delegate --with-file --reply-bytes N grep -F <pattern>] | delegate [--with-file] --reply-bytes N <program> [-F <pattern>] | status | suspend | resume\r\n"),
+        _ => {
+            print(b"usage: ");
+            print(AGENT_HELP);
+        }
     }
 }
 

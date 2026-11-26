@@ -584,6 +584,44 @@ available in its file. A budget denial returns an error before copying data.
 If some allowance remains, the caller can retry from the same position with
 a smaller buffer.
 
+### Limit reads by delegated helpers
+
+`goal create --helper-read-bytes N` sets a cumulative RamFS read allowance
+shared by the goal's delegated helpers. It applies to helpers launched by
+the shell or by the agent. Each helper read must fit both the helper
+allowance and the goal's remaining read budget. Direct children and the agent
+spend only from the goal budget. Either limit can be set independently.
+
+At the `clv>` prompt, let `grep` try the 18-byte file first, then resume `hello`.
+
+```text
+goal create --children 2 --reply-bytes 36 --allow-helper grep --read-bytes 18 --helper-read-bytes 17
+goal grant-file --delegate-to grep /hello.txt
+agent run --suspended hello
+agent delegate --with-file --reply-bytes 18 grep -F RamFS
+wait grep
+recv grep
+agent resume
+wait hello
+recv hello
+goal audit --reads
+goal close
+```
+
+Repeat with the limits below in the first command. The shell's `recv` prints
+`Hello from RamFS` after a successful read and `cannot read requested file`
+after a denial.
+
+| Goal bytes | Helper bytes | `recv grep` | `recv hello` | Read audit |
+| --- | --- | --- | --- | --- |
+| 18 | 17 | Read denied | File contents | `grep` denied with `limit=helper`. Total 18 bytes. |
+| 18 | 18 | File contents | Read denied | `hello` denied with `limit=goal`. Total 18 bytes. |
+| 36 | 18 | File contents | File contents | Both succeed. Total 36 bytes. |
+
+The kernel checks the bytes available at the cursor. With a 17-byte helper
+allowance, reading 10 bytes leaves 7. A subsequent 8-byte read fails if
+8 bytes remain in the file. Retrying for 7 reads from the same offset.
+
 ### Let a running agent delegate a search
 
 At the QEMU prompt, give `hello` a request to run `grep` on its granted file.
@@ -925,7 +963,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 45 `goal_run_with_reply_budget` | `a0` goal handle, `a1` program selector, `a2` requested reply bytes | Fresh ordinary child launch handle |
 | 46 `agent_run_with_reply_budget` | Same as call 45, plus `a3` start mode (0 runnable, 1 suspended) | Fresh agent handle, with the child launch handle in `a1` |
 | 47 `goal_grant_file` | `a0` goal handle, `a1` open RamFS file handle owned by the shell | 0 when attached, -1 on rejection |
-| 48 `goal_create_with_options` | `a0` child limit (1 or 2), `a1` option flags, `a2` total reply bytes if bit 0 is set, `a3` allowed helper selector if bit 1 is set, `a4` total RamFS read bytes if bit 2 is set | Fresh goal handle, or -1 on rejection |
+| 48 `goal_create_with_options` | `a0` child limit (1 or 2), `a1` option flags, `a2` total reply bytes if bit 0 is set, `a3` allowed helper selector if bit 1 is set, `a4` total RamFS read bytes if bit 2 is set, `a5` helper RamFS read bytes if bit 3 is set | Fresh goal handle, or -1 on rejection |
 | 49 `agent_delegate` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle, or -1 on rejection |
 | 50 `goal_grant_delegable_file` | `a0` goal handle, `a1` shell file handle | 0 when attached with permission for the goal's agent to delegate read access, or -1 on rejection |
 | 51 `agent_delegate_with_file` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle with read access to the agent's file, or -1 on rejection |
@@ -938,6 +976,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 58 `agent_run_with_request` | `a0` goal, `a1` program, `a2` flags, `a3` optional agent reply allowance, `a4` request address, `a5` request length | Fresh agent handle, with its child launch handle in `a1` |
 | 59 `goal_audit_with_caller` | Same arguments as call 52 | Retained delegation entry count (0–4), with overwritten count in `a1`, or -1 on failure |
 | 60 `goal_revoke_file` | `a0` goal handle | 0 for an owned goal, including a repeat call, or -1 for an invalid handle or caller |
+| 61 `goal_read_audit_with_limit` | Same arguments as call 57 | Same count, overwritten count and lifetime read bytes as call 57, with the effective limit identified in each entry |
 
 The shell owns the goal and controls its agents. Calls 49, 51 and 56 also
 accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
@@ -946,7 +985,8 @@ can delegate by supplying an explicit agent handle. An unauthorized caller
 or a stale handle returns -1 in `a0`. Calls 33 and 43 create single-child
 goals with unrestricted helper selection and unlimited reads. Call 48 also
 supports two children. Each option register is ignored when its flag is clear.
-Setting bit 2 with `a4` zero creates a zero-byte read allowance.
+Setting bit 2 or bit 3 with its register zero creates a zero-byte goal or
+helper allowance respectively. Omitting either flag leaves that allowance unlimited.
 Unknown flag bits or an unknown selected helper return -1 before
 the kernel allocates a goal handle.
 The run calls accept a ready goal or a running goal with a place left. They
@@ -1052,20 +1092,28 @@ before the send, and flags. For a sent reply, the flags are 0 for a finite
 allowance or 1 for an unlimited allowance (remaining word zero). A value of
 2 means the reservation was too small. A valid zero-byte send gets an entry.
 
-Call 57 records budget decisions for goal members using RamFS call 6. Each
-40-byte entry holds five little-endian RV64 words. In order, they carry the
-original child launch handle, requested buffer capacity, file bytes the read
-could deliver at its cursor, prior allowance and flags. Flags are 0 for a finite
-successful read, 1 for an unlimited successful read (prior allowance word
-zero), and 2 for a budget denial. EOF and valid zero-capacity reads have
-zero cost and receive entries. Invalid handles and buffers fail before the
-budget check. The lifetime total counts successful copies and saturates at
-the largest RV64 unsigned value for unlimited goals.
+Calls 57 and 61 read the same history of RamFS call 6 budget decisions. Each
+call 57 entry contains five little-endian RV64 words and occupies 40 bytes.
+In order, they carry the original child launch handle, requested buffer
+capacity, bytes available for this read at the file cursor, prior allowance
+and flags. Flags are 0 for a finite successful read, 1 for an unlimited
+successful read (prior allowance word zero), and 2 for a budget denial.
+EOF and valid zero-capacity reads have zero cost and receive entries. Invalid
+handles and buffers fail before the budget check. The lifetime total counts
+successful copies and saturates at the largest RV64 unsigned value for
+unlimited goals.
 
-Calls 52, 53, 57 and 59 each copy up to four retained entries, oldest first. A
-short buffer or an invalid destination range returns -1 before copying any bytes.
-Zero capacity succeeds for an empty audit. Reads preserve the entries and
-the overwritten count, which saturates at the largest RV64 unsigned value.
+For a helper, the prior allowance is the smaller applicable balance. Call 61
+appends a sixth little-endian RV64 word to each entry, making 48 bytes.
+Zero identifies the goal allowance and one identifies the helper allowance.
+The goal takes precedence when the remaining amounts are equal. A successful
+copy charges the goal once and, for a helper, spends the same number of bytes
+from its helper allowance. Denials preserve both balances and the cursor.
+
+Calls 52, 53, 57, 59 and 61 each copy up to four retained entries, oldest
+first. A short buffer or an invalid destination range returns -1 before copying
+any bytes. Zero capacity succeeds for an empty audit. Reads preserve the entries
+and the overwritten count, which saturates at the largest RV64 unsigned value.
 
 `agent_status` uses tags 1–5 below and tag 6 for a suspended child (`a2` is
 zero). It always returns the original child handle on success. `goal_status`

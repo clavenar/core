@@ -1,12 +1,14 @@
 use clv::goal;
-use clv_abi::audit::{DelegationDenial, DelegationRecordWithCaller, ReadRecord, ReplyRecord};
+use clv_abi::audit::{
+    DelegationDenial, DelegationRecordWithCaller, ReadLimitScope, ReadRecordWithLimit, ReplyRecord,
+};
 use clv_abi::{LaunchParent, Program};
 
 use super::{DIGITS, amount, decimal, hex, print, print_line};
 
 pub(super) fn show(handle: usize, option: &[u8]) {
     let shown = match option {
-        b"--reads" => goal::read_audit(handle).map(|(snapshot, total)| {
+        b"--reads" => goal::read_audit_with_limit(handle).map(|(snapshot, total)| {
             print_snapshot(handle, snapshot, print_read);
             print_line(&[b"read_bytes=", decimal(total, &mut [0; DIGITS])]);
         }),
@@ -96,20 +98,21 @@ fn print_reply(entry: &ReplyRecord) {
     ]);
 }
 
-fn print_read(entry: &ReadRecord) {
+fn print_read(entry: &ReadRecordWithLimit) {
+    let read = &entry.read;
     print_line(&[
         b"child=",
-        &hex(entry.child),
+        &hex(read.child),
         b" requested=",
-        decimal(entry.requested, &mut [0; DIGITS]),
+        decimal(read.requested, &mut [0; DIGITS]),
         b" bytes=",
-        decimal(entry.bytes, &mut [0; DIGITS]),
+        decimal(read.bytes, &mut [0; DIGITS]),
         b" remaining_before=",
-        amount(entry.remaining_before, &mut [0; DIGITS]),
-        if entry.delivered {
-            b" read"
-        } else {
-            b" denied=insufficient-read-bytes"
+        amount(read.remaining_before, &mut [0; DIGITS]),
+        match (read.delivered, entry.limit) {
+            (true, _) => b" read",
+            (false, ReadLimitScope::Goal) => b" denied=insufficient-read-bytes limit=goal",
+            (false, ReadLimitScope::Helper) => b" denied=insufficient-read-bytes limit=helper",
         },
     ]);
 }

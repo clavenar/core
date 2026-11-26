@@ -1,6 +1,6 @@
 use crate::split_word;
 use clv_abi::Program;
-use clv_abi::goal::MAX_CHILDREN;
+use clv_abi::goal::{MAX_CHILDREN, ReadLimits};
 
 pub(crate) enum GoalCommand {
     Create,
@@ -13,7 +13,7 @@ pub(crate) enum GoalCommand {
 pub(crate) struct GoalOptions {
     pub children: Option<usize>,
     pub reply_bytes: Option<usize>,
-    pub read_bytes: Option<usize>,
+    pub read_limits: ReadLimits,
     pub allowed_helper: Option<Program>,
     pub suspended: bool,
     pub with_file: bool,
@@ -23,59 +23,55 @@ impl GoalOptions {
     pub fn parse(mut arguments: &[u8], command: GoalCommand) -> Option<(Self, &[u8])> {
         let mut options = Self::default();
         loop {
-            match split_word(arguments) {
-                (b"--reply-bytes", rest) if options.reply_bytes.is_none() => {
-                    let (bytes, rest) = count(rest)?;
-                    options.reply_bytes = Some(bytes);
-                    arguments = rest;
+            let (word, rest) = split_word(arguments);
+            let Some(flag) = word.strip_prefix(b"--") else {
+                break;
+            };
+            arguments = match flag {
+                b"reply-bytes" => parse_count(rest, &mut options.reply_bytes)?,
+                b"children" if matches!(command, GoalCommand::Create) => {
+                    parse_count(rest, &mut options.children)?
                 }
-                (b"--children", rest)
-                    if matches!(command, GoalCommand::Create) && options.children.is_none() =>
-                {
-                    let (children, rest) = count(rest)?;
-                    if !(1..=MAX_CHILDREN).contains(&children) {
-                        return None;
-                    }
-                    options.children = Some(children);
-                    arguments = rest;
+                b"read-bytes" if matches!(command, GoalCommand::Create) => {
+                    parse_count(rest, &mut options.read_limits.goal)?
                 }
-                (b"--read-bytes", rest)
-                    if matches!(command, GoalCommand::Create) && options.read_bytes.is_none() =>
-                {
-                    let (bytes, rest) = count(rest)?;
-                    options.read_bytes = Some(bytes);
-                    arguments = rest;
+                b"helper-read-bytes" if matches!(command, GoalCommand::Create) => {
+                    parse_count(rest, &mut options.read_limits.helpers)?
                 }
-                (b"--allow-helper", rest)
+                b"allow-helper"
                     if matches!(command, GoalCommand::Create)
                         && options.allowed_helper.is_none() =>
                 {
                     let (name, rest) = split_word(rest);
                     options.allowed_helper = Some(Program::named(name)?);
-                    arguments = rest;
+                    rest
                 }
-                (b"--suspended", rest)
-                    if matches!(command, GoalCommand::AgentRun) && !options.suspended =>
-                {
+                b"suspended" if matches!(command, GoalCommand::AgentRun) && !options.suspended => {
                     options.suspended = true;
-                    arguments = rest;
+                    rest
                 }
-                (b"--with-file", rest)
+                b"with-file"
                     if matches!(command, GoalCommand::AgentDelegate) && !options.with_file =>
                 {
                     options.with_file = true;
-                    arguments = rest;
+                    rest
                 }
-                (word, _) if word.starts_with(b"--") => return None,
-                _ => return Some((options, arguments)),
-            }
+                _ => return None,
+            };
         }
+        if options
+            .children
+            .is_some_and(|n| !(1..=MAX_CHILDREN).contains(&n))
+        {
+            return None;
+        }
+        Some((options, arguments))
     }
 }
 
-fn count(arguments: &[u8]) -> Option<(usize, &[u8])> {
+fn parse_count<'a>(arguments: &'a [u8], slot: &mut Option<usize>) -> Option<&'a [u8]> {
     let (digits, rest) = split_word(arguments);
-    if digits.is_empty() {
+    if digits.is_empty() || slot.is_some() {
         return None;
     }
     let mut value = 0usize;
@@ -87,5 +83,6 @@ fn count(arguments: &[u8]) -> Option<(usize, &[u8])> {
             .checked_mul(10)?
             .checked_add(usize::from(digit - b'0'))?;
     }
-    Some((value, rest))
+    *slot = Some(value);
+    Some(rest)
 }

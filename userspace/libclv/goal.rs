@@ -1,17 +1,20 @@
 use clv_abi::audit::{
-    AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, ReadRecord, ReplyRecord,
+    AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, ReadRecord, ReadRecordWithLimit,
+    ReplyRecord,
 };
 pub use clv_abi::budget::ReplyBudget;
-pub use clv_abi::goal::{CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus};
+pub use clv_abi::goal::{
+    CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus, ReadLimits,
+};
 use clv_abi::{
     SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE,
     SYS_GOAL_CREATE, SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET,
     SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO,
-    SYS_GOAL_READ_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
+    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_REPLY_AUDIT,
+    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
 };
 
-use super::{ecall, syscall, syscall_result};
+use super::{ecall, ecall6, syscall, syscall_result};
 
 pub fn create() -> Option<usize> {
     syscall_result(syscall(SYS_GOAL_CREATE, 0, 0, 0))
@@ -37,28 +40,38 @@ pub fn create_configured(options: CreateOptions) -> Option<usize> {
 
 /// All members of the goal share the optional cumulative RamFS read limit.
 pub fn create_with_read_limit(options: CreateOptions, read_limit: Option<usize>) -> Option<usize> {
-    match (
-        options.child_limit,
-        options.reply_limit,
-        options.allowed_helper,
-        read_limit,
-    ) {
-        (1, None, None, None) => create(),
-        (1, Some(bytes), None, None) => create_with_reply_budget(bytes),
-        _ => {
-            let (children, flags, replies, helper, reads) =
-                options.registers_with_read_limit(read_limit);
-            let (handle, ..) = ecall(
-                SYS_GOAL_CREATE_WITH_OPTIONS,
-                children,
-                flags,
-                replies,
-                helper,
-                reads,
-            );
-            syscall_result(handle)
-        }
+    create_with_read_limits(
+        options,
+        ReadLimits {
+            goal: read_limit,
+            helpers: None,
+        },
+    )
+}
+
+/// Sets independent ceilings for all goal reads and for the subset made by delegated helpers.
+pub fn create_with_read_limits(options: CreateOptions, limits: ReadLimits) -> Option<usize> {
+    if options.child_limit == 1
+        && options.allowed_helper.is_none()
+        && limits.goal.is_none()
+        && limits.helpers.is_none()
+    {
+        return options
+            .reply_limit
+            .map_or_else(create, create_with_reply_budget);
     }
+    let [children, flags, replies, helper, reads, helper_reads] =
+        options.registers_with_read_limits(limits);
+    let (handle, ..) = ecall6(
+        SYS_GOAL_CREATE_WITH_OPTIONS,
+        children,
+        flags,
+        replies,
+        helper,
+        reads,
+        helper_reads,
+    );
+    syscall_result(handle)
 }
 
 /// Attaches one file from the caller's handle table to a ready goal.
@@ -121,6 +134,15 @@ pub fn reply_audit(goal: usize) -> Option<AuditSnapshot<ReplyRecord>> {
 /// Returns the retained RamFS read decisions and the total bytes delivered over the goal's lifetime.
 pub fn read_audit(goal: usize) -> Option<(AuditSnapshot<ReadRecord>, usize)> {
     snapshot(SYS_GOAL_READ_AUDIT, goal, ReadRecord::decode)
+}
+
+/// Includes the scope of each read's effective allowance in the same snapshot.
+pub fn read_audit_with_limit(goal: usize) -> Option<(AuditSnapshot<ReadRecordWithLimit>, usize)> {
+    snapshot(
+        SYS_GOAL_READ_AUDIT_WITH_LIMIT,
+        goal,
+        ReadRecordWithLimit::decode,
+    )
 }
 
 fn snapshot<Record: Copy, const WORDS: usize>(

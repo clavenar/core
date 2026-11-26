@@ -2,6 +2,13 @@ use crate::{CompletionKind, NO_CHILD_HANDLE, Program};
 
 pub const MAX_CHILDREN: usize = 2;
 
+/// Cumulative RamFS byte limits for the whole goal and for its delegated helpers together.
+#[derive(Clone, Copy, Default)]
+pub struct ReadLimits {
+    pub goal: Option<usize>,
+    pub helpers: Option<usize>,
+}
+
 /// Immutable options for goal creation. The helper restriction applies to delegation.
 #[derive(Clone, Copy)]
 pub struct CreateOptions {
@@ -14,6 +21,7 @@ impl CreateOptions {
     const REPLY_LIMIT: usize = 1;
     const ALLOWED_HELPER: usize = 2;
     const READ_LIMIT: usize = 4;
+    const HELPER_READ_LIMIT: usize = 8;
 
     /// Call 48 takes the child limit, option flags, reply limit and helper selector in a0–a3.
     pub fn registers(self) -> (usize, usize, usize, usize) {
@@ -76,6 +84,37 @@ impl CreateOptions {
     ) -> Option<(Self, Option<usize>)> {
         let options = Self::from_registers(children, flags & !Self::READ_LIMIT, replies, helper)?;
         Some((options, (flags & Self::READ_LIMIT != 0).then_some(limit)))
+    }
+
+    /// Bit 3 enables a helper read limit in a5, independently of the goal limit in a4.
+    pub fn registers_with_read_limits(self, limits: ReadLimits) -> [usize; 6] {
+        let (children, mut flags, replies, helper, reads) =
+            self.registers_with_read_limit(limits.goal);
+        if limits.helpers.is_some() {
+            flags |= Self::HELPER_READ_LIMIT;
+        }
+        [
+            children,
+            flags,
+            replies,
+            helper,
+            reads,
+            limits.helpers.unwrap_or(0),
+        ]
+    }
+
+    pub fn from_registers_with_read_limits(
+        [children, flags, replies, helper, reads, helper_reads]: [usize; 6],
+    ) -> Option<(Self, ReadLimits)> {
+        let (options, goal) = Self::from_registers_with_read_limit(
+            children,
+            flags & !Self::HELPER_READ_LIMIT,
+            replies,
+            helper,
+            reads,
+        )?;
+        let helpers = (flags & Self::HELPER_READ_LIMIT != 0).then_some(helper_reads);
+        Some((options, ReadLimits { goal, helpers }))
     }
 }
 

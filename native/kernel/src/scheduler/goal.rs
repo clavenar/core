@@ -11,7 +11,7 @@ use clv_abi::agent::{AgentStatus, ControlResult};
 use clv_abi::audit::{EncodedRecordWithCaller, EncodedReplyRecord, ReplyRecord};
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
-    CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus, MAX_CHILDREN,
+    CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus, MAX_CHILDREN, ReadLimits,
 };
 
 use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
@@ -202,7 +202,7 @@ impl Scheduler {
     pub(crate) fn create_goal(
         &mut self,
         options: CreateOptions,
-        read_limit: Option<usize>,
+        read_limits: ReadLimits,
     ) -> Option<usize> {
         if self.current != SHELL_TASK_INDEX
             || self.goal.is_some()
@@ -215,7 +215,7 @@ impl Scheduler {
         self.goal = Some(Goal {
             handle,
             options,
-            reads: ReadBudget::new(read_limit),
+            reads: ReadBudget::new(read_limits),
             members: [const { None }; MAX_CHILDREN],
             cancelled_before_launch: false,
             file: None,

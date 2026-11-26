@@ -72,21 +72,17 @@ extern "C" fn _start() -> ! {
 fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<goal::CurrentGoal>) {
     let (command, arguments) = split_word(line.trim_ascii());
     match command {
-        b"help" if arguments.is_empty() => print(
-            b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\n\
+        b"help" if arguments.is_empty() => {
+            print(
+                b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\n\
               run <program>  run hello <dir>\r\n\
               ask [--read] <program> <text>  askat [--echo] hello <dir> <payload>\r\n\
               askfile [--stream] hello <path>\r\n\
-              grep -F <pattern> <path>  recv <program>  wait <program>  event\r\n\
-              goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N]\r\n\
-              goal run [--reply-bytes N] <program>\r\n\
-              goal grant-file [--delegable | --delegate-to <program>] <path>  goal revoke-file\r\n\
-              goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n\
-              agent run [--suspended] [--reply-bytes N] <program>\r\n\
-              agent run hello --delegate --with-file --reply-bytes N grep -F <pattern>\r\n\
-              agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n\
-              agent status  agent suspend  agent resume\r\n",
-        ),
+              grep -F <pattern> <path>  recv <program>  wait <program>  event\r\n",
+            );
+            goal::help();
+            print(goal::AGENT_HELP);
+        }
         b"pwd" if arguments.is_empty() => files::pwd(),
         b"cd" => files::cd(arguments),
         b"ls" => files::ls(arguments),

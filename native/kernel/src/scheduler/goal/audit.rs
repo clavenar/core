@@ -1,4 +1,4 @@
-use clv_abi::audit::{AUDIT_CAPACITY, EncodedRecord, EncodedRecordWithCaller};
+use clv_abi::audit::AUDIT_CAPACITY;
 
 use crate::scheduler::Scheduler;
 
@@ -24,14 +24,15 @@ impl<const WORDS: usize> AuditHistory<[[u8; 8]; WORDS]> {
         let bytes = self.entries[..self.len].as_flattened().as_flattened();
         copy(bytes).then_some((self.len, self.overwritten))
     }
-}
 
-impl AuditHistory<EncodedRecordWithCaller> {
-    fn read_without_caller(&self, copy: impl FnOnce(&[u8]) -> bool) -> Option<(usize, usize)> {
-        // Call 52 packs six words per entry. Drop the caller from each retained record.
-        let decisions: [EncodedRecord; AUDIT_CAPACITY] =
-            self.entries.each_ref().map(|[decision @ .., _]| *decision);
-        let bytes = decisions[..self.len].as_flattened().as_flattened();
+    /// Pack the legacy record for each entry before validating and copying the snapshot.
+    pub(super) fn read_projected<const N: usize>(
+        &self,
+        project: impl FnMut(&[[u8; 8]; WORDS]) -> [[u8; 8]; N],
+        copy: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<(usize, usize)> {
+        let entries = self.entries.each_ref().map(project);
+        let bytes = entries[..self.len].as_flattened().as_flattened();
         copy(bytes).then_some((self.len, self.overwritten))
     }
 }
@@ -47,7 +48,7 @@ impl Scheduler {
         if with_caller {
             history.read(copy)
         } else {
-            history.read_without_caller(copy)
+            history.read_projected(|[decision @ .., _]| *decision, copy)
         }
     }
 

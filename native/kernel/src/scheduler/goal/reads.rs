@@ -1,19 +1,23 @@
-use clv_abi::audit::{EncodedReadRecord, ReadRecord};
+use clv_abi::audit::{EncodedReadRecordWithLimit, ReadLimitScope, ReadRecord, ReadRecordWithLimit};
+use clv_abi::goal::ReadLimits;
 
+use super::MemberRole;
 use super::audit::AuditHistory;
 use crate::fs::ramfs::RamFs;
 use crate::scheduler::Scheduler;
 
 pub(super) struct ReadBudget {
-    limit: Option<usize>,
+    goal_limit: Option<usize>,
+    helper_remaining: Option<usize>,
     spent: usize,
-    audit: AuditHistory<EncodedReadRecord>,
+    audit: AuditHistory<EncodedReadRecordWithLimit>,
 }
 
 impl ReadBudget {
-    pub(super) fn new(limit: Option<usize>) -> Self {
+    pub(super) fn new(limits: ReadLimits) -> Self {
         Self {
-            limit,
+            goal_limit: limits.goal,
+            helper_remaining: limits.helpers,
             spent: 0,
             audit: AuditHistory::default(),
         }
@@ -22,11 +26,18 @@ impl ReadBudget {
     fn deliver(
         &mut self,
         child: usize,
+        is_helper: bool,
         requested: usize,
         bytes: &[u8],
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> bool {
-        let remaining_before = self.limit.map(|limit| limit - self.spent);
+        let goal_remaining = self.goal_limit.map(|limit| limit - self.spent);
+        let (limit, remaining_before) = match self.helper_remaining {
+            Some(helper) if is_helper && goal_remaining.is_none_or(|goal| helper < goal) => {
+                (ReadLimitScope::Helper, Some(helper))
+            }
+            _ => (ReadLimitScope::Goal, goal_remaining),
+        };
         let allowed = remaining_before.is_none_or(|remaining| bytes.len() <= remaining);
         if allowed {
             if !copy(bytes) {
@@ -34,14 +45,20 @@ impl ReadBudget {
             }
             // A finite goal can spend at most its limit. Unlimited totals saturate.
             self.spent = self.spent.saturating_add(bytes.len());
+            if is_helper && let Some(remaining) = &mut self.helper_remaining {
+                *remaining -= bytes.len();
+            }
         }
         self.audit.record(
-            ReadRecord {
-                child,
-                requested,
-                bytes: bytes.len(),
-                remaining_before,
-                delivered: allowed,
+            ReadRecordWithLimit {
+                read: ReadRecord {
+                    child,
+                    requested,
+                    bytes: bytes.len(),
+                    remaining_before,
+                    delivered: allowed,
+                },
+                limit,
             }
             .encode(),
         );
@@ -62,9 +79,11 @@ impl Scheduler {
         task.fs.read(fs, fd, requested, |bytes| {
             if let Some(launch) = &task.launch
                 && let Some(goal) = &mut self.goal
-                && goal.live_member_mut(launch.handle).is_some()
+                && let Some(member) = goal.live_member_mut(launch.handle)
             {
-                goal.reads.deliver(launch.handle, requested, bytes, copy)
+                let is_helper = matches!(member.role, MemberRole::Helper { .. });
+                goal.reads
+                    .deliver(launch.handle, is_helper, requested, bytes, copy)
             } else {
                 copy(bytes)
             }
@@ -74,10 +93,15 @@ impl Scheduler {
     pub(crate) fn goal_read_audit(
         &self,
         handle: usize,
+        with_limit: bool,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize, usize)> {
         let reads = &self.shell_goal(handle)?.reads;
-        let (count, overwritten) = reads.audit.read(copy)?;
+        let (count, overwritten) = if with_limit {
+            reads.audit.read(copy)
+        } else {
+            reads.audit.read_projected(|[read @ .., _]| *read, copy)
+        }?;
         Some((count, overwritten, reads.spent))
     }
 }
