@@ -1,4 +1,4 @@
-/// Reply payload bytes held by a goal, delegated to its live child, and spent.
+/// Reply payload bytes held by a goal, reserved by its live children, and spent.
 /// An unlimited balance is represented by `None`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ReplyBudget {

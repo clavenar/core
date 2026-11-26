@@ -108,11 +108,15 @@ The first two events report both children in completion order. The echo reply
 is still available, both waits report status 0, and the last `event` prints
 `no child event`.
 
-The shell can own one goal at a time. Each goal can launch one child.
+The shell can own one goal at a time. By default a goal can launch one child.
+`goal create --children 2` allows a second launch while the first is still
+live. The goal finishes when its last live member stops. Each successful
+launch uses one place for the lifetime of the goal.
 `goal create` prints the new goal handle. `goal run hello` or `goal run echo`
 prints the ordinary child's launch handle. `goal status` reports `Ready`,
-`Running`, `Completed`, `Failed`, or `Cancelled`. The kernel keeps the original
-child handle and outcome until the shell closes the goal or the shell itself stops.
+`Running`, `Completed`, `Failed`, or `Cancelled`. The kernel keeps each
+member's original launch handle and outcome until the shell closes the goal
+or the shell itself stops.
 
 ```text
 goal create
@@ -131,8 +135,9 @@ requests. `goal status` still prints `Completed`, the handle from `goal run`
 and exit status 0. A running goal returns `goal busy` on close. Closing a
 ready or finished goal makes the slot available for a fresh goal.
 
-`agent run <hello|echo>` creates an agent in a ready goal and prints two
-handles. The agent handle identifies the record read by `agent status`.
+`agent run <hello|echo>` creates an agent in the current goal and prints two
+handles. Each goal can admit at most one agent. The agent handle identifies
+the record read by `agent status`.
 The child handle identifies replies, completion events and the wait result.
 The shell remembers both handles for you. Try this at the QEMU prompt.
 
@@ -173,7 +178,7 @@ handle. While an agent is suspended, its goal is `Running`, `goal close`
 reports `goal busy`, and `goal cancel` stops the suspended child. If the child
 finishes before you type `agent suspend`, the shell prints `agent already finished`.
 
-Use `goal create --reply-bytes N` to limit the total bytes its child can send
+Use `goal create --reply-bytes N` to limit the total bytes its children can send
 in replies. Both `goal run` and `agent run` inherit the available balance.
 Pass `--reply-bytes N` to reserve any amount up to that balance. The shell
 accepts unsigned decimal counts, including zero. A plain `goal create` has
@@ -198,6 +203,29 @@ second read prints `available=6 reserved=0 spent=10`. To see a send denied,
 create another 16-byte goal and run `agent run --reply-bytes 9 echo`.
 `wait echo` reports exit 1, `recv echo` prints `no message` and `goal budget`
 prints `available=16 reserved=0 spent=0`.
+
+To share 24 reply bytes between two children, start the first suspended so
+its reservation stays live while the shell launches the second.
+
+```text
+goal create --children 2 --reply-bytes 24
+agent run --suspended --reply-bytes 12 hello
+goal run --reply-bytes 13 echo
+goal budget
+goal run --reply-bytes 12 echo
+wait echo
+goal budget
+agent resume
+wait hello
+goal budget
+goal close
+```
+
+| Checkpoint | Output from `goal budget` |
+| --- | --- |
+| The kernel rejects the 13-byte request | `available=12 reserved=12 spent=0` |
+| `echo` sends `echo ready` and exits | `available=2 reserved=12 spent=10` |
+| `hello` resumes, sends `hello ready` and exits | `available=3 reserved=0 spent=21` |
 
 `goal grant-file <path>` attaches one read-only file to a ready goal. Both
 `goal run` and `agent run` pass that file to their child. Try this in QEMU.
@@ -233,10 +261,11 @@ goal close
 ```
 
 The status is `Cancelled`. On a fresh boot, `event` prints `no child event`
-because this goal never launched a child. Cancelling a running goal stops its
-child before the command returns. Its status is then `Cancelled child=<handle>`,
-and both `event` and `wait <name>` report `<name> cancelled` once. A reply the
-child already sent is still available through `recv <name>`. The stock `echo`
+because this goal never launched a child. Cancelling a running goal stops
+all its live members before the command returns. Its status is then
+`Cancelled child=<handle>`. Each cancelled member produces a completion
+event and a wait result. A reply it already sent is still available through
+`recv <name>`. The stock `echo`
 exits quickly. If it finished first, `goal cancel` prints `goal already finished`.
 
 `ask hello hello from shell` launches `hello` with an `Echo` request and prints the
@@ -545,7 +574,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | --- | --- | --- |
 | 33 `goal_create` | None | Fresh goal handle, or -1 if the slot is occupied or handles are exhausted |
 | 34 `goal_run` | `a0` goal handle, `a1` program selector | Fresh child launch handle, or -1 on failure |
-| 35 `goal_status` | `a0` goal handle | State tag, with the original child handle in `a1` and detail in `a2` |
+| 35 `goal_status` | `a0` goal handle | State tag, with the member reporting that state in `a1` and detail in `a2` |
 | 36 `goal_close` | `a0` goal handle | 0 on release, 1 while running |
 | 37 `goal_cancel` | `a0` goal handle | 0 for a new or repeated cancellation, 1 if the goal already completed or failed |
 | 38 `agent_run` | `a0` goal handle, `a1` program selector | Fresh agent handle, with its child launch handle in `a1` |
@@ -558,12 +587,15 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 45 `goal_run_with_reply_budget` | `a0` goal handle, `a1` program selector, `a2` requested reply bytes | Fresh ordinary child launch handle |
 | 46 `agent_run_with_reply_budget` | Same as call 45, plus `a3` start mode (0 runnable, 1 suspended) | Fresh agent handle, with the child launch handle in `a1` |
 | 47 `goal_grant_file` | `a0` goal handle, `a1` open RamFS file handle owned by the shell | 0 when attached, -1 on rejection |
+| 48 `goal_create_with_options` | `a0` child limit (1 or 2), `a1` budget mode (0 unlimited, 1 finite), `a2` total reply bytes in finite mode | Fresh goal handle, or -1 on rejection |
 
 Only the shell can use these calls. A stale or invalid handle or a call
-from another task returns -1 in `a0`. The run calls require a ready goal.
-They return -1 for an unknown selector or start mode, a busy program slot,
-insufficient available bytes, or exhausted handles. A failed launch leaves
-the ready goal, its file grant and its balance available for retry.
+from another task returns -1 in `a0`. Calls 33 and 43 create single-child
+goals. Call 48 also supports two children and ignores `a2` in unlimited mode.
+The run calls accept a ready goal or a running goal with a place left. They
+return -1 for an unknown selector or start mode, a busy program slot, a full
+goal, a second agent, insufficient available bytes, or exhausted handles.
+A failed launch preserves the goal, its grant, reservations and launch handles.
 
 The kernel binds the child to the goal before its first instruction.
 The agent run calls also create and bind the agent in that operation. Every
@@ -574,9 +606,11 @@ Call 47 accepts one regular file while the goal is ready. The kernel retains
 the file independently of the shell's descriptor, cursor and pathname. Closing
 or cancelling a ready goal, or stopping its owner, releases this reference.
 On a successful launch the child receives a fresh read-only handle at offset
-zero in `a1`, file kind 2 in `a2` and 0 in `a3`. The kernel releases the
-goal's reference as it transfers access. The child can close its handle, and
-exit, fault or cancellation closes any handle it still holds.
+zero in `a1`, file kind 2 in `a2` and 0 in `a3`. Siblings get independent
+cursors on the same retained file, even after pathname reuse. The kernel
+releases the goal's reference when all places have been used or the goal
+finishes. Each child can close its own handle. Exit, fault or cancellation
+closes any handle it still holds.
 
 `agent_status` uses tags 1–5 below and tag 6 for a suspended child (`a2` is
 zero). It always returns the original child handle on success. `goal_status`
@@ -589,40 +623,49 @@ reports tag 1 throughout a live child's suspension.
 | 2 | Completed | Child handle | Exit status 0 |
 | 3 | Failed | Child handle | Nonzero exit status |
 | 4 | Failed | Child handle | Fault cause |
-| 5 | Cancelled | Original child handle, or 0 if cancelled while ready | 0 |
+| 5 | Cancelled | Cancelled child handle, or 0 if cancelled while ready | 0 |
+
+For two members, `goal_status` reports the earliest-launched live child
+while either is running or suspended. After both stop, it reports a
+cancelled member first, then a member that failed, then a successful member.
+Launch order breaks ties. `agent_status` always reports the agent's own
+child, including after that child stops while its sibling runs.
 
 Repeating suspend or resume on a live agent already in the requested state
 succeeds. A paused child keeps its slot and any queued reply. Suspension and
 resumption produce no completion event.
 
-`goal_cancel` targets the goal's original launch handle. A running child's
-slot becomes available for a new launch immediately. The kernel queues one
-event for the cancelled child. Repeating cancellation returns 0 even after
-another launch reuses the slot. Cancelling a ready goal produces no event.
+`goal_cancel` stops each live member by its original launch handle in launch
+order. Its program slot becomes available for reuse immediately. The kernel
+queues one event per cancelled child. Repeating cancellation returns 0 even
+after another launch reuses a slot. Cancelling a ready goal produces no event.
 
 Goal and agent status reads are repeatable and survive reuse of the child's
 program slot. Closing the goal releases its agent identity. The child's pending
 reply, event and wait status remain available under the usual launch rules.
-If the shell exits or faults, the kernel cancels the goal's live child by its
+If the shell exits or faults, the kernel cancels every live member by its
 original launch handle, even when suspended. It releases the goal and its agent
 before scheduling another task. Children launched outside the goal can still
 run to completion, including a newer launch in the same program slot.
 
-The kernel reserves the child's reply allowance when it binds the launch.
+The kernel reserves each child's reply allowance when it binds the launch.
 Calls 34, 38 and 42 reserve all available bytes. Calls 45 and 46 can also
 delegate a finite allowance from an unlimited goal. With a finite goal,
 `available + reserved + spent` always equals the original limit. Call 44
 returns 0 for finite balances, 1 for unlimited available bytes with a finite
 reservation, and 3 while both are unlimited. An unlimited field has register
 value 0 and prints as `unlimited`. Finite counts span the full RV64 unsigned
-range. For an unlimited goal the spent counter saturates at that maximum.
+range. For an unlimited goal, a finite reservation total or spent total
+larger than that maximum prints as the maximum. Each child's reservation is
+tracked separately, so the reserved total becomes exact as soon as it fits.
 
 Each successful `message_send` or `reply_send` moves the byte count returned
 by the call from reserved to spent. A valid zero-byte reply costs zero. A
 failed send, including one that exceeds the reservation, leaves the mailbox
 and budget intact. Reading a reply or suspending and resuming the child
-preserves the counters. Exit, fault and cancellation release only the unused
-reservation. The shell can inspect the final counters until it closes the goal.
+preserves the counters. Exit, fault and cancellation return that child's
+unused bytes to the goal. The shell can inspect the final counters until it
+closes the goal.
 Children launched outside the goal use their own mailbox independently.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`

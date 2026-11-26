@@ -6,7 +6,7 @@ use clv_abi::{
 
 use super::{ecall, syscall, syscall_result};
 
-/// Creates an agent in a ready goal and starts its child in one call.
+/// Creates the goal's agent and starts its child in one call.
 pub fn run(goal: usize, program: usize) -> Option<AgentLaunch> {
     run_with_options(goal, program, false, None)
 }

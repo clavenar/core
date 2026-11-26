@@ -3,7 +3,7 @@ mod options;
 use clv::goal::{self, CancelResult, CloseResult, GoalStatus, ReplyBudget};
 use clv::{agent, fs, print};
 use clv_abi::{CompletionKind, OPEN_READ};
-pub(super) use options::GoalOptions;
+pub(super) use options::{GoalCommand, GoalOptions};
 
 use super::{children::Children, hex, print_handle, print_line, split_word};
 
@@ -43,7 +43,7 @@ pub(super) fn command(
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create [--reply-bytes N] | grant-file <path> | run [--reply-bytes N] <hello|echo> | budget | status | cancel | close\r\n"),
+        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] | grant-file <path> | run [--reply-bytes N] <hello|echo> | budget | status | cancel | close\r\n"),
     }
 }
 
@@ -67,13 +67,10 @@ fn grant_file(goal: Option<usize>, path: &[u8]) {
 }
 
 fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
-    let Some((options, b"")) = GoalOptions::parse(arguments, false) else {
-        return print(b"usage: goal create [--reply-bytes N]\r\n");
+    let Some((options, b"")) = GoalOptions::parse(arguments, GoalCommand::Create) else {
+        return print(b"usage: goal create [--children 1|2] [--reply-bytes N]\r\n");
     };
-    let result = match options.reply_bytes {
-        Some(bytes) => goal::create_with_reply_budget(bytes),
-        None => goal::create(),
-    };
+    let result = goal::create_with_options(options.children.unwrap_or(1), options.reply_bytes);
     match result {
         Some(handle) => {
             *current = Some(CurrentGoal {

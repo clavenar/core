@@ -2,8 +2,8 @@ pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
 use clv_abi::{
     SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
-    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_FILE, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
+    SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_FILE,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, syscall, syscall_result};
@@ -14,6 +14,20 @@ pub fn create() -> Option<usize> {
 
 pub fn create_with_reply_budget(bytes: usize) -> Option<usize> {
     syscall_result(syscall(SYS_GOAL_CREATE_WITH_REPLY_BUDGET, bytes, 0, 0))
+}
+
+/// Creates a goal with room for the given number of launches and a shared reply budget.
+pub fn create_with_options(children: usize, reply_bytes: Option<usize>) -> Option<usize> {
+    match (children, reply_bytes) {
+        (1, None) => create(),
+        (1, Some(bytes)) => create_with_reply_budget(bytes),
+        _ => syscall_result(syscall(
+            SYS_GOAL_CREATE_WITH_OPTIONS,
+            children,
+            usize::from(reply_bytes.is_some()),
+            reply_bytes.unwrap_or(0),
+        )),
+    }
 }
 
 /// Attaches one file from the caller's handle table to a ready goal.
@@ -53,7 +67,7 @@ pub fn close(goal: usize) -> Option<CloseResult> {
     }
 }
 
-/// Cancels a ready goal or stops its running child before returning.
+/// Cancels a ready goal or stops all its live children before returning.
 pub fn cancel(goal: usize) -> Option<CancelResult> {
     match syscall(SYS_GOAL_CANCEL, goal, 0, 0) {
         n if n == CancelResult::Cancelled as usize => Some(CancelResult::Cancelled),

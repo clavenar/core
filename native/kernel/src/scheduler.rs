@@ -464,7 +464,7 @@ impl Scheduler {
             launch.request = None;
             launch.completion = Some(completion);
             if let Some(goal) = &mut self.goal {
-                goal.finish_child(launch.handle, completion);
+                goal.finish_child(launch.handle, completion, fs);
             }
             if shell_live {
                 launch.event = Some(PendingEvent {

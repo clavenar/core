@@ -1,5 +1,7 @@
 use crate::{CompletionKind, NO_CHILD_HANDLE};
 
+pub const MAX_CHILDREN: usize = 2;
+
 const READY: usize = 0;
 const RUNNING: usize = 1;
 const COMPLETED: usize = 2;
@@ -7,7 +9,7 @@ const FAILED_EXIT: usize = 3;
 const FAILED_FAULT: usize = 4;
 const CANCELLED: usize = 5;
 
-/// A non-consuming snapshot of one goal and its original child launch.
+/// A non-consuming goal snapshot. The child handle identifies the member reporting the state.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GoalStatus {
     Ready,

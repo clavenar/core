@@ -42,7 +42,7 @@ impl Handle {
     }
 }
 
-/// Pins the shell-authorized file while its goal is ready.
+/// Pins the shell-authorized file while its goal can admit another child.
 pub(crate) struct FileGrant(Node);
 
 impl FileGrant {

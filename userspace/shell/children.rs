@@ -4,7 +4,10 @@ use clv_abi::{
     PROGRAM_ECHO, PROGRAM_HELLO, ReplyKind, RequestKind,
 };
 
-use super::{goal::GoalOptions, hex, print_handle, print_line, split_word};
+use super::{
+    goal::{GoalCommand, GoalOptions},
+    hex, print_handle, print_line, split_word,
+};
 
 struct Child {
     name: &'static [u8],
@@ -70,14 +73,14 @@ impl Children {
     fn goal_child(
         &mut self,
         arguments: &[u8],
-        allow_suspended: bool,
+        command: GoalCommand,
     ) -> Option<(&mut Child, GoalOptions)> {
-        let (options, name) = GoalOptions::parse(arguments, allow_suspended)?;
+        let (options, name) = GoalOptions::parse(arguments, command)?;
         Some((self.named(name)?, options))
     }
 
     pub(super) fn run_in_goal(&mut self, goal: Option<usize>, arguments: &[u8]) {
-        let Some((child, options)) = self.goal_child(arguments, false) else {
+        let Some((child, options)) = self.goal_child(arguments, GoalCommand::Run) else {
             return print(b"usage: goal run [--reply-bytes N] <hello|echo>\r\n");
         };
         let Some(goal) = goal else {
@@ -100,7 +103,7 @@ impl Children {
         goal: usize,
         arguments: &[u8],
     ) -> Option<agent::AgentLaunch> {
-        let Some((child, options)) = self.goal_child(arguments, true) else {
+        let Some((child, options)) = self.goal_child(arguments, GoalCommand::AgentRun) else {
             print(b"usage: agent run [--suspended] [--reply-bytes N] <hello|echo>\r\n");
             return None;
         };

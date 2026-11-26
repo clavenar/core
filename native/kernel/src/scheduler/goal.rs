@@ -1,23 +1,72 @@
 mod budget;
 
-use self::budget::ReplyAccount;
+use self::budget::ReplyReservation;
 use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult};
 use clv_abi::budget::ReplyBudget;
-use clv_abi::goal::{CancelResult, CloseResult, GoalStatus};
+use clv_abi::goal::{CancelResult, CloseResult, GoalStatus, MAX_CHILDREN};
 
 use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
 use crate::fs::ramfs::{FileGrant, RamFs, TaskFs};
 
-pub(super) struct Goal {
+struct Member {
     handle: usize,
     agent: Option<usize>,
-    status: GoalStatus,
-    replies: ReplyAccount,
+    replies: ReplyReservation,
+    completion: Option<TaskCompletion>,
+}
+
+impl Member {
+    fn status(&self) -> GoalStatus {
+        let child = self.handle;
+        match self.completion {
+            None => GoalStatus::Running { child },
+            Some(TaskCompletion::Exited(0)) => GoalStatus::Completed { child },
+            Some(TaskCompletion::Cancelled) => GoalStatus::Cancelled { child: Some(child) },
+            Some(completion) => {
+                let (kind, value) = completion.kind_and_value();
+                GoalStatus::Failed { child, kind, value }
+            }
+        }
+    }
+}
+
+pub(super) struct Goal {
+    handle: usize,
+    child_limit: usize,
+    reply_limit: Option<usize>,
+    members: [Option<Member>; MAX_CHILDREN],
+    cancelled_before_launch: bool,
     file: Option<FileGrant>,
 }
 
 impl Goal {
+    fn members(&self) -> impl Iterator<Item = &Member> {
+        self.members.iter().flatten()
+    }
+
+    fn status(&self) -> GoalStatus {
+        // Ties report the first matching member in launch order.
+        let representative = self.members().min_by_key(|member| match member.completion {
+            None => 0,
+            Some(TaskCompletion::Cancelled) => 1,
+            Some(TaskCompletion::Exited(0)) => 3,
+            Some(_) => 2,
+        });
+        match representative {
+            Some(member) => member.status(),
+            None if self.cancelled_before_launch => GoalStatus::Cancelled { child: None },
+            None => GoalStatus::Ready,
+        }
+    }
+
+    fn budget(&self) -> ReplyBudget {
+        budget::balance(
+            self.reply_limit,
+            self.members().map(|member| &member.replies),
+        )
+    }
+
     pub(super) fn start(
         &mut self,
         handle: usize,
@@ -26,19 +75,34 @@ impl Goal {
         reply_bytes: Option<usize>,
         fs: &mut RamFs,
     ) -> Option<TaskFs> {
-        if self.handle != handle || self.status != GoalStatus::Ready {
+        if self.handle != handle
+            || !matches!(
+                self.status(),
+                GoalStatus::Ready | GoalStatus::Running { .. }
+            )
+        {
             return None;
         }
-        let replies = self.replies.with_reservation(reply_bytes)?;
+        if agent.is_some() && self.members().any(|member| member.agent.is_some()) {
+            return None;
+        }
+        let slot = self.members[..self.child_limit]
+            .iter()
+            .position(Option::is_none)?;
+        let replies = ReplyReservation::new(self.budget().available, reply_bytes)?;
         let child_fs = match &self.file {
             Some(file) => file.open_for_child(fs)?,
             None => TaskFs::empty(),
         };
-        // The child now owns its handle. All fallible launch checks have passed.
-        self.release_file(fs);
-        self.replies = replies;
-        self.agent = agent;
-        self.status = GoalStatus::Running { child };
+        self.members[slot] = Some(Member {
+            handle: child,
+            agent,
+            replies,
+            completion: None,
+        });
+        if slot + 1 == self.child_limit {
+            self.release_file(fs);
+        }
         Some(child_fs)
     }
 
@@ -48,48 +112,57 @@ impl Goal {
         }
     }
 
+    fn live_member_mut(&mut self, child: usize) -> Option<&mut Member> {
+        self.members
+            .iter_mut()
+            .flatten()
+            .find(|member| member.handle == child && member.completion.is_none())
+    }
+
     pub(super) fn charge_reply(&mut self, child: usize, bytes: usize) -> Option<()> {
-        if self.running_child() == Some(child) {
-            self.replies.charge(bytes)?;
+        if let Some(member) = self.live_member_mut(child) {
+            member.replies.charge(bytes)?;
         }
         Some(())
     }
 
-    pub(super) fn finish_child(&mut self, child: usize, completion: TaskCompletion) {
-        if self.running_child() != Some(child) {
+    pub(super) fn finish_child(
+        &mut self,
+        child: usize,
+        completion: TaskCompletion,
+        fs: &mut RamFs,
+    ) {
+        let Some(member) = self.live_member_mut(child) else {
             return;
-        }
-        self.replies.release();
-        self.status = match completion {
-            TaskCompletion::Exited(0) => GoalStatus::Completed { child },
-            TaskCompletion::Cancelled => GoalStatus::Cancelled { child: Some(child) },
-            _ => {
-                let (kind, value) = completion.kind_and_value();
-                GoalStatus::Failed { child, kind, value }
-            }
         };
-    }
-
-    fn running_child(&self) -> Option<usize> {
-        match self.status {
-            GoalStatus::Running { child } => Some(child),
-            _ => None,
+        member.replies.release();
+        member.completion = Some(completion);
+        if !self.members().any(|member| member.completion.is_none()) {
+            self.release_file(fs);
         }
     }
 }
 
 impl Scheduler {
-    pub(crate) fn create_goal(&mut self, reply_bytes: Option<usize>) -> Option<usize> {
-        if self.current != SHELL_TASK_INDEX || self.goal.is_some() {
+    pub(crate) fn create_goal(
+        &mut self,
+        child_limit: usize,
+        reply_limit: Option<usize>,
+    ) -> Option<usize> {
+        if self.current != SHELL_TASK_INDEX
+            || self.goal.is_some()
+            || !(1..=MAX_CHILDREN).contains(&child_limit)
+        {
             return None;
         }
         let handle = self.next_handle;
         self.next_handle = handle.checked_add(1)?;
         self.goal = Some(Goal {
             handle,
-            agent: None,
-            status: GoalStatus::Ready,
-            replies: ReplyAccount::new(reply_bytes),
+            child_limit,
+            reply_limit,
+            members: [const { None }; MAX_CHILDREN],
+            cancelled_before_launch: false,
             file: None,
         });
         Some(handle)
@@ -103,11 +176,11 @@ impl Scheduler {
     }
 
     pub(crate) fn goal_status(&self, handle: usize) -> Option<GoalStatus> {
-        Some(self.shell_goal(handle)?.status)
+        Some(self.shell_goal(handle)?.status())
     }
 
     pub(crate) fn goal_budget(&self, handle: usize) -> Option<ReplyBudget> {
-        Some(self.shell_goal(handle)?.replies.snapshot())
+        Some(self.shell_goal(handle)?.budget())
     }
 
     pub(crate) fn grant_goal_file(
@@ -127,20 +200,22 @@ impl Scheduler {
         Some(())
     }
 
-    fn goal_for_agent(&self, handle: usize) -> Option<&Goal> {
+    fn agent_member(&self, handle: usize) -> Option<(&Goal, &Member)> {
+        if self.current != SHELL_TASK_INDEX {
+            return None;
+        }
         let goal = self.goal.as_ref()?;
-        (self.current == SHELL_TASK_INDEX && goal.agent == Some(handle)).then_some(goal)
+        let member = goal.members().find(|member| member.agent == Some(handle))?;
+        Some((goal, member))
     }
 
     pub(crate) fn agent_status(&self, handle: usize) -> Option<AgentStatus> {
-        let goal = self.goal_for_agent(handle)?;
-        let suspended = match goal.running_child() {
-            Some(child) => self.tasks[self.launch_index(child)?].state == TaskState::Suspended,
-            None => false,
-        };
+        let (goal, member) = self.agent_member(handle)?;
+        let suspended = member.completion.is_none()
+            && self.tasks[self.launch_index(member.handle)?].state == TaskState::Suspended;
         Some(AgentStatus {
             goal: goal.handle,
-            status: goal.status,
+            status: member.status(),
             suspended,
         })
     }
@@ -150,10 +225,11 @@ impl Scheduler {
         handle: usize,
         suspended: bool,
     ) -> Option<ControlResult> {
-        let Some(child) = self.goal_for_agent(handle)?.running_child() else {
+        let (_, member) = self.agent_member(handle)?;
+        if member.completion.is_some() {
             return Some(ControlResult::AlreadyFinished);
-        };
-        let index = self.launch_index(child)?;
+        }
+        let index = self.launch_index(member.handle)?;
         let state = &mut self.tasks[index].state;
         if !matches!(state, TaskState::Runnable | TaskState::Suspended) {
             return None;
@@ -175,9 +251,9 @@ impl Scheduler {
             GoalStatus::Ready => {
                 let goal = self.goal.as_mut()?;
                 goal.release_file(fs);
-                goal.status = GoalStatus::Cancelled { child: None };
+                goal.cancelled_before_launch = true;
             }
-            GoalStatus::Running { child } => self.cancel_child_launch(child, fs)?,
+            GoalStatus::Running { .. } => self.cancel_running_children(fs)?,
             GoalStatus::Cancelled { .. } => {}
             GoalStatus::Completed { .. } | GoalStatus::Failed { .. } => {
                 return Some(CancelResult::AlreadyFinished);
@@ -187,9 +263,7 @@ impl Scheduler {
     }
 
     pub(super) fn release_shell_goal(&mut self, fs: &mut RamFs) {
-        if let Some(child) = self.goal.as_ref().and_then(Goal::running_child) {
-            self.cancel_child_launch(child, fs);
-        }
+        let _ = self.cancel_running_children(fs);
         self.drop_goal(fs);
     }
 
@@ -199,12 +273,21 @@ impl Scheduler {
         }
     }
 
-    fn cancel_child_launch(&mut self, child: usize, fs: &mut RamFs) -> Option<()> {
-        let index = self.launch_index(child)?;
-        if self.tasks[index].state == TaskState::Stopped {
-            return None;
+    fn cancel_running_children(&mut self, fs: &mut RamFs) -> Option<()> {
+        let goal = self.goal.as_ref()?;
+        let mut targets = [None; MAX_CHILDREN];
+        // Resolve every live launch before stopping any member.
+        let live = goal.members().filter(|member| member.completion.is_none());
+        for (target, member) in targets.iter_mut().zip(live) {
+            let index = self.launch_index(member.handle)?;
+            if self.tasks[index].state == TaskState::Stopped {
+                return None;
+            }
+            *target = Some(index);
         }
-        self.stop_task(index, fs, TaskCompletion::Cancelled);
+        for index in targets.into_iter().flatten() {
+            self.stop_task(index, fs, TaskCompletion::Cancelled);
+        }
         Some(())
     }
 }
