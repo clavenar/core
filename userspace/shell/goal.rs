@@ -3,7 +3,7 @@ mod options;
 
 use clv::goal::{self, CancelResult, CloseResult, FileRecipient, GoalStatus, ReplyBudget};
 use clv::{agent, fs, print};
-use clv_abi::{CompletionKind, OPEN_READ};
+use clv_abi::{CompletionKind, OPEN_READ, Program};
 pub(super) use options::{GoalCommand, GoalOptions};
 
 use super::{children::Children, hex, print_handle, print_line, split_word};
@@ -21,10 +21,10 @@ pub(super) fn command(
     let handle = current.as_ref().map(|goal| goal.handle);
     match split_word(arguments) {
         (b"create", arguments) => create(arguments, current),
-        (b"grant-file", arguments) => grant_file(handle, arguments, children),
+        (b"grant-file", arguments) => grant_file(handle, arguments),
         (b"run", arguments) => children.run_in_goal(handle, arguments),
         (b"audit", option @ (b"" | b"--replies")) => match handle {
-            Some(handle) => audit::show(handle, children, option == b"--replies"),
+            Some(handle) => audit::show(handle, option == b"--replies"),
             None => print(b"no current goal\r\n"),
         },
         (b"audit", _) => print(b"usage: goal audit [--replies]\r\n"),
@@ -49,18 +49,18 @@ pub(super) fn command(
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] | grant-file [--delegable | --delegate-to <hello|echo>] <path> | run [--reply-bytes N] <hello|echo> | budget | audit [--replies] | status | cancel | close\r\n"),
+        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] | grant-file [--delegable | --delegate-to <program>] <path> | run [--reply-bytes N] <program> | budget | audit [--replies] | status | cancel | close\r\n"),
     }
 }
 
-fn grant_file(goal: Option<usize>, arguments: &[u8], children: &Children) {
+fn grant_file(goal: Option<usize>, arguments: &[u8]) {
     const USAGE: &[u8] =
-        b"usage: goal grant-file [--delegable | --delegate-to <hello|echo>] <path>\r\n";
+        b"usage: goal grant-file [--delegable | --delegate-to <program>] <path>\r\n";
     let (recipient, path) = match split_word(arguments) {
         (b"--delegable", path) => (Some(FileRecipient::Any), path),
         (b"--delegate-to", rest) => {
             let (name, path) = split_word(rest);
-            let Some(program) = children.program(name) else {
+            let Some(program) = Program::named(name) else {
                 return print(USAGE);
             };
             (Some(FileRecipient::Program(program)), path)
@@ -186,7 +186,7 @@ pub(super) fn agent_command(
                 None => print(b"no current agent\r\n"),
             }
         }
-        _ => print(b"usage: agent run [--suspended] [--reply-bytes N] <hello|echo> | delegate [--with-file] --reply-bytes N <hello|echo> | status | suspend | resume\r\n"),
+        _ => print(b"usage: agent run [--suspended] [--reply-bytes N] <program> | delegate [--with-file] --reply-bytes N <program> [-F <pattern>] | status | suspend | resume\r\n"),
     }
 }
 

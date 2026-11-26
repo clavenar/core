@@ -41,25 +41,28 @@ After the OpenSBI banner, the kernel prints `Clavenar kernel booted` with the
 version from `native/kernel/Cargo.toml`. It prints `boot frame=0x...` with the
 physical address of task 1's Sv39 root table.
 
-The build links [hello](userspace/hello/), [the shell](userspace/shell/), and
-[echo](userspace/echo/) as separate RV64 ELFs and embeds them in the kernel.
+The build links the shell and each registered program as separate RV64 ELFs
+and embeds them in the kernel. To add a tool, put its entry point in
+`userspace/<name>/main.rs` and append its name to the
+[program registry](crates/clv-abi/src/program.rs). The build, shell and kernel
+use that registry for names and stable launch selectors.
 The loader accepts static, little-endian ELF64 executables with one
-read/execute segment of at most 16 KiB at `0x00400000`. The loader allocates
-one to four pages based on the segment's memory size (`p_memsz`) and zero-fills
+read/execute segment of at most 20 KiB at `0x00400000`. The loader allocates
+one to five pages based on the segment's memory size (`p_memsz`) and zero-fills
 any bytes beyond the file data. Boot reports each program's validated entry
 address. If loading fails, it prints `User ELF load failed` with the program
 name and idles.
 
 The kernel activates paging, prints `Sv39 paging enabled`, and starts hello
-as task 1 and the shell as task 2. Task 3 starts when the shell launches
-`echo`. Each receives its task ID in `a0` and runs with its own Sv39 root
-and read/execute image. Each task has a 4 KiB read/write, non-executable stack.
-It starts at `0x00402000` for one- and two-page images, at `0x00403000` for
-three-page images, and at `0x00404000` for four-page images. The initial stack
-pointer is at the top of that page. Nonempty syscall buffers must fit within
-the calling task's stack. The kernel and UART mappings are shared in supervisor
-mode. The kernel, 32 KiB supervisor stack, and 27-frame boot pool fit within
-one aligned 2 MiB physical region.
+as task 1 and the shell as task 2. Tasks 3 and 4 start on the first launch of
+`echo` and `grep`, respectively. Each receives its task ID in `a0` and runs
+with its own Sv39 root and read/execute image. Each task has a 4 KiB
+read/write, non-executable stack. It starts at `0x00402000` for one- and
+two-page images and immediately after the image for larger programs. The
+initial stack pointer is at the top of that page. Nonempty syscall buffers
+must fit within the calling task's stack. The kernel and UART mappings are
+shared in supervisor mode. The kernel, 48 KiB supervisor stack, and 39-frame
+boot pool fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
@@ -135,7 +138,7 @@ requests. `goal status` still prints `Completed`, the handle from `goal run`
 and exit status 0. A running goal returns `goal busy` on close. Closing a
 ready or finished goal makes the slot available for a fresh goal.
 
-`agent run <hello|echo>` creates an agent in the current goal and prints two
+`agent run <program>` creates an agent in the current goal and prints two
 handles. Each goal can admit at most one agent. The agent handle identifies
 the record read by `agent status`.
 The child handle identifies replies, completion events and the wait result.
@@ -227,7 +230,7 @@ goal close
 | `echo` sends `echo ready` and exits | `available=2 reserved=12 spent=10` |
 | `hello` resumes, sends `hello ready` and exits | `available=3 reserved=0 spent=21` |
 
-Use `agent delegate --reply-bytes N <hello|echo>` to start a helper with
+Use `agent delegate --reply-bytes N <program>` to start a helper with
 bytes from the current agent's remaining reservation. The shell can do this
 while the agent is running or suspended. The helper uses the goal's second
 and final launch slot. Its RamFS handle table starts empty by default.
@@ -301,7 +304,7 @@ goal close
 5 reply bytes including the line ending, and `echo ready` costs 10, giving
 `available=9 reserved=0 spent=15`.
 
-Use `goal grant-file --delegate-to <hello|echo> <path>` to choose which helper
+Use `goal grant-file --delegate-to <program> <path>` to choose which helper
 may receive the agent's file. The direct agent can read the file itself. The
 kernel checks the recipient when the agent requests a helper with `--with-file`.
 
@@ -463,12 +466,51 @@ traces on the shared UART so they do not interrupt the file contents.
 Fault diagnostics still appear immediately.
 
 The shell records the latest successful launch handle for each program.
-`wait hello` and `wait echo` collect the selected child's exit status or
-fault cause once, waiting if the child is still running. `recv hello` and
-`recv echo` wait for the selected child's reply or completion. A queued
-reply remains available after exit or fault. Relaunching a program
+`wait <program>` collects the selected child's exit status or fault cause
+once, waiting if the child is still running. `recv <program>` waits for the
+selected child's reply or completion. A queued reply remains available
+after exit or fault. Relaunching a program
 invalidates its previous handle and discards the results for that handle.
 A failed launch preserves the previous handle and its results.
+
+### Search a granted file with grep
+
+`grep -F <pattern> <path>` runs the native search program on one read-only
+file. It selects whole lines containing a case-sensitive literal. Single or
+double quotes can enclose a pattern with spaces. An empty quoted pattern
+selects every line. The shell passes the opened file and the pattern together.
+A delegated search receives the same arguments using the agent's file grant.
+The interactive shell accepts up to 64 bytes for the entire command line.
+
+```text
+write /build.log ERROR disk full
+grep -F ERROR /build.log
+goal create --children 2 --reply-bytes 32
+goal grant-file --delegate-to grep /build.log
+agent run --suspended --reply-bytes 32 echo
+agent delegate --with-file --reply-bytes 17 grep -F ERROR
+wait grep
+recv grep
+goal audit --replies
+goal cancel
+goal close
+```
+
+Both searches print `ERROR disk full`. The stored CRLF brings the reply to
+17 bytes, so the audit shows `bytes=17 remaining_before=17 sent`. Repeat from
+`goal create` with a helper allowance of 16. The helper exits with status 2,
+`recv grep` prints `no message`, and the audit records
+`bytes=17 remaining_before=16 denied=insufficient-reply-bytes`.
+
+The search reads through the file and returns all selected bytes in one reply,
+preserving line endings and a final unterminated line. Exit status 0 means a
+match, 1 means no matches, and 2 means an input or output error. If the
+matching lines exceed 64 bytes in total, the shell prints
+`grep result exceeds 64 bytes`. The error reply contains zero file bytes.
+An empty match result prints nothing. `wait grep` can also collect the exit
+status after a direct search.
+
+### Native syscall ABI
 
 The user program passes the call number in `a7` and executes `ecall`. Call 0
 prints `task N user probe` and returns 42 in `a0`. Call 3 returns 1 in `a0` once
@@ -549,8 +591,8 @@ schedule. A task that exits successfully reports
 `user exit status=0x0000000000000000`. When the last task stops, the kernel
 prints `all tasks exited` and idles. Unknown call numbers return -1 in `a0`.
 
-Call 15 (`spawn`) takes a program selector in `a0`. Selector 0 chooses
-`hello` and selector 1 chooses `echo`. The child starts with no RamFS
+Call 15 (`spawn`) takes a program selector in `a0`. Selectors 0, 1 and 2
+choose `hello`, `echo` and `grep`, respectively. The child starts with no RamFS
 handles or working directory. The call returns a fresh, nonzero child handle
 in `a0` when the task is ready to run and -1 if the selector is unknown or
 the program slot is occupied. Child launches, goals and agents draw distinct
@@ -610,8 +652,9 @@ Call 24 (`spawn_request`) takes a program selector in `a0`, request kind in
 `a1`, user stack payload address in `a2`, byte count in `a3`, and an optional
 directory handle in `a4`. Use `NO_DIRECTORY_GRANT` (`usize::MAX`) for a
 launch without a grant. Handle 0 is valid. The kernel accepts `Echo` (1) and
-`ReadFile` (2) with 1 to 64 payload bytes. It copies the payload and records
-the caller's task ID before the child runs. Success returns a fresh child
+`ReadFile` (2) with 1 to 64 payload bytes, and `Argument` (3) with 0 to 64.
+It copies the payload and records the caller's task ID before the child
+runs. Success returns a fresh child
 handle. Invalid arguments or a busy child slot return -1.
 
 Call 25 (`request_recv`) lets a launched child receive its request into the
@@ -634,7 +677,9 @@ queued reply.
 | 1 `Echo` | 1–64 bytes | Literal bytes or the child's ready message |
 | 2 `FileData` | 0–64 bytes | File contents, including an empty file |
 | 3 `Denied` | Empty | `hello` received a read request without a directory grant |
-| 4 `ReadFailed` | Empty | `hello` failed to open or read the path, or `echo` received a read request it cannot serve |
+| 4 `ReadFailed` | Empty | The program could not read its input or serve the request |
+| 5 `Matches` | 0–64 bytes | All selected lines, or zero bytes for no matches |
+| 6 `ResultTooLarge` | Empty | The matched lines exceed the reply capacity |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -652,8 +697,10 @@ separately with `wait`.
 
 Calls 20 and 27 consume the same reply once. Call 20 returns `Echo` bytes
 verbatim. For `FileData` it returns the legacy status byte 0 followed by up
-to 63 data bytes. Both errors return the single status byte 1. In the other
-direction, call 27 reads a legacy call 19 message as `Echo`. For a `ReadFile`
+to 63 data bytes. `Denied` and `ReadFailed` return the single status byte 1.
+`Matches` returns the selected bytes and `ResultTooLarge` an empty payload.
+Use call 27 to distinguish their tags. In the other direction, call 27 reads
+a legacy call 19 message as `Echo`. For a `ReadFile`
 request or single-file grant it recognizes the original file format, mapping
 status 0 to `FileData` and a lone status byte 1 to `ReadFailed`.
 
@@ -688,7 +735,7 @@ relaunch invalidates the previous pipe handle along with the previous launch.
 Call 32 (`event_wait`) takes no arguments. Only the shell can collect events.
 It receives the oldest pending completion's launch handle in `a0` and its
 kind in `a1` (0 for exit, 1 for fault, 2 for cancellation). While the shell
-is alive, the kernel records one notification per completed launch, up to two
+is alive, the kernel records one notification per completed launch, up to three
 at a time. The boot greeting has no parent launch and produces no event.
 Other callers receive -1 in `a0`.
 
@@ -723,7 +770,9 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 51 `agent_delegate_with_file` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle with read access to the agent's file, or -1 on rejection |
 | 52 `goal_audit` | `a0` goal handle, `a1` shell stack destination, `a2` capacity in bytes | Retained entry count (0–4), with overwritten count in `a1`, or -1 on failure |
 | 53 `goal_reply_audit` | Same arguments as call 52 | Retained reply-budget entry count (0–4), with overwritten reply entry count in `a1`, or -1 on failure |
-| 54 `goal_grant_file_to` | `a0` goal handle, `a1` shell file handle, `a2` allowed helper program selector (0 for `hello`, 1 for `echo`) | 0 when attached, -1 on rejection, including an unknown selector |
+| 54 `goal_grant_file_to` | `a0` goal handle, `a1` shell file handle, `a2` allowed helper program selector | 0 when attached, -1 on rejection, including an unknown selector |
+| 55 `spawn_with_file_arg` | `a0` program selector, `a1` shell file handle, `a2` argument address, `a3` argument length | Fresh child handle with a read-only file and an `Argument` request |
+| 56 `agent_delegate_with_file_arg` | `a0` agent handle, `a1` program selector, `a2` reply bytes, `a3` argument address, `a4` argument length | Fresh helper handle with the delegated read-only file and an `Argument` request |
 
 Only the shell can use these calls. A stale or invalid handle or a call
 from another task returns -1 in `a0`. Calls 33 and 43 create single-child
@@ -753,17 +802,21 @@ agent's handle to one helper program for delegation. Ordinary direct children
 receive read access. Closing the agent's handle ends its ability
 to pass that file on, even while the goal still holds a reference.
 
-Calls 49 and 51 transfer a byte count from zero up to the agent's remaining
+Calls 49, 51 and 56 transfer a byte count from zero up to the agent's remaining
 allowance before the helper's first instruction. Both shares count toward
 the goal's reserved total. Call 49 starts the helper with zero in `a1`, `a2`
-and `a3`. Call 51 checks the selected helper against the recipient on the
+and `a3`. Calls 51 and 56 check the selected helper against the recipient on the
 agent's open delegable handle before allocating a read-only handle with an
 independent cursor.
 The new file handle arrives in `a1`, file kind 2 in `a2` and zero in `a3`.
 The kernel commits the file grant, reply reservation and launch together.
 The shell receives the ordinary launch handle for replies, events and waits.
 
-Call 52 snapshots decisions from calls 49 and 51 made by the owning shell for
+Calls 55 and 56 copy up to 64 literal argument bytes into the launch mailbox
+before the child can run. The child reads the argument with call 25. An empty
+argument has tag 3. Invalid arguments fail before admission or reservation.
+
+Call 52 snapshots decisions from calls 49, 51 and 56 made by the owning shell for
 an agent in the open goal. Attempts with a foreign or stale agent handle are
 discarded. Each 48-byte entry begins with the agent handle, requested program
 selector, requested reply bytes, and file flag (0 or 1). The final two words
@@ -782,6 +835,7 @@ On denial, the code identifies the first failed check and the handle is zero.
 | 7 | Agent has no open delegable file |
 | 8 | RamFS file handles exhausted |
 | 9 | The agent's file grant does not permit the selected helper program |
+| 10 | Invalid argument length or caller buffer |
 
 Call 53 returns the decisions recorded when a goal member's `message_send`
 or `reply_send` reaches the budget check. The kernel validates the mailbox,
@@ -876,5 +930,6 @@ Check Rust formatting with `rustfmt` from the stable toolchain.
 cargo +stable fmt --manifest-path native/kernel/Cargo.toml --check
 cargo +stable fmt --manifest-path crates/clv-abi/Cargo.toml --check
 rustfmt +stable --edition 2024 --check \
-  userspace/libclv/lib.rs userspace/echo/main.rs userspace/hello/main.rs userspace/shell/main.rs
+  userspace/libclv/lib.rs userspace/echo/main.rs userspace/grep/main.rs \
+  userspace/hello/main.rs userspace/shell/main.rs
 ```

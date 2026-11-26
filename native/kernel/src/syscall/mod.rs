@@ -1,21 +1,21 @@
 use clv_abi::agent::AgentLaunch;
-use clv_abi::audit::DelegationRequest;
+use clv_abi::audit::{DelegationDenial, DelegationRequest};
 use clv_abi::goal::FileRecipient;
 use clv_abi::{
     ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE,
     PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, Program, ReplyKind, RequestKind,
-    SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE, SYS_AGENT_RESUME, SYS_AGENT_RUN,
-    SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_STATUS, SYS_AGENT_SUSPEND,
-    SYS_CHDIR, SYS_CLOSE, SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_BUDGET,
-    SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE, SYS_GOAL_CREATE_WITH_OPTIONS,
-    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
-    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET,
-    SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT,
-    SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN,
-    SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
-    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE, SYS_AGENT_DELEGATE_WITH_FILE_ARG,
+    SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET,
+    SYS_AGENT_STATUS, SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE, SYS_EVENT_WAIT, SYS_EXIT,
+    SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
+    SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR,
+    SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ,
+    SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR,
+    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
+    SYS_SPAWN_WITH_FILE_ARG, SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
+    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -101,6 +101,16 @@ pub(crate) fn dispatch(
         SYS_SPAWN_WITH_FILE => scheduler
             .spawn(fs, a0, LaunchScope::File(a1), None)
             .unwrap_or(SYSCALL_ERROR),
+        SYS_SPAWN_WITH_FILE_ARG => spawn_with_request(
+            scheduler,
+            fs,
+            a0,
+            LaunchScope::File(a1),
+            RequestKind::Argument,
+            a2,
+            a3,
+        )
+        .unwrap_or(SYSCALL_ERROR),
         SYS_SPAWN_WITH_FILE_PIPE => scheduler
             .spawn(fs, a0, LaunchScope::FileWithPipe(a1), None)
             .unwrap_or(SYSCALL_ERROR),
@@ -164,14 +174,28 @@ pub(crate) fn dispatch(
         SYS_AGENT_RUN_WITH_REPLY_BUDGET if a3 <= 1 => {
             write_agent_launch(frame, scheduler.run_agent(fs, a0, a1, a3 == 1, Some(a2)))
         }
-        SYS_AGENT_DELEGATE | SYS_AGENT_DELEGATE_WITH_FILE => {
+        SYS_AGENT_DELEGATE | SYS_AGENT_DELEGATE_WITH_FILE | SYS_AGENT_DELEGATE_WITH_FILE_ARG => {
             let request = DelegationRequest {
                 agent: a0,
                 program: a1,
                 reply_bytes: a2,
-                with_file: number == SYS_AGENT_DELEGATE_WITH_FILE,
+                with_file: number != SYS_AGENT_DELEGATE,
             };
-            scheduler.delegate(fs, request).unwrap_or(SYSCALL_ERROR)
+            let argument = if number == SYS_AGENT_DELEGATE_WITH_FILE_ARG {
+                copy_request(
+                    scheduler,
+                    RequestKind::Argument,
+                    a3,
+                    frame.registers[REG_A4],
+                )
+                .map(Some)
+                .ok_or(DelegationDenial::InvalidArgument)
+            } else {
+                Ok(None)
+            };
+            scheduler
+                .delegate(fs, request, argument)
+                .unwrap_or(SYSCALL_ERROR)
         }
         SYS_AGENT_STATUS => scheduler.agent_status(a0).map_or(SYSCALL_ERROR, |agent| {
             frame.registers[REG_A3] = agent.goal;
@@ -199,10 +223,16 @@ pub(crate) fn dispatch(
                 SYSCALL_ERROR
             }
         }
-        SYS_SPAWN_WITH_MESSAGE => {
-            spawn_with_request(scheduler, fs, a0, None, RequestKind::Echo, a1, a2)
-                .unwrap_or(SYSCALL_ERROR)
-        }
+        SYS_SPAWN_WITH_MESSAGE => spawn_with_request(
+            scheduler,
+            fs,
+            a0,
+            LaunchScope::Plain,
+            RequestKind::Echo,
+            a1,
+            a2,
+        )
+        .unwrap_or(SYSCALL_ERROR),
         SYS_SPAWN_AT_WITH_MESSAGE => {
             // The original scoped call supplied a path to hello and raw bytes to echo.
             let kind = if a0 == PROGRAM_HELLO {
@@ -210,13 +240,18 @@ pub(crate) fn dispatch(
             } else {
                 RequestKind::Echo
             };
-            spawn_with_request(scheduler, fs, a0, Some(a1), kind, a2, a3).unwrap_or(SYSCALL_ERROR)
+            spawn_with_request(scheduler, fs, a0, LaunchScope::Directory(a1), kind, a2, a3)
+                .unwrap_or(SYSCALL_ERROR)
         }
         SYS_SPAWN_REQUEST => {
             let fd = frame.registers[REG_A4];
-            let directory = (fd != NO_DIRECTORY_GRANT).then_some(fd);
+            let scope = if fd == NO_DIRECTORY_GRANT {
+                LaunchScope::Plain
+            } else {
+                LaunchScope::Directory(fd)
+            };
             RequestKind::from_raw(a1)
-                .and_then(|kind| spawn_with_request(scheduler, fs, a0, directory, kind, a2, a3))
+                .and_then(|kind| spawn_with_request(scheduler, fs, a0, scope, kind, a2, a3))
                 .unwrap_or(SYSCALL_ERROR)
         }
         SYS_WAIT => match scheduler.wait_child(a0, frame) {
@@ -299,20 +334,28 @@ fn spawn_with_request(
     scheduler: &mut Scheduler,
     fs: &mut RamFs,
     program: usize,
-    directory_fd: Option<usize>,
+    scope: LaunchScope,
     kind: RequestKind,
     address: usize,
     length: usize,
 ) -> Option<usize> {
+    let request = copy_request(scheduler, kind, address, length)?;
+    scheduler.spawn(fs, program, scope, Some(request))
+}
+
+fn copy_request(
+    scheduler: &Scheduler,
+    kind: RequestKind,
+    address: usize,
+    length: usize,
+) -> Option<Message> {
     let stack = scheduler.address_space().stack;
-    let request = Message::new(
+    Message::new(
         scheduler.current_id(),
         MessageKind::Request(kind),
         length,
         |bytes| stack.copy_from_user(address, bytes),
-    )?;
-    let scope = directory_fd.map_or(LaunchScope::Plain, LaunchScope::Directory);
-    scheduler.spawn(fs, program, scope, Some(request))
+    )
 }
 
 fn open_file(

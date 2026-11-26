@@ -13,11 +13,7 @@ use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::ipc::pipe::Pipe;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::sv39::AddressSpace;
-
-pub(crate) const TASK_COUNT: usize = 3;
-const HELLO_TASK_INDEX: usize = 0;
-const SHELL_TASK_INDEX: usize = 1;
-const ECHO_TASK_INDEX: usize = 2;
+use crate::programs::{SHELL_TASK_INDEX, TASK_COUNT, task_index};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TaskState {
@@ -75,13 +71,6 @@ struct PreparedLaunch {
     next_handle: usize,
 }
 
-fn program_index(program: Program) -> usize {
-    match program {
-        Program::Hello => HELLO_TASK_INDEX,
-        Program::Echo => ECHO_TASK_INDEX,
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum LaunchScope {
     Plain,
@@ -126,6 +115,26 @@ struct Task {
 }
 
 impl Task {
+    fn boot(index: usize, address_space: AddressSpace, entry: usize, sstatus: usize) -> Self {
+        Self {
+            entry,
+            frame: TrapFrame::new_user(entry, address_space.stack.top(), index + 1, sstatus),
+            address_space,
+            fs: if index == SHELL_TASK_INDEX {
+                TaskFs::at_root()
+            } else {
+                TaskFs::empty()
+            },
+            state: if index == SHELL_TASK_INDEX || index == task_index(Program::Hello) {
+                TaskState::Runnable
+            } else {
+                TaskState::Stopped
+            },
+            timer_fired: false,
+            launch: None,
+        }
+    }
+
     fn has_launch(&self, handle: usize) -> bool {
         self.launch
             .as_ref()
@@ -145,33 +154,16 @@ pub(crate) struct Scheduler {
 
 impl Scheduler {
     pub(crate) fn new(programs: [(AddressSpace, usize); TASK_COUNT], sstatus: usize) -> Self {
-        let tasks = core::array::from_fn(|index| {
-            let (address_space, entry) = programs[index];
-            Task {
-                entry,
-                frame: TrapFrame::new_user(entry, address_space.stack.top(), index + 1, sstatus),
-                address_space,
-                fs: if index == SHELL_TASK_INDEX {
-                    TaskFs::at_root()
-                } else {
-                    TaskFs::empty()
-                },
-                state: if index == ECHO_TASK_INDEX {
-                    TaskState::Stopped
-                } else {
-                    TaskState::Runnable
-                },
-                timer_fired: false,
-                launch: None,
-            }
-        });
         Self {
-            tasks,
+            tasks: core::array::from_fn(|index| {
+                let (space, entry) = programs[index];
+                Task::boot(index, space, entry, sstatus)
+            }),
             initial_status: sstatus,
             goal: None,
             next_handle: 1,
             next_event_sequence: 0,
-            current: HELLO_TASK_INDEX,
+            current: task_index(Program::Hello),
         }
     }
 
@@ -243,7 +235,7 @@ impl Scheduler {
         agent: Option<usize>,
     ) -> Result<PreparedLaunch, DelegationDenial> {
         let program = Program::from_raw(program).ok_or(DelegationDenial::UnknownProgram)?;
-        if self.tasks[program_index(program)].state != TaskState::Stopped {
+        if self.tasks[task_index(program)].state != TaskState::Stopped {
             return Err(DelegationDenial::ProgramBusy);
         }
         // An agent takes the first handle of the pair. Commit the sequence only on success.
@@ -311,7 +303,7 @@ impl Scheduler {
             handle,
             next_handle,
         } = launch;
-        let index = program_index(program);
+        let index = task_index(program);
         let task = &mut self.tasks[index];
         let mut frame = TrapFrame::new_user(
             task.entry,

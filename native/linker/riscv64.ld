@@ -37,8 +37,8 @@ SECTIONS
     } :data
 
     .stack ALIGN(16) (NOLOAD) : {
-        /* Boot constructs the scheduler and RamFS before entering user mode. */
-        . += 32K;
+        /* Unoptimized boot code builds the registered task array on this stack. */
+        . += 48K;
         __stack_top = .;
     } :data
 

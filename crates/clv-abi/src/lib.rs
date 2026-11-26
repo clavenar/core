@@ -6,6 +6,8 @@ pub mod agent;
 pub mod audit;
 pub mod budget;
 pub mod goal;
+mod program;
+pub use program::{PROGRAMS, Program};
 
 pub const SYS_PROBE: usize = 0;
 pub const SYS_EXIT: usize = 1;
@@ -62,6 +64,8 @@ pub const SYS_AGENT_DELEGATE_WITH_FILE: usize = 51;
 pub const SYS_GOAL_AUDIT: usize = 52;
 pub const SYS_GOAL_REPLY_AUDIT: usize = 53;
 pub const SYS_GOAL_GRANT_FILE_TO: usize = 54;
+pub const SYS_SPAWN_WITH_FILE_ARG: usize = 55;
+pub const SYS_AGENT_DELEGATE_WITH_FILE_ARG: usize = 56;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
@@ -71,6 +75,7 @@ pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
 pub enum RequestKind {
     Echo = 1,
     ReadFile = 2,
+    Argument = 3,
 }
 
 impl RequestKind {
@@ -78,6 +83,7 @@ impl RequestKind {
         match value {
             value if value == Self::Echo as usize => Some(Self::Echo),
             value if value == Self::ReadFile as usize => Some(Self::ReadFile),
+            value if value == Self::Argument as usize => Some(Self::Argument),
             _ => None,
         }
     }
@@ -91,6 +97,8 @@ pub enum ReplyKind {
     FileData = 2,
     Denied = 3,
     ReadFailed = 4,
+    Matches = 5,
+    ResultTooLarge = 6,
 }
 
 impl ReplyKind {
@@ -100,6 +108,8 @@ impl ReplyKind {
             value if value == Self::FileData as usize => Some(Self::FileData),
             value if value == Self::Denied as usize => Some(Self::Denied),
             value if value == Self::ReadFailed as usize => Some(Self::ReadFailed),
+            value if value == Self::Matches as usize => Some(Self::Matches),
+            value if value == Self::ResultTooLarge as usize => Some(Self::ResultTooLarge),
             _ => None,
         }
     }
@@ -121,26 +131,8 @@ pub const PIPE_CAPACITY: usize = 32;
 pub const FILE_REPLY_OK: u8 = 0;
 pub const FILE_REPLY_ERROR: u8 = 1;
 
-/// Built-in program identified by a launch or a file-grant recipient selector.
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Program {
-    Hello = 0,
-    Echo = 1,
-}
-
 pub const PROGRAM_HELLO: usize = Program::Hello as usize;
 pub const PROGRAM_ECHO: usize = Program::Echo as usize;
-
-impl Program {
-    pub const fn from_raw(selector: usize) -> Option<Self> {
-        match selector {
-            PROGRAM_HELLO => Some(Self::Hello),
-            PROGRAM_ECHO => Some(Self::Echo),
-            _ => None,
-        }
-    }
-}
 
 /// A child passes zero in `a2` to receive its request. An empty event wait returns it in `a0`.
 pub const NO_CHILD_HANDLE: usize = 0;

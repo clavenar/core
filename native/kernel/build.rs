@@ -1,4 +1,6 @@
 use std::env;
+use std::fmt::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -10,7 +12,13 @@ fn main() {
     build_library("clv", &userspace.join("libclv"), &output, &["clv_abi"]);
     let linker_script = userspace.join("user.ld");
     println!("cargo:rerun-if-changed={}", linker_script.display());
-    for name in ["hello", "shell", "echo"] {
+    let mut images = String::from("[\n");
+    for &(_, name) in clv_abi::PROGRAMS {
+        writeln!(images, "include_bytes!(\"{name}.elf\") as &[u8],").unwrap();
+    }
+    images.push(']');
+    fs::write(output.join("program-images.rs"), images).unwrap();
+    for name in std::iter::once("shell").chain(clv_abi::PROGRAMS.iter().map(|&(_, name)| name)) {
         let program = userspace.join(name);
         println!("cargo:rerun-if-changed={}", program.display());
         build_program(&program.join("main.rs"), &linker_script, &output, name);

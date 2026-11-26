@@ -1,10 +1,11 @@
 pub use clv_abi::agent::{AgentLaunch, AgentStatus, ControlResult};
 use clv_abi::{
-    SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE, SYS_AGENT_RESUME, SYS_AGENT_RUN,
-    SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_STATUS, SYS_AGENT_SUSPEND,
+    MESSAGE_MAX_BYTES, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
+    SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
+    SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_STATUS, SYS_AGENT_SUSPEND,
 };
 
-use super::{ecall, syscall, syscall_result};
+use super::{ecall, syscall, syscall_result, with_stack_bytes};
 
 /// Creates the goal's agent and starts its child in one call.
 pub fn run(goal: usize, program: usize) -> Option<AgentLaunch> {
@@ -55,6 +56,26 @@ pub fn delegate_with_file(agent: usize, program: usize, reply_bytes: usize) -> O
         program,
         reply_bytes,
     ))
+}
+
+/// Delegates the agent's file and transfers a copied argument with the launch.
+pub fn delegate_with_file_arg(
+    agent: usize,
+    program: usize,
+    reply_bytes: usize,
+    argument: &[u8],
+) -> Option<usize> {
+    with_stack_bytes::<MESSAGE_MAX_BYTES>(argument, |address, length| {
+        ecall(
+            SYS_AGENT_DELEGATE_WITH_FILE_ARG,
+            agent,
+            program,
+            reply_bytes,
+            address,
+            length,
+        )
+        .0
+    })
 }
 
 pub fn status(agent: usize) -> Option<AgentStatus> {

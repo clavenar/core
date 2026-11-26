@@ -74,16 +74,16 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<g
     match command {
         b"help" if arguments.is_empty() => print(
             b"help pwd ls [path] cd mkdir rmdir cat write rm exit\r\n\
-              run hello [dir]  run echo\r\n\
-              ask [--read] <hello|echo> <text>  askat [--echo] hello <dir> <payload>\r\n\
+              run <program>  run hello <dir>\r\n\
+              ask [--read] <program> <text>  askat [--echo] hello <dir> <payload>\r\n\
               askfile [--stream] hello <path>\r\n\
-              recv <hello|echo>  wait <hello|echo>  event\r\n\
+              grep -F <pattern> <path>  recv <program>  wait <program>  event\r\n\
               goal create [--children 1|2] [--reply-bytes N]\r\n\
-              goal run [--reply-bytes N] <hello|echo>\r\n\
-              goal grant-file [--delegable | --delegate-to <hello|echo>] <path>\r\n\
+              goal run [--reply-bytes N] <program>\r\n\
+              goal grant-file [--delegable | --delegate-to <program>] <path>\r\n\
               goal status  goal budget  goal audit [--replies]  goal cancel  goal close\r\n\
-              agent run [--suspended] [--reply-bytes N] <hello|echo>\r\n\
-              agent delegate [--with-file] --reply-bytes N <hello|echo>\r\n\
+              agent run [--suspended] [--reply-bytes N] <program>\r\n\
+              agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n\
               agent status  agent suspend  agent resume\r\n",
         ),
         b"pwd" if arguments.is_empty() => files::pwd(),
@@ -98,6 +98,7 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<g
         b"ask" => children.ask(arguments),
         b"askat" => children.ask_at(arguments),
         b"askfile" => children.ask_file(arguments),
+        b"grep" => children.grep(arguments),
         b"recv" => children.recv(arguments),
         b"wait" => children.wait(arguments),
         b"event" if arguments.is_empty() => children.event(),

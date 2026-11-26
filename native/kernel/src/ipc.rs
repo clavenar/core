@@ -18,11 +18,13 @@ impl MessageKind {
 
     fn accepts_length(self, length: usize) -> bool {
         match self {
-            Self::Request(_) | Self::Reply(ReplyKind::Echo) => {
-                (1..=MESSAGE_MAX_BYTES).contains(&length)
+            Self::Request(RequestKind::Echo | RequestKind::ReadFile)
+            | Self::Reply(ReplyKind::Echo) => (1..=MESSAGE_MAX_BYTES).contains(&length),
+            Self::Request(RequestKind::Argument)
+            | Self::Reply(ReplyKind::FileData | ReplyKind::Matches) => length <= MESSAGE_MAX_BYTES,
+            Self::Reply(ReplyKind::Denied | ReplyKind::ReadFailed | ReplyKind::ResultTooLarge) => {
+                length == 0
             }
-            Self::Reply(ReplyKind::FileData) => length <= MESSAGE_MAX_BYTES,
-            Self::Reply(ReplyKind::Denied | ReplyKind::ReadFailed) => length == 0,
         }
     }
 

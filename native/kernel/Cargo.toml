@@ -1,9 +1,12 @@
 [package]
 name = "clavenar-kernel"
-version = "0.0.8"
+version = "0.0.9"
 edition = "2024"
 
 [dependencies]
+clv-abi = { path = "../../crates/clv-abi" }
+
+[build-dependencies]
 clv-abi = { path = "../../crates/clv-abi" }
 
 [[bin]]

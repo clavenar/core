@@ -2,7 +2,7 @@ use core::ptr;
 use core::slice::IterMut;
 
 use super::user_image::MAX_USER_IMAGE_PAGES;
-use crate::scheduler::TASK_COUNT;
+use crate::programs::TASK_COUNT;
 
 pub(crate) const FRAME_SIZE: usize = 4096;
 // Three shared page tables. Each task needs three tables, a stack, and its image.

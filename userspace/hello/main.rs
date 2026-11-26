@@ -41,6 +41,10 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, writer: us
                 let file = fs::open_at(handle, bytes);
                 reply_with_file(file, &mut buffer)
             }
+            RequestKind::Argument => {
+                clv::send_reply(ReplyKind::ReadFailed, &[]);
+                1
+            }
         };
     }
 

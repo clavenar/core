@@ -2,10 +2,16 @@ use clv_abi::audit::{DelegationDenial, DelegationRecord, DelegationRequest};
 
 use super::{Goal, MemberRole};
 use crate::fs::ramfs::{RamFs, TaskFs};
+use crate::ipc::Message;
 use crate::scheduler::{PreparedLaunch, Scheduler, Task, TaskState};
 
 impl Scheduler {
-    pub(crate) fn delegate(&mut self, fs: &mut RamFs, request: DelegationRequest) -> Option<usize> {
+    pub(crate) fn delegate(
+        &mut self,
+        fs: &mut RamFs,
+        request: DelegationRequest,
+        argument: Result<Option<Message>, DelegationDenial>,
+    ) -> Option<usize> {
         let (_, agent) = self.agent_member(request.agent)?;
         let parent = agent.handle;
         let launch = if agent.completion.is_some() {
@@ -15,17 +21,18 @@ impl Scheduler {
         };
         let goal = self.goal.as_mut()?;
         let admission = launch.and_then(|launch| {
+            let argument = argument?;
             let child_fs = goal.admit_helper(fs, &self.tasks, parent, &launch, request)?;
-            Ok((launch, child_fs))
+            Ok((launch, child_fs, argument))
         });
         let outcome = match &admission {
-            Ok((launch, _)) => Ok(launch.handle),
+            Ok((launch, ..)) => Ok(launch.handle),
             Err(reason) => Err(*reason),
         };
         goal.delegation_audit
             .record(DelegationRecord { request, outcome }.encode());
-        let (launch, child_fs) = admission.ok()?;
-        Some(self.install_child(launch, child_fs, None, None, TaskState::Runnable))
+        let (launch, child_fs, argument) = admission.ok()?;
+        Some(self.install_child(launch, child_fs, argument, None, TaskState::Runnable))
     }
 }
 

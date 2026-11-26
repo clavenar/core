@@ -1,15 +1,14 @@
 use clv::goal;
+use clv_abi::Program;
 use clv_abi::audit::{DelegationDenial, DelegationRecord, ReplyRecord};
 
-use super::{Children, DIGITS, amount, decimal, hex, print, print_line};
+use super::{DIGITS, amount, decimal, hex, print, print_line};
 
-pub(super) fn show(handle: usize, children: &Children, replies: bool) {
+pub(super) fn show(handle: usize, replies: bool) {
     if replies {
         print_snapshot(handle, goal::reply_audit(handle), print_reply);
     } else {
-        print_snapshot(handle, goal::audit(handle), |entry| {
-            print_delegation(entry, children)
-        });
+        print_snapshot(handle, goal::audit(handle), print_delegation);
     }
 }
 
@@ -39,7 +38,7 @@ fn print_header(handle: usize, count: usize, overwritten: usize) {
     ]);
 }
 
-fn print_delegation(entry: &DelegationRecord, children: &Children) {
+fn print_delegation(entry: &DelegationRecord) {
     let child;
     let (decision, detail): (&[u8], &[u8]) = match entry.outcome {
         Ok(handle) => {
@@ -53,8 +52,8 @@ fn print_delegation(entry: &DelegationRecord, children: &Children) {
         b"agent=",
         &hex(request.agent),
         b" program=",
-        children
-            .program_name(request.program)
+        Program::from_raw(request.program)
+            .map(|program| program.name().as_bytes())
             .unwrap_or(&hex(request.program)),
         b" bytes=",
         decimal(request.reply_bytes, &mut [0; DIGITS]),
@@ -92,5 +91,6 @@ fn denial_name(reason: DelegationDenial) -> &'static [u8] {
         DelegationDenial::NoDelegableFile => b"no-delegable-file",
         DelegationDenial::FileHandlesExhausted => b"file-handles-exhausted",
         DelegationDenial::FileRecipientNotAllowed => b"file-recipient-not-allowed",
+        DelegationDenial::InvalidArgument => b"invalid-argument",
     }
 }

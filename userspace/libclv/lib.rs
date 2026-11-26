@@ -12,8 +12,9 @@ use clv_abi::{
     ChildEvent, CompletionKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, ReplyKind,
     RequestKind, SYS_EVENT_WAIT, SYS_EXIT, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_READ_CONSOLE,
     SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_SPAWN, SYS_SPAWN_AT,
-    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_PIPE,
-    SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_WAIT, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
+    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_WAIT, SYS_WRITE_CONSOLE,
+    SYSCALL_ERROR,
 };
 use core::arch::asm;
 
@@ -134,6 +135,13 @@ pub fn spawn(program: usize, directory: Option<usize>, request: Option<&[u8]>) -
 
 pub fn spawn_with_file(program: usize, file: usize) -> Option<usize> {
     syscall_result(syscall(SYS_SPAWN_WITH_FILE, program, file, 0))
+}
+
+/// Installs one read-only file and a literal argument before the child starts.
+pub fn spawn_with_file_arg(program: usize, file: usize, argument: &[u8]) -> Option<usize> {
+    with_stack_bytes::<MESSAGE_MAX_BYTES>(argument, |address, length| {
+        ecall(SYS_SPAWN_WITH_FILE_ARG, program, file, address, length, 0).0
+    })
 }
 
 /// Grants a file to the child and returns the parent's handle for pipe reads and wait.

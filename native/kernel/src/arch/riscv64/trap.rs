@@ -5,7 +5,9 @@ use super::{idle, timer};
 use crate::console::{write_hex, write_task};
 use crate::drivers::uart;
 use crate::fs::ramfs::RamFs;
+use crate::memory::sv39::AddressSpace;
 use crate::memory::usercopy::SSTATUS_SUM;
+use crate::programs::TASK_COUNT;
 use crate::scheduler::Scheduler;
 use crate::syscall;
 
@@ -51,17 +53,20 @@ impl TrapFrame {
 }
 
 struct KernelState {
-    scheduler: Scheduler,
+    scheduler: Option<Scheduler>,
     ramfs: RamFs,
 }
 
-static mut KERNEL_STATE: Option<KernelState> = None;
+static mut KERNEL_STATE: KernelState = KernelState {
+    scheduler: None,
+    ramfs: RamFs::new(),
+};
 
 unsafe extern "C" {
     fn enter_user(frame: &TrapFrame) -> !;
 }
 
-pub(crate) fn supervisor_status() -> usize {
+fn supervisor_status() -> usize {
     let status: usize;
     // SAFETY: Kernel code runs in supervisor mode.
     unsafe { asm!("csrr {status}, sstatus", status = out(reg) status, options(nomem, nostack)) };
@@ -70,17 +75,24 @@ pub(crate) fn supervisor_status() -> usize {
 
 /// # Safety
 ///
-/// Only the boot hart may start the scheduler, once the first task's address
-/// space and the supervisor trap vector are active.
-pub(crate) unsafe fn start(scheduler: Scheduler) -> ! {
-    let first_frame = *scheduler.current_frame();
+/// Only the boot hart may start the scheduler, after installing the trap
+/// vector and preparing all user address spaces.
+pub(crate) unsafe fn start(programs: [(AddressSpace, usize); TASK_COUNT]) -> ! {
     // SAFETY: No user task has run, and only this hart accesses the state.
-    unsafe {
-        KERNEL_STATE = Some(KernelState {
-            scheduler,
-            ramfs: RamFs::new(),
-        });
+    let state = unsafe { &mut *(&raw mut KERNEL_STATE) };
+    let scheduler = state
+        .scheduler
+        .insert(Scheduler::new(programs, supervisor_status()));
+    let space = scheduler.address_space();
+    uart::write(b"boot frame=");
+    write_hex(space.root_address());
+    uart::write(b"\r\n");
+    if !space.activate() {
+        uart::write(b"Sv39 paging setup failed\r\n");
+        idle();
     }
+    uart::write(b"Sv39 paging enabled\r\n");
+    let first_frame = *scheduler.current_frame();
     arm_timer();
     // SAFETY: The first task's code and stack are mapped in the active space.
     unsafe { enter_user(&first_frame) }
@@ -91,10 +103,11 @@ pub(crate) unsafe fn start(scheduler: Scheduler) -> ! {
 extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: usize) {
     // SAFETY: On the single boot hart this handler runs with supervisor
     // interrupts disabled. Supervisor traps take the fatal path instead.
-    let state = unsafe { &mut *(&raw mut KERNEL_STATE) }
+    let state = unsafe { &mut *(&raw mut KERNEL_STATE) };
+    let scheduler = state
+        .scheduler
         .as_mut()
-        .expect("kernel state is initialized before user entry");
-    let scheduler = &mut state.scheduler;
+        .expect("scheduler is initialized before user entry");
     let fs = &mut state.ramfs;
     let current = scheduler.current_id();
     if scause == timer::INTERRUPT_CAUSE {

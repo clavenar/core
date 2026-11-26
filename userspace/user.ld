@@ -2,7 +2,7 @@ ENTRY(_start)
 
 MEMORY
 {
-    user_image : ORIGIN = 0x00400000, LENGTH = 16K
+    user_image : ORIGIN = 0x00400000, LENGTH = 20K
 }
 
 PHDRS

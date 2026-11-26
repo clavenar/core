@@ -27,6 +27,7 @@ pub enum DelegationDenial {
     NoDelegableFile = 7,
     FileHandlesExhausted = 8,
     FileRecipientNotAllowed = 9,
+    InvalidArgument = 10,
 }
 
 impl DelegationDenial {
@@ -41,6 +42,7 @@ impl DelegationDenial {
             7 => Self::NoDelegableFile,
             8 => Self::FileHandlesExhausted,
             9 => Self::FileRecipientNotAllowed,
+            10 => Self::InvalidArgument,
             _ => return None,
         })
     }
