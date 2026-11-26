@@ -134,17 +134,21 @@ fn print_handle(label: &[u8], handle: usize) {
     print_line(&[label, &hex(handle)]);
 }
 
-// Emit a complete status line in one console call so task switches cannot split it.
+// Short status lines fit in one console call. Extended audit lines can exceed 128 bytes.
 fn print_line(parts: &[&[u8]]) {
     let mut line = [0; 128];
     let mut len = 0;
-    for part in parts {
-        let end = len + part.len();
-        line[len..end].copy_from_slice(part);
-        len = end;
+    for &byte in parts.iter().flat_map(|part| part.iter()).chain(b"\r\n") {
+        line[len] = byte;
+        len += 1;
+        if len == line.len() {
+            clv::write_console(&line);
+            len = 0;
+        }
     }
-    line[len..len + 2].copy_from_slice(b"\r\n");
-    clv::write_console(&line[..len + 2]);
+    if len > 0 {
+        clv::write_console(&line[..len]);
+    }
 }
 
 #[panic_handler]

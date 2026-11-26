@@ -1,8 +1,12 @@
 //! Wire formats for the goal owner's delegation, reply and RamFS read histories.
 
+use crate::{LaunchParent, NO_CHILD_HANDLE};
+
 pub const AUDIT_CAPACITY: usize = 4;
 /// Agent, program, reply bytes, file flag, denial code and child handle, in RV64 words.
 pub type EncodedRecord = [[u8; 8]; 6];
+/// Call 59 appends the calling agent's child launch handle. Zero identifies the shell.
+pub type EncodedRecordWithCaller = [[u8; 8]; 7];
 /// Child, requested bytes, allowance before the decision, and flags, in RV64 words.
 /// Flag bit 0 marks an unlimited allowance and bit 1 marks a budget denial.
 pub type EncodedReplyRecord = [[u8; 8]; 4];
@@ -95,6 +99,38 @@ impl DelegationRecord {
             _ => return None,
         };
         Some(Self { request, outcome })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct DelegationRecordWithCaller {
+    pub decision: DelegationRecord,
+    pub caller: LaunchParent,
+}
+
+impl DelegationRecordWithCaller {
+    pub fn encode(self) -> EncodedRecordWithCaller {
+        let mut record = [[0; 8]; 7];
+        let [decision @ .., caller] = &mut record;
+        *decision = self.decision.encode();
+        let handle = match self.caller {
+            LaunchParent::Shell => NO_CHILD_HANDLE,
+            LaunchParent::Agent(child) => child,
+        };
+        *caller = (handle as u64).to_le_bytes();
+        record
+    }
+
+    pub fn decode(record: &EncodedRecordWithCaller) -> Option<Self> {
+        let [decision @ .., caller] = record;
+        let caller = match usize::try_from(u64::from_le_bytes(*caller)).ok()? {
+            NO_CHILD_HANDLE => LaunchParent::Shell,
+            child => LaunchParent::Agent(child),
+        };
+        Some(Self {
+            decision: DelegationRecord::decode(decision)?,
+            caller,
+        })
     }
 }
 

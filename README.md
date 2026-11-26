@@ -605,9 +605,11 @@ goal close
 ```
 
 `wait hello` reports exit 0 and `recv hello` prints `Hello from RamFS`.
-The delegation audit names the agent and the accepted helper. Only the helper
-reads the 18-byte file. The reply audit records two sends of 18 bytes, one
-by each launch. The final balance is `available=0 reserved=0 spent=36`.
+The accepted entry shows `caller=agent`. Its `caller_child` matches the
+`child` printed by `agent run`, and `accepted child` identifies the new
+`grep` launch. Only the helper reads the 18-byte file. The reply audit
+records two sends of 18 bytes, one by each launch. The final balance is
+`available=0 reserved=0 spent=36`.
 
 Repeat with `--allow-helper echo` in the first command. The audit shows
 `denied=helper-not-allowed`, `hello` exits 1, and `recv hello` prints
@@ -616,6 +618,28 @@ Repeat with `--allow-helper echo` in the first command. The audit shows
 To inspect the goal before delegation, add `--suspended` before `hello` and
 run `goal audit`. It shows zero entries until you issue `agent resume`.
 An empty match result is forwarded as an empty `Matches` reply with exit 1.
+
+### Identify who requested a delegation
+
+At the QEMU prompt, start `hello` suspended in a goal that permits only
+`echo` as a helper. Ask for the same `grep` delegation twice, first from the
+shell and then by resuming `hello`.
+
+```text
+goal create --children 2 --allow-helper echo --read-bytes 18 --reply-bytes 36
+goal grant-file --delegate-to grep /hello.txt
+agent run --suspended hello --delegate --with-file --reply-bytes 18 grep -F RamFS
+agent delegate --with-file --reply-bytes 18 grep -F RamFS
+agent resume
+wait hello
+goal audit
+goal close
+```
+
+`goal audit` shows two entries with the same `agent` handle, `program=grep`
+and `denied=helper-not-allowed`. The first shows `caller=shell`. The second
+shows `caller=agent caller_child=<handle>`, where the handle identifies the
+original `hello` launch even after its program slot is reused.
 
 ### Native syscall ABI
 
@@ -884,6 +908,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 56 `agent_delegate_with_file_arg` | `a0` agent handle, `a1` program selector, `a2` reply bytes, `a3` argument address, `a4` argument length | Fresh helper handle with the delegated read-only file and an `Argument` request |
 | 57 `goal_read_audit` | Same arguments as call 52 | Retained read entry count (0–4), overwritten count in `a1` and lifetime bytes delivered in `a2`, or -1 on failure |
 | 58 `agent_run_with_request` | `a0` goal, `a1` program, `a2` flags, `a3` optional agent reply allowance, `a4` request address, `a5` request length | Fresh agent handle, with its child launch handle in `a1` |
+| 59 `goal_audit_with_caller` | Same arguments as call 52 | Retained delegation entry count (0–4), with overwritten count in `a1`, or -1 on failure |
 
 The shell owns the goal and controls its agents. Calls 49, 51 and 56 also
 accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
@@ -947,14 +972,21 @@ Calls 55 and 56 copy up to 64 literal argument bytes into the launch mailbox
 before the child can run. The child reads the argument with call 25. An empty
 argument has tag 3. Invalid arguments fail before admission or reservation.
 
-Call 52 snapshots decisions from calls 49, 51 and 56 made by the owning shell
-or by the live agent. Both use the resolved agent handle in the record.
-Attempts without a valid caller binding are discarded. Each 48-byte entry
-begins with the agent handle, requested program
-selector, requested reply bytes, and file flag (0 or 1). The final two words
+Calls 52 and 59 read the same four-entry delegation history for calls 49, 51
+and 56. Only the shell that owns the goal can read it. The kernel records
+both accepted and denied requests after authenticating the caller and
+resolving the agent handle. Each 48-byte call 52 entry begins with the agent
+handle, requested program selector, requested reply bytes and file flag
+(0 or 1). The final two words
 hold the decision code and helper launch handle. All six words are little-endian
 RV64 values. On acceptance, code 0 accompanies the new child's handle.
 On denial, the code identifies the first failed check and the handle is zero.
+
+Call 59 appends a seventh little-endian RV64 word to each entry, making
+56 bytes per entry. Zero identifies the shell. A nonzero value is the
+calling agent's original child launch handle. The kernel captures it at
+the delegation decision. Both formats use the same order and overwritten
+count.
 
 | Denial code | Reason |
 | --- | --- |
@@ -989,7 +1021,7 @@ zero cost and receive entries. Invalid handles and buffers fail before the
 budget check. The lifetime total counts successful copies and saturates at
 the largest RV64 unsigned value for unlimited goals.
 
-Calls 52, 53 and 57 each copy up to four retained entries, oldest first. A
+Calls 52, 53, 57 and 59 each copy up to four retained entries, oldest first. A
 short buffer or an invalid destination range returns -1 before copying any bytes.
 Zero capacity succeeds for an empty audit. Reads preserve the entries and
 the overwritten count, which saturates at the largest RV64 unsigned value.

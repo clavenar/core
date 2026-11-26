@@ -1,11 +1,13 @@
-use clv_abi::Program;
 use clv_abi::agent::CURRENT_AGENT;
-use clv_abi::audit::{DelegationDenial, DelegationRecord, DelegationRequest};
+use clv_abi::audit::{
+    DelegationDenial, DelegationRecord, DelegationRecordWithCaller, DelegationRequest,
+};
+use clv_abi::{LaunchParent, Program};
 
 use super::{Goal, MemberRole};
 use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::ipc::Message;
-use crate::scheduler::{LaunchParent, PreparedLaunch, Scheduler, Task, TaskState};
+use crate::scheduler::{PreparedLaunch, Scheduler, Task, TaskState};
 
 impl Scheduler {
     pub(crate) fn delegate(
@@ -46,8 +48,13 @@ impl Scheduler {
             Ok((launch, ..)) => Ok(launch.handle),
             Err(reason) => Err(*reason),
         };
-        goal.delegation_audit
-            .record(DelegationRecord { request, outcome }.encode());
+        goal.delegation_audit.record(
+            DelegationRecordWithCaller {
+                decision: DelegationRecord { request, outcome },
+                caller: owner,
+            }
+            .encode(),
+        );
         let (launch, child_fs, argument) = admission.ok()?;
         Some(self.install_child(launch, child_fs, argument, None, TaskState::Runnable))
     }

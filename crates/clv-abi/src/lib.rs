@@ -68,6 +68,7 @@ pub const SYS_SPAWN_WITH_FILE_ARG: usize = 55;
 pub const SYS_AGENT_DELEGATE_WITH_FILE_ARG: usize = 56;
 pub const SYS_GOAL_READ_AUDIT: usize = 57;
 pub const SYS_AGENT_RUN_WITH_REQUEST: usize = 58;
+pub const SYS_GOAL_AUDIT_WITH_CALLER: usize = 59;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
@@ -182,6 +183,14 @@ impl TaskCompletion {
             Self::Cancelled => (CompletionKind::Cancelled, 0),
         }
     }
+}
+
+/// The caller that owns a child's reply and wait result.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LaunchParent {
+    Shell,
+    /// The agent's original child launch handle, independent of program slot reuse.
+    Agent(usize),
 }
 
 /// The oldest pending child completion, or an empty queue when no child can progress.

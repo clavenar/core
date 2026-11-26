@@ -1,11 +1,14 @@
-use clv_abi::audit::{AUDIT_CAPACITY, DelegationRecord, ReadRecord, ReplyRecord};
+use clv_abi::audit::{
+    AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, ReadRecord, ReplyRecord,
+};
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus};
 use clv_abi::{
-    SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
-    SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
-    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_READ_AUDIT, SYS_GOAL_REPLY_AUDIT,
-    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
+    SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE,
+    SYS_GOAL_CREATE, SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET,
+    SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO,
+    SYS_GOAL_READ_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET,
+    SYS_GOAL_STATUS,
 };
 
 use super::{ecall, syscall, syscall_result};
@@ -91,6 +94,18 @@ pub struct AuditSnapshot<Record = DelegationRecord> {
 /// Reads the retained decisions in launch-attempt order without consuming them.
 pub fn audit(goal: usize) -> Option<AuditSnapshot> {
     Some(snapshot(SYS_GOAL_AUDIT, goal, DelegationRecord::decode)?.0)
+}
+
+/// Reads the same retained decisions together with the caller authenticated at delegation.
+pub fn audit_with_caller(goal: usize) -> Option<AuditSnapshot<DelegationRecordWithCaller>> {
+    Some(
+        snapshot(
+            SYS_GOAL_AUDIT_WITH_CALLER,
+            goal,
+            DelegationRecordWithCaller::decode,
+        )?
+        .0,
+    )
 }
 
 /// Reads the goal members' reply-budget decisions in send-attempt order.

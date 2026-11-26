@@ -1,4 +1,4 @@
-use clv_abi::audit::AUDIT_CAPACITY;
+use clv_abi::audit::{AUDIT_CAPACITY, EncodedRecord, EncodedRecordWithCaller};
 
 use crate::scheduler::Scheduler;
 
@@ -26,18 +26,36 @@ impl<const WORDS: usize> AuditHistory<[[u8; 8]; WORDS]> {
     }
 }
 
+impl AuditHistory<EncodedRecordWithCaller> {
+    fn read_without_caller(&self, copy: impl FnOnce(&[u8]) -> bool) -> Option<(usize, usize)> {
+        // Call 52 packs six words per entry. Drop the caller from each retained record.
+        let decisions: [EncodedRecord; AUDIT_CAPACITY] =
+            self.entries.each_ref().map(|[decision @ .., _]| *decision);
+        let bytes = decisions[..self.len].as_flattened().as_flattened();
+        copy(bytes).then_some((self.len, self.overwritten))
+    }
+}
+
 impl Scheduler {
-    pub(crate) fn read_goal_audit(
+    pub(crate) fn goal_delegation_audit(
         &self,
         handle: usize,
-        replies: bool,
+        with_caller: bool,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize)> {
-        let goal = self.shell_goal(handle)?;
-        if replies {
-            goal.reply_audit.read(copy)
+        let history = &self.shell_goal(handle)?.delegation_audit;
+        if with_caller {
+            history.read(copy)
         } else {
-            goal.delegation_audit.read(copy)
+            history.read_without_caller(copy)
         }
+    }
+
+    pub(crate) fn goal_reply_audit(
+        &self,
+        handle: usize,
+        copy: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<(usize, usize)> {
+        self.shell_goal(handle)?.reply_audit.read(copy)
     }
 }

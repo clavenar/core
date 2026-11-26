@@ -1,6 +1,6 @@
 use clv::goal;
-use clv_abi::Program;
-use clv_abi::audit::{DelegationDenial, DelegationRecord, ReadRecord, ReplyRecord};
+use clv_abi::audit::{DelegationDenial, DelegationRecordWithCaller, ReadRecord, ReplyRecord};
+use clv_abi::{LaunchParent, Program};
 
 use super::{DIGITS, amount, decimal, hex, print, print_line};
 
@@ -13,7 +13,8 @@ pub(super) fn show(handle: usize, option: &[u8]) {
         b"--replies" => {
             goal::reply_audit(handle).map(|snapshot| print_snapshot(handle, snapshot, print_reply))
         }
-        _ => goal::audit(handle).map(|snapshot| print_snapshot(handle, snapshot, print_delegation)),
+        _ => goal::audit_with_caller(handle)
+            .map(|snapshot| print_snapshot(handle, snapshot, print_delegation)),
     };
     if shown.is_none() {
         print(b"cannot read goal audit\r\n");
@@ -43,16 +44,24 @@ fn print_header(handle: usize, count: usize, overwritten: usize) {
     ]);
 }
 
-fn print_delegation(entry: &DelegationRecord) {
+fn print_delegation(entry: &DelegationRecordWithCaller) {
     let child;
-    let (decision, detail): (&[u8], &[u8]) = match entry.outcome {
+    let (decision, detail): (&[u8], &[u8]) = match entry.decision.outcome {
         Ok(handle) => {
             child = hex(handle);
             (b" accepted child=", &child)
         }
         Err(reason) => (b" denied=", denial_name(reason)),
     };
-    let request = entry.request;
+    let caller_child;
+    let (caller, identity): (&[u8], &[u8]) = match entry.caller {
+        LaunchParent::Shell => (b" caller=shell", b""),
+        LaunchParent::Agent(handle) => {
+            caller_child = hex(handle);
+            (b" caller=agent caller_child=", &caller_child)
+        }
+    };
+    let request = entry.decision.request;
     print_line(&[
         b"agent=",
         &hex(request.agent),
@@ -66,6 +75,8 @@ fn print_delegation(entry: &DelegationRecord) {
         if request.with_file { b"yes" } else { b"no" },
         decision,
         detail,
+        caller,
+        identity,
     ]);
 }
 

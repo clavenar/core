@@ -5,7 +5,8 @@ use self::goal::Goal;
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
 use clv_abi::{
-    ChildEvent, CompletionKind, GrantKind, Program, ReplyKind, RequestKind, TaskCompletion,
+    ChildEvent, CompletionKind, GrantKind, LaunchParent, Program, ReplyKind, RequestKind,
+    TaskCompletion,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -61,13 +62,6 @@ impl TaskState {
 struct PendingEvent {
     sequence: usize,
     kind: CompletionKind,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LaunchParent {
-    Shell,
-    /// The agent's original child launch handle, independent of program slot reuse.
-    Agent(usize),
 }
 
 struct ChildLaunch {

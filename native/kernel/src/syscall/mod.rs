@@ -7,16 +7,17 @@ use clv_abi::{
     SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE, SYS_AGENT_DELEGATE_WITH_FILE_ARG,
     SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET,
     SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STATUS, SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE,
-    SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL,
-    SYS_GOAL_CLOSE, SYS_GOAL_CREATE, SYS_GOAL_CREATE_WITH_OPTIONS,
-    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
-    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_READ_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR,
-    SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ,
-    SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR,
-    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_FILE_ARG, SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
-    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
+    SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
+    SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_READ_AUDIT, SYS_GOAL_REPLY_AUDIT,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
+    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
+    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
+    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
+    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -146,14 +147,16 @@ pub(crate) fn dispatch(
             frame.registers[REG_A3] = spent;
             flags
         }),
-        SYS_GOAL_AUDIT | SYS_GOAL_REPLY_AUDIT => scheduler
-            .read_goal_audit(a0, number == SYS_GOAL_REPLY_AUDIT, |bytes| {
+        SYS_GOAL_AUDIT | SYS_GOAL_AUDIT_WITH_CALLER => write_audit_result(
+            frame,
+            scheduler.goal_delegation_audit(a0, number == SYS_GOAL_AUDIT_WITH_CALLER, |bytes| {
                 stack.copy_to_user(bytes, a1, a2)
-            })
-            .map_or(SYSCALL_ERROR, |(count, overwritten)| {
-                frame.registers[REG_A1] = overwritten;
-                count
             }),
+        ),
+        SYS_GOAL_REPLY_AUDIT => write_audit_result(
+            frame,
+            scheduler.goal_reply_audit(a0, |bytes| stack.copy_to_user(bytes, a1, a2)),
+        ),
         SYS_GOAL_READ_AUDIT => scheduler
             .goal_read_audit(a0, |bytes| stack.copy_to_user(bytes, a1, a2))
             .map_or(SYSCALL_ERROR, |(count, overwritten, spent)| {
@@ -350,6 +353,13 @@ pub(crate) fn dispatch(
     // ECALL is a 32-bit instruction, including on cores with compressed code.
     frame.sepc += 4;
     Outcome::Resume
+}
+
+fn write_audit_result(frame: &mut TrapFrame, snapshot: Option<(usize, usize)>) -> usize {
+    snapshot.map_or(SYSCALL_ERROR, |(count, overwritten)| {
+        frame.registers[REG_A1] = overwritten;
+        count
+    })
 }
 
 fn write_status(frame: &mut TrapFrame, (state, child, value): (usize, usize, usize)) -> usize {
