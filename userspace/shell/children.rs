@@ -117,6 +117,28 @@ impl Children {
         Some(launch)
     }
 
+    pub(super) fn delegate(&mut self, agent: Option<usize>, arguments: &[u8]) {
+        let Some((
+            child,
+            GoalOptions {
+                reply_bytes: Some(bytes),
+                ..
+            },
+        )) = self.goal_child(arguments, GoalCommand::Run)
+        else {
+            return print(b"usage: agent delegate --reply-bytes N <hello|echo>\r\n");
+        };
+        let Some(agent) = agent else {
+            return print(b"no current agent\r\n");
+        };
+        if let Some(handle) = agent::delegate(agent, child.selector, bytes) {
+            child.handle = handle;
+            print_handle(b"delegated child=", handle);
+        } else {
+            print(b"cannot delegate child\r\n");
+        }
+    }
+
     pub(super) fn ask(&mut self, arguments: &[u8]) {
         let (kind, arguments) = request_kind(arguments, RequestKind::Echo);
         let (name, text) = split_word(arguments);

@@ -79,6 +79,10 @@ pub(crate) enum LaunchScope {
         handle: usize,
         reply_bytes: Option<usize>,
     },
+    Delegated {
+        agent: usize,
+        reply_bytes: usize,
+    },
 }
 
 pub(crate) enum WaitResult<T> {
@@ -254,6 +258,11 @@ impl Scheduler {
                 .goal
                 .as_mut()?
                 .start(goal, handle, agent, reply_bytes, fs)?,
+            LaunchScope::Delegated { agent, reply_bytes } => {
+                self.goal
+                    .as_mut()?
+                    .delegate(agent, handle, reply_bytes, fs)?
+            }
             LaunchScope::Directory(fd) => {
                 self.tasks[self.current]
                     .fs
@@ -451,6 +460,8 @@ impl Scheduler {
                     launch.close_pipe_reader(&mut task.state);
                 }
             }
+        } else if let Some(launch) = &self.tasks[self.current].launch {
+            self.cancel_delegated_helper(launch.handle, fs);
         }
         self.switch(frame)
     }

@@ -18,17 +18,37 @@ impl ReplyReservation {
         })
     }
 
-    pub(super) fn charge(&mut self, bytes: usize) -> Option<()> {
+    fn deduct(&mut self, bytes: usize) -> Option<()> {
         if let Some(remaining) = &mut self.remaining {
             *remaining = remaining.checked_sub(bytes)?;
         }
+        Some(())
+    }
+
+    pub(super) fn delegate(&mut self, bytes: usize) -> Option<Self> {
+        self.deduct(bytes)?;
+        Some(Self {
+            remaining: Some(bytes),
+            spent: 0,
+        })
+    }
+
+    pub(super) fn charge(&mut self, bytes: usize) -> Option<()> {
+        self.deduct(bytes)?;
         // An unlimited goal can outlive the range of its reporting counter.
         self.spent = self.spent.saturating_add(bytes);
         Some(())
     }
 
-    pub(super) fn release(&mut self) {
-        self.remaining = Some(0);
+    pub(super) fn release(&mut self) -> Option<usize> {
+        self.remaining.replace(0)
+    }
+
+    pub(super) fn refund(&mut self, bytes: usize) {
+        if let Some(remaining) = &mut self.remaining {
+            // The helper can return at most what this reservation delegated.
+            *remaining += bytes;
+        }
     }
 }
 

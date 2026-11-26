@@ -9,9 +9,19 @@ use clv_abi::goal::{CancelResult, CloseResult, GoalStatus, MAX_CHILDREN};
 use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
 use crate::fs::ramfs::{FileGrant, RamFs, TaskFs};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MemberRole {
+    Child,
+    Agent(usize),
+    /// The original launch handle of the agent funding this helper.
+    Helper {
+        parent: usize,
+    },
+}
+
 struct Member {
     handle: usize,
-    agent: Option<usize>,
+    role: MemberRole,
     replies: ReplyReservation,
     completion: Option<TaskCompletion>,
 }
@@ -83,27 +93,66 @@ impl Goal {
         {
             return None;
         }
-        if agent.is_some() && self.members().any(|member| member.agent.is_some()) {
+        if agent.is_some()
+            && self
+                .members()
+                .any(|member| matches!(member.role, MemberRole::Agent(_)))
+        {
             return None;
         }
-        let slot = self.members[..self.child_limit]
-            .iter()
-            .position(Option::is_none)?;
+        let slot = self.free_slot()?;
         let replies = ReplyReservation::new(self.budget().available, reply_bytes)?;
         let child_fs = match &self.file {
             Some(file) => file.open_for_child(fs)?,
             None => TaskFs::empty(),
         };
+        let role = agent.map_or(MemberRole::Child, MemberRole::Agent);
+        self.admit(slot, child, role, replies, fs);
+        Some(child_fs)
+    }
+
+    pub(super) fn delegate(
+        &mut self,
+        agent: usize,
+        child: usize,
+        bytes: usize,
+        fs: &mut RamFs,
+    ) -> Option<TaskFs> {
+        let slot = self.free_slot()?;
+        let parent = self.members.iter_mut().flatten().find(|member| {
+            member.role == MemberRole::Agent(agent) && member.completion.is_none()
+        })?;
+        let role = MemberRole::Helper {
+            parent: parent.handle,
+        };
+        let replies = parent.replies.delegate(bytes)?;
+        self.admit(slot, child, role, replies, fs);
+        Some(TaskFs::empty())
+    }
+
+    fn free_slot(&self) -> Option<usize> {
+        self.members[..self.child_limit]
+            .iter()
+            .position(Option::is_none)
+    }
+
+    fn admit(
+        &mut self,
+        slot: usize,
+        child: usize,
+        role: MemberRole,
+        replies: ReplyReservation,
+        fs: &mut RamFs,
+    ) {
         self.members[slot] = Some(Member {
             handle: child,
-            agent,
+            role,
             replies,
             completion: None,
         });
         if slot + 1 == self.child_limit {
             self.release_file(fs);
         }
-        Some(child_fs)
     }
 
     fn release_file(&mut self, fs: &mut RamFs) {
@@ -135,8 +184,14 @@ impl Goal {
         let Some(member) = self.live_member_mut(child) else {
             return;
         };
-        member.replies.release();
+        let unused = member.replies.release();
         member.completion = Some(completion);
+        if let MemberRole::Helper { parent } = member.role
+            && let Some(bytes) = unused
+            && let Some(parent) = self.live_member_mut(parent)
+        {
+            parent.replies.refund(bytes);
+        }
         if !self.members().any(|member| member.completion.is_none()) {
             self.release_file(fs);
         }
@@ -205,7 +260,9 @@ impl Scheduler {
             return None;
         }
         let goal = self.goal.as_ref()?;
-        let member = goal.members().find(|member| member.agent == Some(handle))?;
+        let member = goal
+            .members()
+            .find(|member| member.role == MemberRole::Agent(handle))?;
         Some((goal, member))
     }
 
@@ -270,6 +327,19 @@ impl Scheduler {
     fn drop_goal(&mut self, fs: &mut RamFs) {
         if let Some(mut goal) = self.goal.take() {
             goal.release_file(fs);
+        }
+    }
+
+    pub(super) fn cancel_delegated_helper(&mut self, parent: usize, fs: &mut RamFs) {
+        let Some(goal) = &self.goal else {
+            return;
+        };
+        let role = MemberRole::Helper { parent };
+        let helper = goal
+            .members()
+            .find(|member| member.role == role && member.completion.is_none());
+        if let Some(index) = helper.and_then(|member| self.launch_index(member.handle)) {
+            self.stop_task(index, fs, TaskCompletion::Cancelled);
         }
     }
 

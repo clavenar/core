@@ -82,6 +82,7 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<g
               goal run [--reply-bytes N] <hello|echo>  goal grant-file <path>\r\n\
               goal status  goal budget  goal cancel  goal close\r\n\
               agent run [--suspended] [--reply-bytes N] <hello|echo>\r\n\
+              agent delegate --reply-bytes N <hello|echo>\r\n\
               agent status  agent suspend  agent resume\r\n",
         ),
         b"pwd" if arguments.is_empty() => files::pwd(),

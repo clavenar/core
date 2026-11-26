@@ -227,6 +227,31 @@ goal close
 | `echo` sends `echo ready` and exits | `available=2 reserved=12 spent=10` |
 | `hello` resumes, sends `hello ready` and exits | `available=3 reserved=0 spent=21` |
 
+Use `agent delegate --reply-bytes N <hello|echo>` to start a helper with
+bytes from the current agent's remaining reservation. The shell can do this
+while the agent is running or suspended. The helper uses the goal's second
+and final launch slot and starts with an empty RamFS handle table.
+
+```text
+goal create --children 2 --reply-bytes 64
+agent run --suspended --reply-bytes 24 hello
+agent delegate --reply-bytes 25 echo
+goal budget
+agent delegate --reply-bytes 12 echo
+wait echo
+goal budget
+agent resume
+wait hello
+goal budget
+goal close
+```
+
+| Checkpoint | Output from `goal budget` |
+| --- | --- |
+| The 25-byte request exceeds the agent's 24 bytes | `available=40 reserved=24 spent=0` |
+| `echo` spends 10 bytes and returns 2 to the suspended agent | `available=40 reserved=14 spent=10` |
+| `hello` spends 11 bytes and returns its last 3 to the goal | `available=43 reserved=0 spent=21` |
+
 `goal grant-file <path>` attaches one read-only file to a ready goal. Both
 `goal run` and `agent run` pass that file to their child. Try this in QEMU.
 
@@ -588,6 +613,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 46 `agent_run_with_reply_budget` | Same as call 45, plus `a3` start mode (0 runnable, 1 suspended) | Fresh agent handle, with the child launch handle in `a1` |
 | 47 `goal_grant_file` | `a0` goal handle, `a1` open RamFS file handle owned by the shell | 0 when attached, -1 on rejection |
 | 48 `goal_create_with_options` | `a0` child limit (1 or 2), `a1` budget mode (0 unlimited, 1 finite), `a2` total reply bytes in finite mode | Fresh goal handle, or -1 on rejection |
+| 49 `agent_delegate` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle, or -1 on rejection |
 
 Only the shell can use these calls. A stale or invalid handle or a call
 from another task returns -1 in `a0`. Calls 33 and 43 create single-child
@@ -600,17 +626,23 @@ A failed launch preserves the goal, its grant, reservations and launch handles.
 The kernel binds the child to the goal before its first instruction.
 The agent run calls also create and bind the agent in that operation. Every
 goal child starts with an empty mailbox and uses the ordinary reply, event
-and wait calls. Its RamFS table starts empty unless the goal granted a file.
+and wait calls. Direct children inherit any file granted to the goal.
 
 Call 47 accepts one regular file while the goal is ready. The kernel retains
 the file independently of the shell's descriptor, cursor and pathname. Closing
 or cancelling a ready goal, or stopping its owner, releases this reference.
-On a successful launch the child receives a fresh read-only handle at offset
-zero in `a1`, file kind 2 in `a2` and 0 in `a3`. Siblings get independent
-cursors on the same retained file, even after pathname reuse. The kernel
-releases the goal's reference when all places have been used or the goal
-finishes. Each child can close its own handle. Exit, fault or cancellation
+On a successful direct launch the child receives a fresh read-only handle
+at offset zero in `a1`, file kind 2 in `a2` and 0 in `a3`. Direct siblings
+get independent cursors on the same retained file, even after pathname reuse.
+The kernel releases the goal's reference when all places have been used or the
+goal finishes. Each child can close its own handle. Exit, fault or cancellation
 closes any handle it still holds.
+
+Call 49 accepts a byte count from zero up to the agent's remaining allowance.
+It moves those bytes to the helper before its first instruction. Both shares
+count toward the goal's reserved total. The helper starts with zero in
+`a1`, `a2` and `a3`. The shell receives its ordinary launch handle for
+replies, events and waits.
 
 `agent_status` uses tags 1–5 below and tag 6 for a suspended child (`a2` is
 zero). It always returns the original child handle on success. `goal_status`
@@ -630,6 +662,12 @@ while either is running or suspended. After both stop, it reports a
 cancelled member first, then a member that failed, then a successful member.
 Launch order breaks ties. `agent_status` always reports the agent's own
 child, including after that child stops while its sibling runs.
+
+If an agent exits or faults with its helper still live, the kernel records
+the agent's completion and then cancels the helper before scheduling another
+task. The shell can collect both events and wait results. In this case
+`goal_status` reports the cancelled helper and `agent_status` reports the
+agent's exit status or fault cause.
 
 Repeating suspend or resume on a live agent already in the requested state
 succeeds. A paused child keeps its slot and any queued reply. Suspension and
@@ -664,8 +702,10 @@ by the call from reserved to spent. A valid zero-byte reply costs zero. A
 failed send, including one that exceeds the reservation, leaves the mailbox
 and budget intact. Reading a reply or suspending and resuming the child
 preserves the counters. Exit, fault and cancellation return that child's
-unused bytes to the goal. The shell can inspect the final counters until it
-closes the goal.
+unused bytes to its funding source. A helper returns its balance to its live
+agent. When the agent stops, all remaining bytes from that delegation become
+available to the goal. The shell can inspect the final counters until it closes
+the goal.
 Children launched outside the goal use their own mailbox independently.
 
 User exceptions print `task N fault` with `scause` (trap cause), `sepc`

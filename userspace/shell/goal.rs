@@ -117,6 +117,7 @@ pub(super) fn agent_command(
 ) {
     let agent_handle = current.as_ref().and_then(|goal| goal.agent);
     match split_word(arguments) {
+        (b"delegate", arguments) => children.delegate(agent_handle, arguments),
         (b"run", arguments) => {
             let Some(goal) = current else {
                 return print(b"no current goal\r\n");
@@ -160,7 +161,7 @@ pub(super) fn agent_command(
                 None => print(b"no current agent\r\n"),
             }
         }
-        _ => print(b"usage: agent run [--suspended] [--reply-bytes N] <hello|echo> | status | suspend | resume\r\n"),
+        _ => print(b"usage: agent run [--suspended] [--reply-bytes N] <hello|echo> | delegate --reply-bytes N <hello|echo> | status | suspend | resume\r\n"),
     }
 }
 
