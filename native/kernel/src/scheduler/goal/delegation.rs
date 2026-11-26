@@ -19,9 +19,7 @@ impl Scheduler {
         let (goal, agent, owner) = if request.agent == CURRENT_AGENT {
             let child = self.tasks[self.current].launch.as_ref()?.handle;
             let goal = self.goal.as_ref()?;
-            let member = goal
-                .members()
-                .find(|m| m.handle == child && m.completion.is_none())?;
+            let member = goal.members().find(|member| member.is_live(child))?;
             let MemberRole::Agent(handle) = member.role else {
                 return None;
             };
@@ -41,7 +39,14 @@ impl Scheduler {
         let goal = self.goal.as_mut()?;
         let admission = launch.and_then(|launch| {
             let argument = argument?;
-            let child_fs = goal.admit_helper(fs, &self.tasks, parent, &launch, request)?;
+            let child_fs = goal.admit_helper(
+                fs,
+                &self.tasks,
+                parent,
+                &launch,
+                request,
+                argument.as_ref().map(|message| message.bytes(false)),
+            )?;
             Ok((launch, child_fs, argument))
         });
         let outcome = match &admission {
@@ -80,10 +85,14 @@ impl Goal {
         parent: usize,
         launch: &PreparedLaunch,
         request: DelegationRequest,
+        argument: Option<&[u8]>,
     ) -> Result<TaskFs, DelegationDenial> {
         let slot = self.free_slot().ok_or(DelegationDenial::GoalFull)?;
         let agent = self
-            .live_member_mut(parent)
+            .members
+            .iter_mut()
+            .flatten()
+            .find(|member| member.is_live(parent))
             .ok_or(DelegationDenial::AgentFinished)?;
         let (retained, delegated) = agent
             .replies
@@ -94,7 +103,11 @@ impl Goal {
                 .iter()
                 .find(|task| task.has_launch(parent))
                 .ok_or(DelegationDenial::AgentFinished)?;
-            task.fs.delegate_file(fs, launch.program)?
+            let grant = self
+                .file
+                .as_ref()
+                .ok_or(DelegationDenial::NoDelegableFile)?;
+            grant.delegate(fs, &task.fs, launch.program, argument)?
         } else {
             TaskFs::empty()
         };

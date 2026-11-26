@@ -10,20 +10,21 @@ use clv_abi::{
     SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
     SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
     SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
-    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_READ_AUDIT,
-    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR,
-    SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ,
-    SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR,
-    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_FILE_ARG, SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
-    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
+    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_REPLY_AUDIT,
+    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
+    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE,
+    SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR,
+    SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
+    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::console::write_task;
 use crate::drivers::uart;
-use crate::fs::ramfs::{RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
+use crate::fs::ramfs::{GrantArgument, RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
 use crate::ipc::pipe::PipeResult;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::usercopy::UserStack;
@@ -174,12 +175,26 @@ pub(crate) fn dispatch(
         SYS_GOAL_GRANT_FILE | SYS_GOAL_GRANT_DELEGABLE_FILE => {
             let recipient = (number == SYS_GOAL_GRANT_DELEGABLE_FILE).then_some(FileRecipient::Any);
             scheduler
-                .grant_goal_file(a0, a1, recipient, fs)
+                .grant_goal_file(a0, a1, recipient, None, fs)
                 .map_or(SYSCALL_ERROR, |()| 0)
         }
-        SYS_GOAL_GRANT_FILE_TO => Program::from_raw(a2)
+        SYS_GOAL_GRANT_FILE_TO | SYS_GOAL_GRANT_FILE_TO_WITH_ARG => Program::from_raw(a2)
             .and_then(|program| {
-                scheduler.grant_goal_file(a0, a1, Some(FileRecipient::Program(program)), fs)
+                let argument = if number == SYS_GOAL_GRANT_FILE_TO_WITH_ARG {
+                    Some(GrantArgument::copy_from(
+                        frame.registers[REG_A4],
+                        |bytes| stack.copy_from_user(a3, bytes),
+                    )?)
+                } else {
+                    None
+                };
+                scheduler.grant_goal_file(
+                    a0,
+                    a1,
+                    Some(FileRecipient::Program(program)),
+                    argument,
+                    fs,
+                )
             })
             .map_or(SYSCALL_ERROR, |()| 0),
         SYS_GOAL_REVOKE_FILE => scheduler

@@ -130,5 +130,6 @@ fn denial_name(reason: DelegationDenial) -> &'static [u8] {
         DelegationDenial::FileRecipientNotAllowed => b"file-recipient-not-allowed",
         DelegationDenial::InvalidArgument => b"invalid-argument",
         DelegationDenial::HelperNotAllowed => b"helper-not-allowed",
+        DelegationDenial::ArgumentNotAllowed => b"argument-not-allowed",
     }
 }

@@ -547,6 +547,46 @@ reply is exactly 18 bytes. The delegation audit shows
 an accepted `grep` launch. The reply audit shows `bytes=18 remaining_before=18 sent`,
 and the final balance is `available=0 reserved=0 spent=18`.
 
+### Pin the argument for a delegated file
+
+Use `goal grant-file --delegate-to <program> --argument <literal> <path>`
+to bind the helper's launch argument to the file grant. The kernel compares
+the bytes, including case and spaces, for both shell- and agent-issued
+file delegations. Single or double quotes can enclose spaces or an empty
+literal. The maximum is 64 bytes.
+
+At a fresh `clv>` prompt, let the shell request `Hello` and the agent
+request `RamFS`. Both strings occur in `/hello.txt`.
+
+```text
+goal create --children 2 --allow-helper grep --read-bytes 18 --reply-bytes 36
+goal grant-file --delegate-to grep --argument RamFS /hello.txt
+agent run --suspended hello --delegate --with-file --reply-bytes 18 grep -F RamFS
+agent delegate --with-file --reply-bytes 18 grep -F Hello
+goal audit
+goal budget
+goal audit --reads
+agent resume
+wait hello
+recv hello
+goal audit
+goal audit --reads
+goal budget
+goal close
+```
+
+The first audit shows `denied=argument-not-allowed caller=shell`.
+The agent still holds its full reply reservation (`reserved=36 spent=0`),
+and `read_bytes=0`. After `agent resume`, the audit shows an accepted
+helper with `caller=agent`. `recv hello` prints `Hello from RamFS` and
+the final totals are 18 bytes read and 36 bytes spent on the helper's reply
+and the agent's forwarded reply.
+
+The grant controls the argument delivered at launch. An admitted helper
+receives a read-only handle to the file and spends from the applicable read
+budgets. A helper launched without the file uses the goal's ordinary
+delegation rules.
+
 ### Share a RamFS read budget
 
 `goal create --read-bytes N` sets the total regular-file bytes RamFS may
@@ -1015,6 +1055,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 59 `goal_audit_with_caller` | Same arguments as call 52 | Retained delegation entry count (0–4), with overwritten count in `a1`, or -1 on failure |
 | 60 `goal_revoke_file` | `a0` goal handle | 0 for an owned goal, including a repeat call, or -1 for an invalid handle or caller |
 | 61 `goal_read_audit_with_limit` | Same arguments as call 57 | Same count, overwritten count and lifetime read bytes as call 57, with the effective limit identified in each entry |
+| 62 `goal_grant_file_to_with_arg` | `a0` goal handle, `a1` shell file handle, `a2` helper selector, `a3` literal address, `a4` literal length (0–64 bytes) | 0 when the file and its argument restriction are attached, -1 on rejection |
 
 The shell owns the goal and controls its agents. Calls 49, 51 and 56 also
 accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
@@ -1044,7 +1085,7 @@ little-endian RV64 words specify the requested helper program and its reply
 allowance. The remaining 0–64 bytes are its literal argument. Admission of
 the helper occurs when the agent makes its own delegation call.
 
-Calls 47, 50 and 54 accept one regular file while the goal is ready. The kernel
+Calls 47, 50, 54 and 62 accept one regular file while the goal is ready. The kernel
 retains the file independently of the shell's descriptor, cursor and pathname. Closing
 or cancelling a ready goal, or stopping its owner, releases this reference.
 On a successful direct launch the child receives a fresh read-only handle
@@ -1070,6 +1111,14 @@ Call 50 lets the direct agent delegate to any eligible helper. Call 54 binds the
 agent's handle to one helper program for delegation. Ordinary direct children
 receive read access. Closing the agent's handle ends its ability
 to pass that file on, even while the goal still holds a reference.
+
+Call 62 binds the selected program and an owned copy of its literal argument
+to the grant. A zero length pins an explicitly empty argument and ignores the
+address. A nonempty literal must fit in the caller's stack. Call 56 must
+present the exact bytes to receive the file. Call 51 omits the argument and
+therefore receives denial code 12 on a pinned grant, including an empty pin.
+A mismatch allocates no helper, file handle or reply reservation. Revoking a
+ready goal's file also releases its pinned argument.
 
 Calls 49, 51 and 56 check the live agent's requested program against the
 goal's allowed helper before checking the program slot or reserving resources.
@@ -1121,6 +1170,7 @@ count.
 | 9 | The agent's file grant does not permit the selected helper program |
 | 10 | Invalid argument length or caller buffer |
 | 11 | The goal does not allow this program as a delegated helper |
+| 12 | The file grant requires an argument and the launch omits it or supplies different bytes |
 
 Call 53 returns the decisions recorded when a goal member's `message_send`
 or `reply_send` reaches the budget check. The kernel validates the mailbox,

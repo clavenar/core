@@ -71,6 +71,7 @@ pub const SYS_AGENT_RUN_WITH_REQUEST: usize = 58;
 pub const SYS_GOAL_AUDIT_WITH_CALLER: usize = 59;
 pub const SYS_GOAL_REVOKE_FILE: usize = 60;
 pub const SYS_GOAL_READ_AUDIT_WITH_LIMIT: usize = 61;
+pub const SYS_GOAL_GRANT_FILE_TO_WITH_ARG: usize = 62;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;

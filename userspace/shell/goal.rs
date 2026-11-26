@@ -6,21 +6,31 @@ use clv::{agent, fs, print};
 use clv_abi::{CompletionKind, OPEN_READ, Program};
 pub(super) use options::{GoalCommand, GoalOptions};
 
-use super::{children::Children, hex, print_handle, print_line, split_word};
+use super::{
+    children::Children, hex, print_handle, print_line, print_usage, split_literal, split_word,
+};
 
 const CREATE_HELP: &[u8] = b"goal create [--children 1|2|3] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N] [--helper-read-bytes N]\r\n";
+const GRANT_HELP: &[u8] =
+    b"goal grant-file [--delegable | --delegate-to <program> [--argument <literal>]] <path>\r\n";
 
 pub(super) fn help() {
     print(CREATE_HELP);
-    print(b"goal run [--reply-bytes N] <program>\r\n\
-            goal grant-file [--delegable | --delegate-to <program>] <path>  goal revoke-file\r\n\
-            goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n");
+    print(b"goal run [--reply-bytes N] <program>\r\n");
+    print(GRANT_HELP);
+    print(b"goal revoke-file  goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n");
 }
 
-pub(super) const AGENT_HELP: &[u8] = b"agent run [--suspended] [--reply-bytes N] <program>\r\n\
-      agent run hello --delegate --with-file --reply-bytes N grep -F <pattern>\r\n\
-      agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n\
-      agent status  agent suspend  agent resume\r\n";
+pub(super) const AGENT_RUN_HELP: &[u8] = b"agent run [--suspended] [--reply-bytes N] <program>\r\n\
+      agent run [--suspended] [--reply-bytes N] hello --delegate --with-file --reply-bytes N grep -F <pattern>\r\n";
+pub(super) const AGENT_DELEGATE_HELP: &[u8] =
+    b"agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n";
+
+pub(super) fn agent_help() {
+    print(AGENT_RUN_HELP);
+    print(AGENT_DELEGATE_HELP);
+    print(b"agent status  agent suspend  agent resume\r\n");
+}
 
 pub(super) struct CurrentGoal {
     handle: usize,
@@ -75,30 +85,48 @@ pub(super) fn command(
     }
 }
 
-fn grant_file(goal: Option<usize>, arguments: &[u8]) {
-    const USAGE: &[u8] =
-        b"usage: goal grant-file [--delegable | --delegate-to <program>] <path>\r\n";
-    let (recipient, path) = match split_word(arguments) {
-        (b"--delegable", path) => (Some(FileRecipient::Any), path),
+enum FileTarget<'a> {
+    Recipient(Option<FileRecipient>),
+    WithArgument(Program, &'a [u8]),
+}
+
+fn grant_options(arguments: &[u8]) -> Option<(FileTarget<'_>, &[u8])> {
+    let (target, path) = match split_word(arguments) {
+        (b"--delegable", path) => (FileTarget::Recipient(Some(FileRecipient::Any)), path),
         (b"--delegate-to", rest) => {
             let (name, path) = split_word(rest);
-            let Some(program) = Program::named(name) else {
-                return print(USAGE);
-            };
-            (Some(FileRecipient::Program(program)), path)
+            let program = Program::named(name)?;
+            if let (b"--argument", rest) = split_word(path) {
+                let (argument, path) = split_literal(rest)?;
+                (FileTarget::WithArgument(program, argument), path)
+            } else {
+                (
+                    FileTarget::Recipient(Some(FileRecipient::Program(program))),
+                    path,
+                )
+            }
         }
-        _ => (None, arguments),
+        _ => (FileTarget::Recipient(None), arguments),
     };
-    if path.is_empty() {
-        return print(USAGE);
-    }
+    (!path.is_empty() && split_word(path).0 != b"--argument").then_some((target, path))
+}
+
+fn grant_file(goal: Option<usize>, arguments: &[u8]) {
+    let Some((target, path)) = grant_options(arguments) else {
+        return print_usage(GRANT_HELP);
+    };
     let Some(goal) = goal else {
         return print(b"no current goal\r\n");
     };
     let Some(fd) = fs::open(path, OPEN_READ) else {
         return print(b"cannot open path\r\n");
     };
-    let granted = goal::grant_file_with_recipient(goal, fd, recipient);
+    let granted = match target {
+        FileTarget::Recipient(recipient) => goal::grant_file_with_recipient(goal, fd, recipient),
+        FileTarget::WithArgument(program, literal) => {
+            goal::grant_file_to_with_arg(goal, fd, program, literal)
+        }
+    };
     fs::close(fd);
     if granted {
         print(b"file granted\r\n");
@@ -109,8 +137,7 @@ fn grant_file(goal: Option<usize>, arguments: &[u8]) {
 
 fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
     let Some((options, b"")) = GoalOptions::parse(arguments, GoalCommand::Create) else {
-        print(b"usage: ");
-        return print(CREATE_HELP);
+        return print_usage(CREATE_HELP);
     };
     let result = goal::create_with_read_limits(
         goal::CreateOptions {
@@ -218,7 +245,7 @@ pub(super) fn agent_command(
         }
         _ => {
             print(b"usage: ");
-            print(AGENT_HELP);
+            agent_help();
         }
     }
 }

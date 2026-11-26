@@ -7,14 +7,15 @@ pub use clv_abi::goal::{
     CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus, ReadLimits,
 };
 use clv_abi::{
-    SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE,
-    SYS_GOAL_CREATE, SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET,
-    SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO,
-    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_REPLY_AUDIT,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
+    MESSAGE_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_BUDGET,
+    SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE, SYS_GOAL_CREATE_WITH_OPTIONS,
+    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
+    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
 };
 
-use super::{ecall, ecall6, syscall, syscall_result};
+use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
 
 pub fn create() -> Option<usize> {
     syscall_result(syscall(SYS_GOAL_CREATE, 0, 0, 0))
@@ -92,6 +93,21 @@ pub fn grant_file_with_recipient(goal: usize, fd: usize, recipient: Option<FileR
         Some(FileRecipient::Program(program)) => (SYS_GOAL_GRANT_FILE_TO, program as usize),
     };
     syscall(call, goal, fd, selector) == 0
+}
+
+/// Attaches a file for delegation to one program with this exact launch argument.
+pub fn grant_file_to_with_arg(goal: usize, fd: usize, program: Program, argument: &[u8]) -> bool {
+    with_stack_bytes::<MESSAGE_MAX_BYTES>(argument, |address, length| {
+        ecall(
+            SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
+            goal,
+            fd,
+            program as usize,
+            address,
+            length,
+        )
+        .0
+    }) == Some(0)
 }
 
 /// Withdraws the goal's file grant and closes every handle derived from it.

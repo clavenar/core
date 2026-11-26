@@ -1,6 +1,6 @@
 mod handles;
 
-pub(crate) use handles::{FileGrant, TaskFs};
+pub(crate) use handles::{FileGrant, GrantArgument, TaskFs};
 
 const WRITABLE_FILE_COUNT: usize = 4;
 const DIRECTORY_COUNT: usize = 4;

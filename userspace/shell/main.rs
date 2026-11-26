@@ -81,7 +81,7 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<g
               grep -F <pattern> <path>  recv <program>  wait <program>  event\r\n",
             );
             goal::help();
-            print(goal::AGENT_HELP);
+            goal::agent_help();
         }
         b"pwd" if arguments.is_empty() => files::pwd(),
         b"cd" => files::cd(arguments),
@@ -117,6 +117,18 @@ fn split_word(line: &[u8]) -> (&[u8], &[u8]) {
     (word, rest.trim_ascii_start())
 }
 
+/// A single- or double-quoted literal may contain spaces or be empty.
+fn split_literal(input: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (&first, tail) = input.split_first()?;
+    if first != b'\'' && first != b'"' {
+        return Some(split_word(input));
+    }
+    let end = tail.iter().position(|&byte| byte == first)?;
+    let (literal, rest) = tail.split_at(end);
+    let rest = &rest[1..];
+    (rest.is_empty() || rest.starts_with(b" ")).then(|| (literal, rest.trim_ascii_start()))
+}
+
 fn hex(mut value: usize) -> [u8; 18] {
     let mut bytes = *b"0x0000000000000000";
     for digit in bytes[2..].iter_mut().rev() {
@@ -128,6 +140,11 @@ fn hex(mut value: usize) -> [u8; 18] {
 
 fn print_handle(label: &[u8], handle: usize) {
     print_line(&[label, &hex(handle)]);
+}
+
+fn print_usage(syntax: &[u8]) {
+    print(b"usage: ");
+    print(syntax);
 }
 
 // Short status lines fit in one console call. Extended audit lines can exceed 128 bytes.

@@ -5,8 +5,8 @@ use clv_abi::{
 };
 
 use super::{
-    goal::{GoalCommand, GoalOptions},
-    hex, print_handle, print_line, split_word,
+    goal::{AGENT_DELEGATE_HELP, AGENT_RUN_HELP, GoalCommand, GoalOptions},
+    hex, print_handle, print_line, print_usage, split_literal, split_word,
 };
 
 pub(super) struct Children {
@@ -112,7 +112,7 @@ impl Children {
         arguments: &[u8],
     ) -> Option<agent::AgentLaunch> {
         let Some((options, program, request)) = agent_run_args(arguments) else {
-            print(b"usage: agent run [--suspended] [--reply-bytes N] <program> [--delegate --with-file --reply-bytes N grep -F <pattern>]\r\n");
+            print_usage(AGENT_RUN_HELP);
             return None;
         };
         let result = match request {
@@ -139,10 +139,8 @@ impl Children {
     }
 
     pub(super) fn delegate(&mut self, agent: Option<usize>, arguments: &[u8]) {
-        const USAGE: &[u8] =
-            b"usage: agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n";
         let Some(helper) = Helper::parse(arguments) else {
-            return print(USAGE);
+            return print_usage(AGENT_DELEGATE_HELP);
         };
         let Some(agent) = agent else {
             return print(b"no current agent\r\n");
@@ -297,19 +295,11 @@ fn request_kind(arguments: &[u8], default: RequestKind) -> (RequestKind, &[u8]) 
     }
 }
 
-/// Quotes allow spaces and the empty pattern across all grep launch paths.
 fn grep_pattern(arguments: &[u8]) -> Option<(&[u8], &[u8])> {
     let (b"-F", rest) = split_word(arguments) else {
         return None;
     };
-    let (&first, tail) = rest.split_first()?;
-    if first != b'\'' && first != b'"' {
-        return Some(split_word(rest));
-    }
-    let end = tail.iter().position(|&byte| byte == first)?;
-    let (pattern, rest) = tail.split_at(end);
-    let rest = &rest[1..];
-    (rest.is_empty() || rest.starts_with(b" ")).then(|| (pattern, rest.trim_ascii_start()))
+    split_literal(rest)
 }
 
 fn spawn_scoped(

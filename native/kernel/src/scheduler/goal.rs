@@ -15,7 +15,7 @@ use clv_abi::goal::{
 };
 
 use super::{SHELL_TASK_INDEX, Scheduler, TaskState};
-use crate::fs::ramfs::{FileGrant, RamFs, TaskFs};
+use crate::fs::ramfs::{FileGrant, GrantArgument, RamFs, TaskFs};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MemberRole {
@@ -35,6 +35,10 @@ struct Member {
 }
 
 impl Member {
+    fn is_live(&self, handle: usize) -> bool {
+        self.handle == handle && self.completion.is_none()
+    }
+
     fn status(&self) -> GoalStatus {
         let child = self.handle;
         match self.completion {
@@ -113,7 +117,7 @@ impl Goal {
         let slot = self.free_slot()?;
         let replies = ReplyReservation::new(self.budget().available, reply_bytes)?;
         let child_fs = match &self.file {
-            Some(file) => file.open_for_child(fs, self.handle, agent.is_some())?,
+            Some(file) => file.open_for_child(fs, agent.is_some())?,
             None => TaskFs::empty(),
         };
         let role = agent.map_or(MemberRole::Child, MemberRole::Agent);
@@ -156,7 +160,7 @@ impl Goal {
         self.members
             .iter_mut()
             .flatten()
-            .find(|member| member.handle == child && member.completion.is_none())
+            .find(|member| member.is_live(child))
     }
 
     pub(super) fn charge_reply(&mut self, child: usize, bytes: usize) -> Option<()> {
@@ -245,6 +249,7 @@ impl Scheduler {
         handle: usize,
         fd: usize,
         recipient: Option<FileRecipient>,
+        argument: Option<GrantArgument>,
         fs: &mut RamFs,
     ) -> Option<()> {
         if self.goal_status(handle)? != GoalStatus::Ready {
@@ -254,7 +259,11 @@ impl Scheduler {
         if goal.file.is_some() {
             return None;
         }
-        goal.file = Some(self.tasks[self.current].fs.retain_file(fs, fd, recipient)?);
+        goal.file = Some(
+            self.tasks[self.current]
+                .fs
+                .retain_file(fs, handle, fd, recipient, argument)?,
+        );
         Some(())
     }
 
