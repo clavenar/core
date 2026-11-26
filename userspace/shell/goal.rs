@@ -21,8 +21,8 @@ pub(super) fn help() {
     print(b"goal revoke-file  goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n");
 }
 
-pub(super) const AGENT_RUN_HELP: &[u8] = b"agent run [--suspended] [--reply-bytes N] <program>\r\n\
-      agent run [--suspended] [--reply-bytes N] hello --delegate --with-file --reply-bytes N grep -F <pattern>\r\n";
+pub(super) const AGENT_RUN_HELP: &[u8] = b"agent run [--suspended] [--reply-bytes N] <program> [request]\r\n\
+      hello accepts --mock find-greeting | --delegate --with-file --reply-bytes N grep -F <pattern>\r\n";
 pub(super) const AGENT_DELEGATE_HELP: &[u8] =
     b"agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n";
 

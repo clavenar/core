@@ -1,5 +1,9 @@
-pub use clv_abi::agent::{AgentLaunch, AgentStatus, CURRENT_AGENT, ControlResult, FileDelegation};
-use clv_abi::agent::{DELEGATION_REQUEST_MAX_BYTES, RUN_REPLY_LIMIT, RUN_SUSPENDED};
+pub use clv_abi::agent::{
+    AgentLaunch, AgentStatus, CURRENT_AGENT, ControlResult, FileDelegation, PlanIntent,
+};
+use clv_abi::agent::{
+    DELEGATION_REQUEST_MAX_BYTES, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_SUSPENDED,
+};
 use clv_abi::{
     MESSAGE_MAX_BYTES, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
     SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
@@ -53,12 +57,44 @@ pub fn run_with_request(
     reply_bytes: Option<usize>,
     request: &FileDelegation<'_>,
 ) -> Option<AgentLaunch> {
+    launch(
+        goal,
+        program,
+        suspended,
+        reply_bytes,
+        Some(RunRequest::DelegateWithFile(*request)),
+    )
+}
+
+pub enum RunRequest<'a> {
+    DelegateWithFile(FileDelegation<'a>),
+    Plan(PlanIntent),
+}
+
+/// Launches an agent with an optional typed request in its mailbox.
+pub fn launch(
+    goal: usize,
+    program: usize,
+    suspended: bool,
+    reply_bytes: Option<usize>,
+    request: Option<RunRequest<'_>>,
+) -> Option<AgentLaunch> {
+    let Some(request) = request else {
+        return run_with_options(goal, program, suspended, reply_bytes);
+    };
     let mut buffer = [0; DELEGATION_REQUEST_MAX_BYTES];
-    let bytes = request.encode(&mut buffer)?;
     let mut flags = if suspended { RUN_SUSPENDED } else { 0 };
     if reply_bytes.is_some() {
         flags |= RUN_REPLY_LIMIT;
     }
+    let bytes = match request {
+        RunRequest::DelegateWithFile(request) => request.encode(&mut buffer)?,
+        RunRequest::Plan(intent) => {
+            flags |= RUN_PLAN_INTENT;
+            buffer[0] = intent as u8;
+            &buffer[..1]
+        }
+    };
     let (agent, child, ..) = ecall6(
         SYS_AGENT_RUN_WITH_REQUEST,
         goal,

@@ -115,22 +115,13 @@ impl Children {
             print_usage(AGENT_RUN_HELP);
             return None;
         };
-        let result = match request {
-            Some(request) => agent::run_with_request(
-                goal,
-                program as usize,
-                options.suspended,
-                options.reply_bytes,
-                &request,
-            ),
-            None => agent::run_with_options(
-                goal,
-                program as usize,
-                options.suspended,
-                options.reply_bytes,
-            ),
-        };
-        let Some(launch) = result else {
+        let Some(launch) = agent::launch(
+            goal,
+            program as usize,
+            options.suspended,
+            options.reply_bytes,
+            request,
+        ) else {
             print(b"cannot start agent\r\n");
             return None;
         };
@@ -271,11 +262,16 @@ impl Children {
 
 fn agent_run_args(
     arguments: &[u8],
-) -> Option<(GoalOptions, Program, Option<agent::FileDelegation<'_>>)> {
+) -> Option<(GoalOptions, Program, Option<agent::RunRequest<'_>>)> {
     let (options, program, rest) = goal_program(arguments, GoalCommand::AgentRun)?;
     let request = match (program, split_word(rest)) {
         (_, (b"", _)) => None,
-        (Program::Hello, (b"--delegate", args)) => Some(Helper::parse(args)?.file_request()?),
+        (Program::Hello, (b"--delegate", args)) => Some(agent::RunRequest::DelegateWithFile(
+            Helper::parse(args)?.file_request()?,
+        )),
+        (Program::Hello, (b"--mock", b"find-greeting")) => {
+            Some(agent::RunRequest::Plan(agent::PlanIntent::FindGreeting))
+        }
         _ => return None,
     };
     Some((options, program, request))

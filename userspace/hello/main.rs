@@ -4,8 +4,8 @@
 use clv::{ChildReply, ChildStatus, LaunchRequest, agent, fs, pipe};
 use clv_abi::agent::DELEGATION_REQUEST_MAX_BYTES;
 use clv_abi::{
-    GrantKind, MESSAGE_MAX_BYTES, PROBE_VALUE, ReplyKind, RequestKind, SYS_EXIT, SYS_PROBE,
-    SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    GrantKind, MESSAGE_MAX_BYTES, PROBE_VALUE, Program, ReplyKind, RequestKind, SYS_EXIT,
+    SYS_PROBE, SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -28,7 +28,12 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, writer: us
             kind: RequestKind::DelegateWithFile,
             bytes,
             ..
-        }) => supervise_helper(bytes),
+        }) => supervise_helper(agent::FileDelegation::decode(bytes)),
+        Some(LaunchRequest::Received {
+            kind: RequestKind::PlanIntent,
+            bytes,
+            ..
+        }) => supervise_helper(agent::PlanIntent::decode(bytes).map(mock_plan)),
         _ if grant_kind == GrantKind::File as usize && writer != 0 => {
             let status = copy_file(handle, |bytes| pipe::write(writer, bytes));
             pipe::close(writer);
@@ -67,10 +72,18 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, writer: us
     }
 }
 
-fn supervise_helper(bytes: &[u8]) -> usize {
-    let Some(helper) = agent::FileDelegation::decode(bytes)
-        .and_then(|request| agent::delegate_from_current(&request))
-    else {
+fn mock_plan(intent: agent::PlanIntent) -> agent::FileDelegation<'static> {
+    match intent {
+        agent::PlanIntent::FindGreeting => agent::FileDelegation {
+            program: Program::Grep,
+            reply_bytes: 18,
+            argument: b"Hello",
+        },
+    }
+}
+
+fn supervise_helper(request: Option<agent::FileDelegation<'_>>) -> usize {
+    let Some(helper) = request.and_then(|request| agent::delegate_from_current(&request)) else {
         clv::send_reply(ReplyKind::DelegationFailed, &[]);
         return 1;
     };

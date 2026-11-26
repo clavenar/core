@@ -83,6 +83,7 @@ pub enum RequestKind {
     ReadFile = 2,
     Argument = 3,
     DelegateWithFile = 4,
+    PlanIntent = 5,
 }
 
 impl RequestKind {
@@ -92,6 +93,7 @@ impl RequestKind {
             value if value == Self::ReadFile as usize => Some(Self::ReadFile),
             value if value == Self::Argument as usize => Some(Self::Argument),
             value if value == Self::DelegateWithFile as usize => Some(Self::DelegateWithFile),
+            value if value == Self::PlanIntent as usize => Some(Self::PlanIntent),
             _ => None,
         }
     }

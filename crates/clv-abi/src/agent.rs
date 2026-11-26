@@ -4,14 +4,33 @@ use crate::{MESSAGE_MAX_BYTES, Program};
 const SUSPENDED: usize = 6;
 pub const RUN_SUSPENDED: usize = 1;
 pub const RUN_REPLY_LIMIT: usize = 2;
+/// Selects a one-byte PlanIntent in place of the default FileDelegation payload.
+pub const RUN_PLAN_INTENT: usize = 4;
 /// A zero agent handle on a delegation call selects the calling task's live agent.
 pub const CURRENT_AGENT: usize = 0;
 
 pub const DELEGATION_HEADER_BYTES: usize = 16;
 pub const DELEGATION_REQUEST_MAX_BYTES: usize = DELEGATION_HEADER_BYTES + MESSAGE_MAX_BYTES;
 
+/// One-byte intent delivered to a user-space planner.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum PlanIntent {
+    FindGreeting = 1,
+}
+
+impl PlanIntent {
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        match bytes {
+            [id] if *id == Self::FindGreeting as u8 => Some(Self::FindGreeting),
+            _ => None,
+        }
+    }
+}
+
 /// User-space instruction carried by a DelegateWithFile request. The two
 /// little-endian RV64 words precede the helper's literal argument.
+#[derive(Clone, Copy)]
 pub struct FileDelegation<'a> {
     pub program: Program,
     pub reply_bytes: usize,

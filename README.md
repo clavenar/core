@@ -698,6 +698,40 @@ To inspect the goal before delegation, add `--suspended` before `hello` and
 run `goal audit`. It shows zero entries until you issue `agent resume`.
 An empty match result is forwarded as an empty `Matches` reply with exit 1.
 
+### Run the mock planner
+
+`agent run hello --mock find-greeting` sends a one-byte intent to `hello`.
+Its deterministic planner chooses `grep -F Hello` and requests 18 reply
+bytes for the helper. The kernel checks the live grant when `hello`
+requests the delegation. Both `Hello` and `RamFS` occur in `/hello.txt`.
+
+At the QEMU prompt, grant the exact argument the planner will choose.
+
+```text
+goal create --children 2 --allow-helper grep --read-bytes 18 --reply-bytes 36
+goal grant-file --delegate-to grep --argument Hello /hello.txt
+agent run hello --mock find-greeting
+wait hello
+recv hello
+goal audit
+goal audit --reads
+goal audit --replies
+goal budget
+goal close
+```
+
+Repeat the sequence, changing only the grant command to
+`goal grant-file --delegate-to grep --argument RamFS /hello.txt`.
+
+| Pinned argument | `recv hello` | `goal audit` | Bytes read | Reply bytes spent |
+| --- | --- | --- | ---: | ---: |
+| `Hello` | `Hello from RamFS` | Accepted, `caller=agent` | 18 | 36 |
+| `RamFS` | `cannot delegate child` | `denied=argument-not-allowed caller=agent` | 0 | 0 |
+
+On success, `grep` sends 18 bytes and `hello` forwards them, then exits 0.
+On denial, `hello` sends an empty failure reply and exits 1. Both
+delegation records identify the requesting `hello` launch in `caller_child`.
+
 ### Share a read allowance across two helper launches
 
 Two different helper programs can run at the same time. Each program has
@@ -1076,14 +1110,20 @@ A failed launch preserves goal membership, grants, reservations and launch handl
 
 The kernel binds the child to the goal before its first instruction.
 The agent run calls also create and bind the agent in that operation. Direct
-children inherit any file granted to the goal. Call 58 installs a
-`DelegateWithFile` request (tag 4) before the agent starts. Bit 0 of the flags
-starts it suspended. Bit 1 selects the explicit agent reply allowance in
-`a3`. Otherwise it inherits the available balance. Unknown bits, a bad buffer
-or a length outside 16–80 bytes fail before admission. The first two
-little-endian RV64 words specify the requested helper program and its reply
-allowance. The remaining 0–64 bytes are its literal argument. Admission of
-the helper occurs when the agent makes its own delegation call.
+children inherit any file granted to the goal. Call 58 queues a typed
+request before the agent starts. Bit 0 starts it suspended. Bit 1 selects
+the explicit agent reply allowance in `a3`. Otherwise the agent inherits
+the available balance. Bit 2 selects the request format.
+
+| Bit 2 | Request kind | Payload |
+| --- | --- | --- |
+| Clear | `DelegateWithFile` (tag 4) | Two little-endian RV64 words for the helper selector and its reply allowance, followed by 0–64 literal argument bytes |
+| Set | `PlanIntent` (tag 5) | One byte identifying the intent. `hello` recognizes 1 as `find-greeting`. |
+
+Unknown flag bits, an unreadable buffer or the wrong length fail before
+agent admission. User space interprets the payload. An unknown intent makes
+`hello` send an empty `DelegationFailed` reply and exit 1. For either
+request format, the kernel checks the helper when the agent requests delegation.
 
 Calls 47, 50, 54 and 62 accept one regular file while the goal is ready. The kernel
 retains the file independently of the shell's descriptor, cursor and pathname. Closing

@@ -1,4 +1,4 @@
-use clv_abi::agent::{AgentLaunch, RUN_REPLY_LIMIT, RUN_SUSPENDED};
+use clv_abi::agent::{AgentLaunch, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_SUSPENDED};
 use clv_abi::audit::{DelegationDenial, DelegationRequest};
 use clv_abi::goal::{CreateOptions, FileRecipient, ReadLimits};
 use clv_abi::{
@@ -217,10 +217,17 @@ pub(crate) fn dispatch(
             frame,
             scheduler.run_agent(fs, a0, a1, a3 == 1, Some(a2), None),
         ),
-        SYS_AGENT_RUN_WITH_REQUEST if a2 & !(RUN_SUSPENDED | RUN_REPLY_LIMIT) == 0 => {
+        SYS_AGENT_RUN_WITH_REQUEST
+            if a2 & !(RUN_SUSPENDED | RUN_REPLY_LIMIT | RUN_PLAN_INTENT) == 0 =>
+        {
+            let kind = if a2 & RUN_PLAN_INTENT != 0 {
+                RequestKind::PlanIntent
+            } else {
+                RequestKind::DelegateWithFile
+            };
             let launch = copy_request(
                 scheduler,
-                RequestKind::DelegateWithFile,
+                kind,
                 frame.registers[REG_A4],
                 frame.registers[REG_A5],
             )
@@ -313,7 +320,12 @@ pub(crate) fn dispatch(
                 LaunchScope::Directory(fd)
             };
             RequestKind::from_raw(a1)
-                .filter(|kind| *kind != RequestKind::DelegateWithFile)
+                .filter(|kind| {
+                    matches!(
+                        kind,
+                        RequestKind::Echo | RequestKind::ReadFile | RequestKind::Argument
+                    )
+                })
                 .and_then(|kind| spawn_with_request(scheduler, fs, a0, scope, kind, a2, a3))
                 .unwrap_or(SYSCALL_ERROR)
         }
