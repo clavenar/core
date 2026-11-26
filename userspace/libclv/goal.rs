@@ -1,11 +1,11 @@
-use clv_abi::audit::{AUDIT_CAPACITY, DelegationRecord, ReplyRecord};
+use clv_abi::audit::{AUDIT_CAPACITY, DelegationRecord, ReadRecord, ReplyRecord};
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus};
 use clv_abi::{
     SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
     SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
-    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_READ_AUDIT, SYS_GOAL_REPLY_AUDIT,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, syscall, syscall_result};
@@ -29,26 +29,31 @@ pub fn create_with_options(children: usize, reply_bytes: Option<usize>) -> Optio
 
 /// Creates a goal with its child limit, reply budget and optional helper restriction.
 pub fn create_configured(options: CreateOptions) -> Option<usize> {
+    create_with_read_limit(options, None)
+}
+
+/// All members of the goal share the optional cumulative RamFS read limit.
+pub fn create_with_read_limit(options: CreateOptions, read_limit: Option<usize>) -> Option<usize> {
     match (
         options.child_limit,
         options.reply_limit,
         options.allowed_helper,
+        read_limit,
     ) {
-        (1, None, None) => create(),
-        (1, Some(bytes), None) => create_with_reply_budget(bytes),
+        (1, None, None, None) => create(),
+        (1, Some(bytes), None, None) => create_with_reply_budget(bytes),
         _ => {
-            let (children, flags, bytes, selector) = options.registers();
-            syscall_result(
-                ecall(
-                    SYS_GOAL_CREATE_WITH_OPTIONS,
-                    children,
-                    flags,
-                    bytes,
-                    selector,
-                    0,
-                )
-                .0,
-            )
+            let (children, flags, replies, helper, reads) =
+                options.registers_with_read_limit(read_limit);
+            let (handle, ..) = ecall(
+                SYS_GOAL_CREATE_WITH_OPTIONS,
+                children,
+                flags,
+                replies,
+                helper,
+                reads,
+            );
+            syscall_result(handle)
         }
     }
 }
@@ -85,21 +90,26 @@ pub struct AuditSnapshot<Record = DelegationRecord> {
 
 /// Reads the retained decisions in launch-attempt order without consuming them.
 pub fn audit(goal: usize) -> Option<AuditSnapshot> {
-    read_audit(SYS_GOAL_AUDIT, goal, DelegationRecord::decode)
+    Some(snapshot(SYS_GOAL_AUDIT, goal, DelegationRecord::decode)?.0)
 }
 
 /// Reads the goal members' reply-budget decisions in send-attempt order.
 pub fn reply_audit(goal: usize) -> Option<AuditSnapshot<ReplyRecord>> {
-    read_audit(SYS_GOAL_REPLY_AUDIT, goal, ReplyRecord::decode)
+    Some(snapshot(SYS_GOAL_REPLY_AUDIT, goal, ReplyRecord::decode)?.0)
 }
 
-fn read_audit<Record: Copy, const WORDS: usize>(
+/// Returns the retained RamFS read decisions and the total bytes delivered over the goal's lifetime.
+pub fn read_audit(goal: usize) -> Option<(AuditSnapshot<ReadRecord>, usize)> {
+    snapshot(SYS_GOAL_READ_AUDIT, goal, ReadRecord::decode)
+}
+
+fn snapshot<Record: Copy, const WORDS: usize>(
     number: usize,
     goal: usize,
     decode: impl Fn(&[[u8; 8]; WORDS]) -> Option<Record>,
-) -> Option<AuditSnapshot<Record>> {
+) -> Option<(AuditSnapshot<Record>, usize)> {
     let mut records = [[[0; 8]; WORDS]; AUDIT_CAPACITY];
-    let (count, overwritten, _, _) = ecall(
+    let (count, overwritten, total, _) = ecall(
         number,
         goal,
         records.as_mut_ptr().expose_provenance(),
@@ -111,10 +121,13 @@ fn read_audit<Record: Copy, const WORDS: usize>(
     for (entry, record) in entries.iter_mut().zip(records.get(..count)?) {
         *entry = Some(decode(record)?);
     }
-    Some(AuditSnapshot {
-        entries,
-        overwritten,
-    })
+    Some((
+        AuditSnapshot {
+            entries,
+            overwritten,
+        },
+        total,
+    ))
 }
 
 /// Starts one ordinary child and returns its launch handle.

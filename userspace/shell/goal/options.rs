@@ -13,6 +13,7 @@ pub(crate) enum GoalCommand {
 pub(crate) struct GoalOptions {
     pub children: Option<usize>,
     pub reply_bytes: Option<usize>,
+    pub read_bytes: Option<usize>,
     pub allowed_helper: Option<Program>,
     pub suspended: bool,
     pub with_file: bool,
@@ -36,6 +37,13 @@ impl GoalOptions {
                         return None;
                     }
                     options.children = Some(children);
+                    arguments = rest;
+                }
+                (b"--read-bytes", rest)
+                    if matches!(command, GoalCommand::Create) && options.read_bytes.is_none() =>
+                {
+                    let (bytes, rest) = count(rest)?;
+                    options.read_bytes = Some(bytes);
                     arguments = rest;
                 }
                 (b"--allow-helper", rest)

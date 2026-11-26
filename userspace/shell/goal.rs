@@ -23,11 +23,11 @@ pub(super) fn command(
         (b"create", arguments) => create(arguments, current),
         (b"grant-file", arguments) => grant_file(handle, arguments),
         (b"run", arguments) => children.run_in_goal(handle, arguments),
-        (b"audit", option @ (b"" | b"--replies")) => match handle {
-            Some(handle) => audit::show(handle, option == b"--replies"),
+        (b"audit", option @ (b"" | b"--replies" | b"--reads")) => match handle {
+            Some(handle) => audit::show(handle, option),
             None => print(b"no current goal\r\n"),
         },
-        (b"audit", _) => print(b"usage: goal audit [--replies]\r\n"),
+        (b"audit", _) => print(b"usage: goal audit [--replies | --reads]\r\n"),
         (b"budget", b"") => match handle.and_then(goal::budget) {
             Some(budget) => print_budget(budget),
             None => print(b"no current goal\r\n"),
@@ -49,7 +49,7 @@ pub(super) fn command(
             Some(CloseResult::Busy) => print(b"goal busy\r\n"),
             None => print(b"no current goal\r\n"),
         },
-        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] | grant-file [--delegable | --delegate-to <program>] <path> | run [--reply-bytes N] <program> | budget | audit [--replies] | status | cancel | close\r\n"),
+        _ => print(b"usage: goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N] | grant-file [--delegable | --delegate-to <program>] <path> | run [--reply-bytes N] <program> | budget | audit [--replies | --reads] | status | cancel | close\r\n"),
     }
 }
 
@@ -88,14 +88,17 @@ fn grant_file(goal: Option<usize>, arguments: &[u8]) {
 fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
     let Some((options, b"")) = GoalOptions::parse(arguments, GoalCommand::Create) else {
         return print(
-            b"usage: goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>]\r\n",
+            b"usage: goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N]\r\n",
         );
     };
-    let result = goal::create_configured(goal::CreateOptions {
-        child_limit: options.children.unwrap_or(1),
-        reply_limit: options.reply_bytes,
-        allowed_helper: options.allowed_helper,
-    });
+    let result = goal::create_with_read_limit(
+        goal::CreateOptions {
+            child_limit: options.children.unwrap_or(1),
+            reply_limit: options.reply_bytes,
+            allowed_helper: options.allowed_helper,
+        },
+        options.read_bytes,
+    );
     match result {
         Some(handle) => {
             *current = Some(CurrentGoal {

@@ -20,7 +20,7 @@ impl<const WORDS: usize> AuditHistory<[[u8; 8]; WORDS]> {
         self.entries[self.len - 1] = entry;
     }
 
-    fn read(&self, copy: impl FnOnce(&[u8]) -> bool) -> Option<(usize, usize)> {
+    pub(super) fn read(&self, copy: impl FnOnce(&[u8]) -> bool) -> Option<(usize, usize)> {
         let bytes = self.entries[..self.len].as_flattened().as_flattened();
         copy(bytes).then_some((self.len, self.overwritten))
     }

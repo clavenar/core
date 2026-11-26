@@ -9,13 +9,14 @@ use clv_abi::{
     SYS_AGENT_STATUS, SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE, SYS_EVENT_WAIT, SYS_EXIT,
     SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
     SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_GRANT_DELEGABLE_FILE,
-    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR,
-    SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ,
-    SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR,
-    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_FILE_ARG, SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
-    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_READ_AUDIT, SYS_GOAL_REPLY_AUDIT,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
+    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
+    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
+    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
+    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -67,9 +68,8 @@ pub(crate) fn dispatch(
             scheduler.task_fs().open_at(fs, a0, path)
         })
         .unwrap_or(SYSCALL_ERROR),
-        SYS_READ => scheduler
-            .task_fs()
-            .read(fs, a0, a2, |bytes| stack.copy_to_user(bytes, a1, a2))
+        SYS_READ if stack.contains(a1, a2) => scheduler
+            .read_file(fs, a0, a2, |bytes| stack.copy_to_user(bytes, a1, a2))
             .unwrap_or(SYSCALL_ERROR),
         SYS_READDIR => scheduler
             .task_fs()
@@ -115,15 +115,20 @@ pub(crate) fn dispatch(
             .spawn(fs, a0, LaunchScope::FileWithPipe(a1), None)
             .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_CREATE | SYS_GOAL_CREATE_WITH_REPLY_BUDGET => scheduler
-            .create_goal(CreateOptions {
-                child_limit: 1,
-                reply_limit: (number == SYS_GOAL_CREATE_WITH_REPLY_BUDGET).then_some(a0),
-                allowed_helper: None,
-            })
+            .create_goal(
+                CreateOptions {
+                    child_limit: 1,
+                    reply_limit: (number == SYS_GOAL_CREATE_WITH_REPLY_BUDGET).then_some(a0),
+                    allowed_helper: None,
+                },
+                None,
+            )
             .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_CREATE_WITH_OPTIONS => CreateOptions::from_registers(a0, a1, a2, a3)
-            .and_then(|options| scheduler.create_goal(options))
-            .unwrap_or(SYSCALL_ERROR),
+        SYS_GOAL_CREATE_WITH_OPTIONS => {
+            CreateOptions::from_registers_with_read_limit(a0, a1, a2, a3, frame.registers[REG_A4])
+                .and_then(|(options, read_limit)| scheduler.create_goal(options, read_limit))
+                .unwrap_or(SYSCALL_ERROR)
+        }
         SYS_GOAL_RUN | SYS_GOAL_RUN_WITH_REPLY_BUDGET => {
             let scope = LaunchScope::Goal {
                 handle: a0,
@@ -146,6 +151,13 @@ pub(crate) fn dispatch(
             })
             .map_or(SYSCALL_ERROR, |(count, overwritten)| {
                 frame.registers[REG_A1] = overwritten;
+                count
+            }),
+        SYS_GOAL_READ_AUDIT => scheduler
+            .goal_read_audit(a0, |bytes| stack.copy_to_user(bytes, a1, a2))
+            .map_or(SYSCALL_ERROR, |(count, overwritten, spent)| {
+                frame.registers[REG_A1] = overwritten;
+                frame.registers[REG_A2] = spent;
                 count
             }),
         SYS_GOAL_GRANT_FILE | SYS_GOAL_GRANT_DELEGABLE_FILE => {

@@ -13,6 +13,7 @@ pub struct CreateOptions {
 impl CreateOptions {
     const REPLY_LIMIT: usize = 1;
     const ALLOWED_HELPER: usize = 2;
+    const READ_LIMIT: usize = 4;
 
     /// Call 48 takes the child limit, option flags, reply limit and helper selector in a0–a3.
     pub fn registers(self) -> (usize, usize, usize, usize) {
@@ -50,6 +51,31 @@ impl CreateOptions {
             reply_limit: (flags & Self::REPLY_LIMIT != 0).then_some(reply_limit),
             allowed_helper,
         })
+    }
+
+    /// Bit 2 enables a shared RamFS read limit in a4, including a zero-byte limit.
+    pub fn registers_with_read_limit(
+        self,
+        limit: Option<usize>,
+    ) -> (usize, usize, usize, usize, usize) {
+        let (children, flags, replies, helper) = self.registers();
+        let flags = if limit.is_some() {
+            flags | Self::READ_LIMIT
+        } else {
+            flags
+        };
+        (children, flags, replies, helper, limit.unwrap_or(0))
+    }
+
+    pub fn from_registers_with_read_limit(
+        children: usize,
+        flags: usize,
+        replies: usize,
+        helper: usize,
+        limit: usize,
+    ) -> Option<(Self, Option<usize>)> {
+        let options = Self::from_registers(children, flags & !Self::READ_LIMIT, replies, helper)?;
+        Some((options, (flags & Self::READ_LIMIT != 0).then_some(limit)))
     }
 }
 

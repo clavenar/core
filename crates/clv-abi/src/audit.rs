@@ -1,4 +1,4 @@
-//! Wire formats for the goal owner's delegation and reply-budget histories.
+//! Wire formats for the goal owner's delegation, reply and RamFS read histories.
 
 pub const AUDIT_CAPACITY: usize = 4;
 /// Agent, program, reply bytes, file flag, denial code and child handle, in RV64 words.
@@ -6,6 +6,8 @@ pub type EncodedRecord = [[u8; 8]; 6];
 /// Child, requested bytes, allowance before the decision, and flags, in RV64 words.
 /// Flag bit 0 marks an unlimited allowance and bit 1 marks a budget denial.
 pub type EncodedReplyRecord = [[u8; 8]; 4];
+/// Child, requested capacity, file bytes available for this call, prior allowance, flags.
+pub type EncodedReadRecord = [[u8; 8]; 5];
 
 #[derive(Clone, Copy)]
 pub struct DelegationRequest {
@@ -107,30 +109,72 @@ pub struct ReplyRecord {
 
 impl ReplyRecord {
     pub fn encode(self) -> EncodedReplyRecord {
-        let flags = usize::from(self.remaining_before.is_none()) | (usize::from(!self.sent) << 1);
         [
             self.child,
             self.bytes,
             self.remaining_before.unwrap_or(0),
-            flags,
+            budget_flags(self.remaining_before, self.sent),
         ]
         .map(|word| (word as u64).to_le_bytes())
     }
 
     pub fn decode(record: &EncodedReplyRecord) -> Option<Self> {
         let [child, bytes, remaining, flags] = record.map(u64::from_le_bytes);
-        let remaining = usize::try_from(remaining).ok()?;
-        let (remaining_before, sent) = match flags {
-            0 => (Some(remaining), true),
-            1 if remaining == 0 => (None, true),
-            2 => (Some(remaining), false),
-            _ => return None,
-        };
+        let (remaining_before, sent) = budget_decision(remaining, flags)?;
         Some(Self {
             child: child.try_into().ok()?,
             bytes: bytes.try_into().ok()?,
             remaining_before,
             sent,
         })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ReadRecord {
+    pub child: usize,
+    pub requested: usize,
+    /// The smaller of the requested capacity and the bytes left in the file.
+    pub bytes: usize,
+    pub remaining_before: Option<usize>,
+    /// A delivered read charged `bytes`. A denied read charged zero.
+    pub delivered: bool,
+}
+
+impl ReadRecord {
+    pub fn encode(self) -> EncodedReadRecord {
+        [
+            self.child,
+            self.requested,
+            self.bytes,
+            self.remaining_before.unwrap_or(0),
+            budget_flags(self.remaining_before, self.delivered),
+        ]
+        .map(|word| (word as u64).to_le_bytes())
+    }
+
+    pub fn decode(record: &EncodedReadRecord) -> Option<Self> {
+        let [child, requested, bytes, remaining, flags] = record.map(u64::from_le_bytes);
+        let (remaining_before, delivered) = budget_decision(remaining, flags)?;
+        Some(Self {
+            child: child.try_into().ok()?,
+            requested: requested.try_into().ok()?,
+            bytes: bytes.try_into().ok()?,
+            remaining_before,
+            delivered,
+        })
+    }
+}
+
+fn budget_flags(remaining: Option<usize>, allowed: bool) -> usize {
+    usize::from(remaining.is_none()) | (usize::from(!allowed) << 1)
+}
+
+fn budget_decision(remaining: u64, flags: u64) -> Option<(Option<usize>, bool)> {
+    match flags {
+        0 => Some((Some(remaining.try_into().ok()?), true)),
+        1 if remaining == 0 => Some((None, true)),
+        2 => Some((Some(remaining.try_into().ok()?), false)),
+        _ => None,
     }
 }

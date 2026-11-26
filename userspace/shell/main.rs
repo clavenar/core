@@ -9,7 +9,7 @@ use children::Children;
 use clv::print;
 use core::panic::PanicInfo;
 
-const LINE_LIMIT: usize = 64;
+const LINE_LIMIT: usize = 128;
 
 // SAFETY: The kernel enters this unique symbol with an aligned user stack.
 #[unsafe(no_mangle)]
@@ -78,10 +78,10 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<g
               ask [--read] <program> <text>  askat [--echo] hello <dir> <payload>\r\n\
               askfile [--stream] hello <path>\r\n\
               grep -F <pattern> <path>  recv <program>  wait <program>  event\r\n\
-              goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>]\r\n\
+              goal create [--children 1|2] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N]\r\n\
               goal run [--reply-bytes N] <program>\r\n\
               goal grant-file [--delegable | --delegate-to <program>] <path>\r\n\
-              goal status  goal budget  goal audit [--replies]  goal cancel  goal close\r\n\
+              goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n\
               agent run [--suspended] [--reply-bytes N] <program>\r\n\
               agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n\
               agent status  agent suspend  agent resume\r\n",

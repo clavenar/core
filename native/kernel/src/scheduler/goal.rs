@@ -1,9 +1,11 @@
 mod audit;
 mod budget;
 mod delegation;
+mod reads;
 
 use self::audit::AuditHistory;
 use self::budget::ReplyReservation;
+use self::reads::ReadBudget;
 use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult};
 use clv_abi::audit::{EncodedRecord, EncodedReplyRecord, ReplyRecord};
@@ -50,6 +52,7 @@ impl Member {
 pub(super) struct Goal {
     handle: usize,
     options: CreateOptions,
+    reads: ReadBudget,
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
     file: Option<FileGrant>,
@@ -196,7 +199,11 @@ impl Goal {
 }
 
 impl Scheduler {
-    pub(crate) fn create_goal(&mut self, options: CreateOptions) -> Option<usize> {
+    pub(crate) fn create_goal(
+        &mut self,
+        options: CreateOptions,
+        read_limit: Option<usize>,
+    ) -> Option<usize> {
         if self.current != SHELL_TASK_INDEX
             || self.goal.is_some()
             || !(1..=MAX_CHILDREN).contains(&options.child_limit)
@@ -208,6 +215,7 @@ impl Scheduler {
         self.goal = Some(Goal {
             handle,
             options,
+            reads: ReadBudget::new(read_limit),
             members: [const { None }; MAX_CHILDREN],
             cancelled_before_launch: false,
             file: None,

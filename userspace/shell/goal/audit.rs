@@ -1,25 +1,30 @@
 use clv::goal;
 use clv_abi::Program;
-use clv_abi::audit::{DelegationDenial, DelegationRecord, ReplyRecord};
+use clv_abi::audit::{DelegationDenial, DelegationRecord, ReadRecord, ReplyRecord};
 
 use super::{DIGITS, amount, decimal, hex, print, print_line};
 
-pub(super) fn show(handle: usize, replies: bool) {
-    if replies {
-        print_snapshot(handle, goal::reply_audit(handle), print_reply);
-    } else {
-        print_snapshot(handle, goal::audit(handle), print_delegation);
+pub(super) fn show(handle: usize, option: &[u8]) {
+    let shown = match option {
+        b"--reads" => goal::read_audit(handle).map(|(snapshot, total)| {
+            print_snapshot(handle, snapshot, print_read);
+            print_line(&[b"read_bytes=", decimal(total, &mut [0; DIGITS])]);
+        }),
+        b"--replies" => {
+            goal::reply_audit(handle).map(|snapshot| print_snapshot(handle, snapshot, print_reply))
+        }
+        _ => goal::audit(handle).map(|snapshot| print_snapshot(handle, snapshot, print_delegation)),
+    };
+    if shown.is_none() {
+        print(b"cannot read goal audit\r\n");
     }
 }
 
 fn print_snapshot<Record>(
     handle: usize,
-    snapshot: Option<goal::AuditSnapshot<Record>>,
+    snapshot: goal::AuditSnapshot<Record>,
     print_entry: impl Fn(&Record),
 ) {
-    let Some(snapshot) = snapshot else {
-        return print(b"cannot read goal audit\r\n");
-    };
     let entries = snapshot.entries.iter().flatten();
     print_header(handle, entries.clone().count(), snapshot.overwritten);
     for entry in entries {
@@ -76,6 +81,24 @@ fn print_reply(entry: &ReplyRecord) {
             b" sent"
         } else {
             b" denied=insufficient-reply-bytes"
+        },
+    ]);
+}
+
+fn print_read(entry: &ReadRecord) {
+    print_line(&[
+        b"child=",
+        &hex(entry.child),
+        b" requested=",
+        decimal(entry.requested, &mut [0; DIGITS]),
+        b" bytes=",
+        decimal(entry.bytes, &mut [0; DIGITS]),
+        b" remaining_before=",
+        amount(entry.remaining_before, &mut [0; DIGITS]),
+        if entry.delivered {
+            b" read"
+        } else {
+            b" denied=insufficient-read-bytes"
         },
     ]);
 }
