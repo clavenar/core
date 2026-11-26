@@ -25,6 +25,8 @@ pub type EncodedReplyRecord = [[u8; 8]; 4];
 pub type EncodedReadRecord = [[u8; 8]; 5];
 /// Call 61 appends the scope of the effective read allowance.
 pub type EncodedReadRecordWithLimit = [[u8; 8]; 6];
+/// Call 79 uses the call 61 layout for budget decisions and flag 4 for an out-of-scope read.
+pub type EncodedReadDecision = EncodedReadRecordWithLimit;
 
 #[derive(Clone, Copy)]
 pub struct DelegationRequest {
@@ -309,6 +311,35 @@ impl ReadRecordWithLimit {
             _ => return None,
         };
         Some(Self { read, limit })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ReadDecision {
+    Budget(ReadRecordWithLimit),
+    OutsideScope { child: usize, requested: usize },
+}
+
+impl ReadDecision {
+    const OUTSIDE_SCOPE: u64 = 4;
+
+    pub fn encode(self) -> EncodedReadDecision {
+        match self {
+            Self::Budget(entry) => entry.encode(),
+            Self::OutsideScope { child, requested } => {
+                [child as u64, requested as u64, 0, 0, Self::OUTSIDE_SCOPE, 0].map(u64::to_le_bytes)
+            }
+        }
+    }
+
+    pub fn decode(record: &EncodedReadDecision) -> Option<Self> {
+        match record.map(u64::from_le_bytes) {
+            [child, requested, 0, 0, Self::OUTSIDE_SCOPE, 0] => Some(Self::OutsideScope {
+                child: child.try_into().ok()?,
+                requested: requested.try_into().ok()?,
+            }),
+            _ => ReadRecordWithLimit::decode(record).map(Self::Budget),
+        }
     }
 }
 

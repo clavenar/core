@@ -1,26 +1,69 @@
-use clv_abi::audit::{EncodedReadRecordWithLimit, ReadLimitScope, ReadRecord, ReadRecordWithLimit};
+use clv_abi::audit::{
+    EncodedReadDecision, EncodedReadRecordWithLimit, ReadDecision, ReadLimitScope, ReadRecord,
+    ReadRecordWithLimit,
+};
 use clv_abi::goal::ReadLimits;
 
 use super::MemberRole;
 use super::audit::AuditHistory;
-use crate::fs::ramfs::RamFs;
+use crate::fs::ramfs::{DirectoryId, RamFs};
 use crate::scheduler::Scheduler;
 
-pub(super) struct ReadBudget {
+pub(crate) enum ReadAudit {
+    Budget,
+    BudgetWithLimit,
+    Decisions,
+}
+
+struct ReadScope {
+    directory: DirectoryId,
+    // Calls 57 and 61 retain budget decisions even when scope denials fill this history.
+    audit: AuditHistory<EncodedReadDecision>,
+}
+
+impl ReadScope {
+    fn permits(
+        &mut self,
+        fs: &RamFs,
+        parent: Option<DirectoryId>,
+        child: usize,
+        requested: usize,
+    ) -> bool {
+        if parent.is_some_and(|dir| self.directory.contains(fs, dir)) {
+            return true;
+        }
+        self.audit
+            .record(ReadDecision::OutsideScope { child, requested }.encode());
+        false
+    }
+}
+
+pub(super) struct GoalReads {
     goal_limit: Option<usize>,
     helper_remaining: Option<usize>,
     spent: usize,
-    audit: AuditHistory<EncodedReadRecordWithLimit>,
+    budget_audit: AuditHistory<EncodedReadRecordWithLimit>,
+    scope: Option<ReadScope>,
 }
 
-impl ReadBudget {
-    pub(super) fn new(limits: ReadLimits) -> Self {
+impl GoalReads {
+    pub(super) fn new(limits: ReadLimits, directory: Option<DirectoryId>) -> Self {
         Self {
             goal_limit: limits.goal,
             helper_remaining: limits.helpers,
             spent: 0,
-            audit: AuditHistory::default(),
+            budget_audit: AuditHistory::default(),
+            scope: directory.map(|directory| ReadScope {
+                directory,
+                audit: AuditHistory::default(),
+            }),
         }
+    }
+
+    pub(super) fn pins_directory(&self, directory: DirectoryId) -> bool {
+        self.scope
+            .as_ref()
+            .is_some_and(|scope| scope.directory == directory)
     }
 
     fn deliver(
@@ -49,19 +92,21 @@ impl ReadBudget {
                 *remaining -= bytes.len();
             }
         }
-        self.audit.record(
-            ReadRecordWithLimit {
-                read: ReadRecord {
-                    child,
-                    requested,
-                    bytes: bytes.len(),
-                    remaining_before,
-                    delivered: allowed,
-                },
-                limit,
-            }
-            .encode(),
-        );
+        let record = ReadRecordWithLimit {
+            read: ReadRecord {
+                child,
+                requested,
+                bytes: bytes.len(),
+                remaining_before,
+                delivered: allowed,
+            },
+            limit,
+        }
+        .encode();
+        self.budget_audit.record(record);
+        if let Some(scope) = &mut self.scope {
+            scope.audit.record(record);
+        }
         allowed
     }
 }
@@ -76,12 +121,17 @@ impl Scheduler {
     ) -> Option<usize> {
         let task = &mut self.tasks[self.current];
         // RamFS resolves the handle and file slice, then advances the cursor only on delivery.
-        task.fs.read(fs, fd, requested, |bytes| {
+        task.fs.read(fs, fd, requested, |parent, bytes| {
             if let Some(launch) = &task.launch
                 && let Some(goal) = &mut self.goal
                 && let Some(member) = goal.live_member_mut(launch.handle)
             {
                 let is_helper = matches!(member.role, MemberRole::Helper { .. });
+                if let Some(scope) = &mut goal.reads.scope
+                    && !scope.permits(fs, parent, launch.handle, requested)
+                {
+                    return false;
+                }
                 goal.reads
                     .deliver(launch.handle, is_helper, requested, bytes, copy)
             } else {
@@ -93,14 +143,19 @@ impl Scheduler {
     pub(crate) fn goal_read_audit(
         &self,
         handle: usize,
-        with_limit: bool,
+        view: ReadAudit,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize, usize)> {
         let reads = &self.shell_goal(handle)?.reads;
-        let (count, overwritten) = if with_limit {
-            reads.audit.read(copy)
-        } else {
-            reads.audit.read_projected(|[read @ .., _]| *read, copy)
+        let (count, overwritten) = match view {
+            ReadAudit::Budget => reads
+                .budget_audit
+                .read_projected(|[read @ .., _]| *read, copy),
+            ReadAudit::BudgetWithLimit => reads.budget_audit.read(copy),
+            ReadAudit::Decisions => match &reads.scope {
+                Some(scope) => scope.audit.read(copy),
+                None => reads.budget_audit.read(copy),
+            },
         }?;
         Some((count, overwritten, reads.spent))
     }

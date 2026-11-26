@@ -28,9 +28,19 @@ const BOOT_FILES: [BootFile; 2] = [
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DirectoryId {
+pub(crate) enum DirectoryId {
     Root,
     Child(usize),
+}
+
+impl DirectoryId {
+    pub(crate) fn contains(self, fs: &RamFs, directory: Self) -> bool {
+        core::iter::successors(Some(directory), |dir| match *dir {
+            Self::Child(index) => Some(fs.directories[index].as_ref()?.parent),
+            Self::Root => None,
+        })
+        .any(|dir| dir == self)
+    }
 }
 
 enum PathBase {
@@ -369,13 +379,17 @@ impl RamFs {
         }
     }
 
-    fn contents(&self, node: Node) -> Option<&[u8]> {
+    /// A retained, unlinked file still has contents but no directory in the live tree.
+    fn readable_file(&self, node: Node) -> Option<(&[u8], Option<DirectoryId>)> {
         match node {
             Node::Directory(_) => None,
-            Node::BootFile(index) => Some(BOOT_FILES[index].contents),
+            Node::BootFile(index) => Some((BOOT_FILES[index].contents, Some(DirectoryId::Root))),
             Node::WritableFile(index) => {
                 let file = self.writable[index].as_ref()?;
-                Some(&file.contents[..file.length])
+                Some((
+                    &file.contents[..file.length],
+                    file.linked.then_some(file.parent),
+                ))
             }
         }
     }

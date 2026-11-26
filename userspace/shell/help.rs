@@ -57,6 +57,7 @@ entries! {
         "  --children 1|2|3" => "Limit child launches",
         "  --reply-bytes N" => "Limit reply bytes",
         "  --read-bytes N" => "Limit all file reads in bytes",
+        "  --read-under <dir>" => "Limit file reads to this directory tree",
         "  --helper-read-bytes N" => "Limit helper reads in bytes",
         "  --preserve-file <path>" => "Save input for rename review",
         "  --rename-under <dir>" => "Limit renames to this directory tree",

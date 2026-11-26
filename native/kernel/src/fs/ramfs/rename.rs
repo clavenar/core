@@ -13,7 +13,7 @@ const _: () = assert!(DIFF_CAPACITY <= RENAME_DIFF_MAX_BYTES);
 
 pub(crate) struct RenamePolicy {
     // RamFS refuses rmdir on this directory for the lifetime of the owning goal.
-    pub(super) directory: DirectoryId,
+    pub(crate) directory: DirectoryId,
     preserved_file: Option<PreservedFile>,
 }
 
@@ -21,12 +21,7 @@ impl RenamePolicy {
     pub(crate) fn capture(caller: &TaskFs, fs: &mut RamFs, options: RenameOptions) -> Option<Self> {
         let directory = match options.directory {
             None => DirectoryId::Root,
-            Some(fd) => {
-                let Node::Directory(directory) = caller.node_for_handle(fd)? else {
-                    return None;
-                };
-                directory
-            }
+            Some(fd) => caller.directory_for_handle(fd)?,
         };
         let preserved_file = match options.preserve_file {
             Some(fd) => Some(PreservedFile::capture(fs, caller.node_for_handle(fd)?)?),
@@ -36,14 +31,6 @@ impl RenamePolicy {
             directory,
             preserved_file,
         })
-    }
-
-    fn contains_directory(&self, fs: &RamFs, parent: DirectoryId) -> bool {
-        core::iter::successors(Some(parent), |dir| match *dir {
-            DirectoryId::Child(index) => Some(fs.directories[index].as_ref()?.parent),
-            DirectoryId::Root => None,
-        })
-        .any(|dir| dir == self.directory)
     }
 
     pub(crate) fn release_input(&mut self, fs: &mut RamFs) {
@@ -136,7 +123,7 @@ impl StagedRename {
         let file = fs.writable[self.file_index]
             .as_ref()
             .ok_or(PublicationError::Unavailable)?;
-        if !policy.contains_directory(fs, file.parent)
+        if !policy.directory.contains(fs, file.parent)
             || policy
                 .preserved_file
                 .as_ref()
@@ -178,7 +165,7 @@ impl RamFs {
         let (index, file) = self
             .linked_file(source)
             .ok_or(RenameDenial::InvalidSource)?;
-        if !policy.contains_directory(self, file.parent) {
+        if !policy.directory.contains(self, file.parent) {
             return Err(RenameDenial::OutsideRenameScope);
         }
         if !Name::valid(new_name) {

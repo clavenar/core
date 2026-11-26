@@ -4,7 +4,7 @@ mod pipe;
 
 use self::definition::AgentBinding;
 use self::goal::Goal;
-pub(crate) use self::goal::{DelegationAudit, DelegationTarget};
+pub(crate) use self::goal::{DelegationAudit, DelegationTarget, ReadAudit};
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
 use clv_abi::{
@@ -207,12 +207,13 @@ impl Scheduler {
             .iter()
             .filter(|task| task.state != TaskState::Stopped)
             .map(|task| &task.fs);
-        self.tasks[self.current].fs.rmdir(
-            fs,
-            path,
-            live_task_fs,
-            self.goal.as_ref().map(|goal| &goal.rename_policy),
-        )
+        self.tasks[self.current]
+            .fs
+            .rmdir(fs, path, live_task_fs, |directory| {
+                self.goal
+                    .as_ref()
+                    .is_some_and(|goal| goal.pins_directory(directory))
+            })
     }
 
     pub(crate) fn spawn(

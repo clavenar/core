@@ -255,21 +255,27 @@ fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
 }
 
 fn create_goal(options: GoalOptions<'_>) -> Option<usize> {
-    with_optional_handle(options.rename_under, |directory| {
-        with_optional_handle(options.preserve_file, |preserve_file| {
-            goal::create_with_rename_options(
-                goal::CreateOptions {
-                    child_limit: options.children.unwrap_or(1),
-                    reply_limit: options.reply_bytes,
-                    allowed_helper: options.allowed_helper,
-                },
-                options.read_limits,
-                options.allowed_tool,
-                goal::RenameOptions {
-                    directory,
-                    preserve_file,
-                },
-            )
+    let create = goal::CreateOptions {
+        child_limit: options.children.unwrap_or(1),
+        reply_limit: options.reply_bytes,
+        allowed_helper: options.allowed_helper,
+    };
+    with_optional_handle(options.read_under, |read_directory| {
+        with_optional_handle(options.rename_under, |directory| {
+            with_optional_handle(options.preserve_file, |preserve_file| {
+                goal::create_with_file_options(
+                    create,
+                    options.read_limits,
+                    options.allowed_tool,
+                    goal::FileOptions {
+                        read_directory,
+                        rename: goal::RenameOptions {
+                            directory,
+                            preserve_file,
+                        },
+                    },
+                )
+            })
         })
     })
 }

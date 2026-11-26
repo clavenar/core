@@ -597,6 +597,48 @@ receives a read-only handle to the file and spends from the applicable read
 budgets. A helper launched without the file uses the goal's ordinary
 delegation rules.
 
+### Limit file reads to a directory
+
+`goal create --read-under /home/work` allows a goal member to read a granted
+file only while it belongs to that directory or a descendant. RamFS checks
+the opened file on each read by a child, agent or delegated helper. The shell
+can grant a file from elsewhere to exercise the denial at read time.
+
+At a fresh `clsh>` prompt, run the same agent in two goals.
+
+```text
+mkdir /home
+mkdir /home/work
+mkdir /private
+write /home/work/draft.txt keep
+write /private/draft.txt secret
+goal create --read-under /home/work
+goal grant-file /home/work/draft.txt
+agent run hello
+wait hello
+recv hello
+goal audit --reads
+goal close
+
+goal create --read-under /home/work
+goal grant-file /private/draft.txt
+agent run hello
+wait hello
+recv hello
+goal audit --reads
+goal close
+```
+
+The first reply contains `keep`. The audit reports `read_bytes=6`, including
+the line ending written by `write`. In the second run the grant succeeds,
+`hello` exits 1 and the reply is `cannot read requested file`. The audit
+identifies its child launch handle and shows `bytes=0 denied=outside-read-scope`
+and `read_bytes=0`.
+
+A retained file that has been unlinked has no parent in the tree and fails
+the same check. The boot files belong to `/`. The shell can combine
+`--read-under` with a byte budget or a separate `--rename-under` directory.
+
 ### Share a RamFS read budget
 
 `goal create --read-bytes N` sets the total regular-file bytes RamFS may
@@ -1382,15 +1424,16 @@ paths and any `..` step above the starting directory.
 full absolute path, up to 260 bytes, without a trailing NUL. If the destination
 buffer is too small or outside the user stack, it returns -1 and writes nothing.
 
-Unlink removes a writable file's name immediately. Open handles retain access
-to that file, and its slot becomes reusable once the last handle closes.
+Unlink removes a writable file's name immediately. Open handles keep the
+file alive until the last handle closes. A goal with a read-directory scope
+requires a linked file for each read.
 Recreating the path while an old handle is open uses a separate slot.
 Task exit and user faults close the task's handles.
 
 `rmdir` frees a directory slot as soon as it removes the name. Remove all
 linked files and subdirectories first. A live task's working directory, an
-open directory handle or an open goal's rename scope keeps that directory
-in use. Attempts to remove `/` or a path ending in `.` or `..` return -1.
+open directory handle or an open goal's read or rename scope keeps that
+directory in use. Attempts to remove `/` or a path ending in `.` or `..` return -1.
 
 Call 1 takes an exit status in `a0` and removes the calling task from the
 schedule. A task that exits successfully reports
@@ -1602,6 +1645,8 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 75 `goal_review_with_deadline` | Same arguments as call 68 | Same diff, lengths and token. With a nonzero token, `a3` holds the absolute guest deadline in nanoseconds. With a zero token, `a3` holds the call 68 review status. |
 | 76 `goal_publication_audit` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` zero-based row index (oldest first) | Retained decision count (0–4) in `a0` and overwritten count in `a1`, or -1 on failure |
 | 77 `goal_create_with_rename_scope` | `a0` owner's directory handle, `a1` stack address of the six call 48 words, `a2` length in bytes (48), `a3` preserved-file handle or `NO_RAMFS_HANDLE` | Fresh goal handle, or -1 on rejection |
+| 78 `goal_create_with_read_scope` | `a0` owner's read-directory handle, `a1` and `a2` option block as in call 77, `a3` preserved-file handle, `a4` rename-directory handle (each optional handle takes `NO_RAMFS_HANDLE` when absent) | Fresh goal handle, or -1 on rejection |
+| 79 `goal_read_decisions` | Same arguments as call 57 | Retained read decision count (0–4), overwritten count in `a1` and lifetime bytes delivered in `a2`, or -1 on failure |
 
 Calls 66 and 67 are restricted to the goal owner. Call 66 requires a linked
 writable RamFS file and an empty staging slot. It rejects an occupied name,
@@ -1663,6 +1708,12 @@ same rules as call 70. `NO_RAMFS_HANDLE` is the all-ones RV64 value. Handle
 zero is valid. The owner can close both descriptors after creation. Calls 66
 and 72 check scope membership by walking the source's directory ancestors
 before looking up the destination. File grants continue to govern read access.
+
+Call 78 requires an open directory for the read scope. The owner can close
+all supplied descriptors after creation. The directory stays pinned until the
+goal closes or its owner exits. On call 6, RamFS walks the open file's current
+parent ancestry before checking either byte budget or copying to user memory.
+A scope denial returns -1 and preserves the cursor and both balances.
 
 Call 71 requires a linked writable RamFS file and an empty file-grant slot.
 The direct agent receives read access and permission to stage a rename.
@@ -1857,6 +1908,13 @@ The goal takes precedence when the remaining amounts are equal. A successful
 copy charges the goal once and, for a helper, spends the same number of bytes
 from its helper allowance. Denials preserve both balances and the cursor.
 
+Call 79 supplies the history for `goal audit --reads`. It retains the last
+four read decisions, including scope denials. Budget decisions use the call
+61 encoding. For a scope denial the six words are the caller's child launch
+handle, requested capacity, zero, zero, flag 4, and zero. This records the
+request without disclosing the file's length. Calls 57 and 61 independently
+retain the last four attempts that reached the budget check.
+
 Call 73 lets the owner read the staging decisions from calls 66 and 72.
 The kernel records each attempt after authenticating the goal owner or
 its live agent. Each 88-byte row starts with three little-endian RV64 words
@@ -1913,7 +1971,7 @@ goal. Index zero on an empty history returns zero and accepts zero capacity.
 An invalid index, a short buffer for a retained row, or an invalid destination
 range fails before copying any bytes.
 
-Calls 52, 53, 57, 59, 61, 65 and 73 each copy up to four retained entries, oldest
+Calls 52, 53, 57, 59, 61, 65, 73 and 79 each copy up to four retained entries, oldest
 first. A short buffer or an invalid destination range returns -1 before copying
 any bytes. Zero capacity succeeds for an empty audit. Reads preserve the entries
 and the overwritten count, which saturates at the largest RV64 unsigned value.

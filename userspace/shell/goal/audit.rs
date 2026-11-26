@@ -2,8 +2,7 @@ use crate::{ConsoleLine, help::Entry};
 use clv::goal;
 use clv_abi::audit::{
     AUDIT_CAPACITY, DelegationDenial, DelegationRecordWithTool, PublicationOutcome,
-    PublicationRecord, ReadLimitScope, ReadRecordWithLimit, RenameDenial, RenameRecord,
-    ReplyRecord,
+    PublicationRecord, ReadDecision, ReadLimitScope, RenameDenial, RenameRecord, ReplyRecord,
 };
 use clv_abi::tool::FILE_TOOLS;
 use clv_abi::{LaunchParent, Program};
@@ -62,12 +61,11 @@ fn show_rows(handle: usize, view: View) -> Option<()> {
         }
         View::Reads => {
             let mut records = [Default::default(); AUDIT_CAPACITY];
-            let (rows, overwritten, total) =
-                goal::read_audit_rows_with_limit(handle, &mut records)?;
+            let (rows, overwritten, total) = goal::read_decision_rows(handle, &mut records)?;
             print_snapshot(
                 handle,
                 overwritten,
-                rows.iter().map(ReadRecordWithLimit::decode),
+                rows.iter().map(ReadDecision::decode),
                 print_read,
             )?;
             print_line(&[b"read_bytes=", decimal(total, &mut [0; DIGITS])]);
@@ -253,7 +251,19 @@ fn print_reply(entry: ReplyRecord) {
     ]);
 }
 
-fn print_read(entry: ReadRecordWithLimit) {
+fn print_read(decision: ReadDecision) {
+    let entry = match decision {
+        ReadDecision::Budget(entry) => entry,
+        ReadDecision::OutsideScope { child, requested } => {
+            return print_line(&[
+                b"child=",
+                &hex(child),
+                b" requested=",
+                decimal(requested, &mut [0; DIGITS]),
+                b" bytes=0 denied=outside-read-scope",
+            ]);
+        }
+    };
     let read = &entry.read;
     print_line(&[
         b"child=",

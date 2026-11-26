@@ -6,7 +6,8 @@ mod rename;
 
 use self::audit::AuditHistory;
 use self::budget::ReplyReservation;
-use self::reads::ReadBudget;
+use self::reads::GoalReads;
+pub(crate) use self::reads::ReadAudit;
 use self::rename::PendingRename;
 use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin};
@@ -16,12 +17,14 @@ use clv_abi::audit::{
 };
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
-    CancelResult, CloseResult, CreateOptions, GoalStatus, MAX_CHILDREN, ReadLimits, RenameOptions,
+    CancelResult, CloseResult, CreateOptions, FileOptions, GoalStatus, MAX_CHILDREN, ReadLimits,
 };
 use clv_abi::tool::ToolId;
 
 use super::{AgentBinding, SHELL_TASK_INDEX, Scheduler, TaskState};
-use crate::fs::ramfs::{FileGrant, FileGrantMode, GrantArgument, RamFs, RenamePolicy, TaskFs};
+use crate::fs::ramfs::{
+    DirectoryId, FileGrant, FileGrantMode, GrantArgument, RamFs, RenamePolicy, TaskFs,
+};
 
 pub(crate) enum DelegationTarget {
     Program { selector: usize, with_file: bool },
@@ -74,11 +77,11 @@ pub(super) struct Goal {
     handle: usize,
     options: CreateOptions,
     allowed_tool: Option<ToolId>,
-    reads: ReadBudget,
+    reads: GoalReads,
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
     file: Option<FileGrant>,
-    pub(super) rename_policy: RenamePolicy,
+    rename_policy: RenamePolicy,
     rename: Option<PendingRename>,
     delegation_audit: AuditHistory<EncodedRecordWithTool>,
     reply_audit: AuditHistory<EncodedReplyRecord>,
@@ -87,6 +90,10 @@ pub(super) struct Goal {
 }
 
 impl Goal {
+    pub(super) fn pins_directory(&self, directory: DirectoryId) -> bool {
+        self.rename_policy.directory == directory || self.reads.pins_directory(directory)
+    }
+
     fn members(&self) -> impl Iterator<Item = &Member> {
         self.members.iter().flatten()
     }
@@ -232,7 +239,7 @@ impl Scheduler {
         options: CreateOptions,
         read_limits: ReadLimits,
         allowed_tool: Option<ToolId>,
-        rename: RenameOptions,
+        files: FileOptions,
         fs: &mut RamFs,
     ) -> Option<usize> {
         if self.current != SHELL_TASK_INDEX
@@ -246,13 +253,18 @@ impl Scheduler {
         }
         let handle = self.next_handle;
         let next_handle = handle.checked_add(1)?;
-        let rename_policy = RenamePolicy::capture(&self.tasks[self.current].fs, fs, rename)?;
+        let caller = &self.tasks[self.current].fs;
+        let read_directory = match files.read_directory {
+            Some(fd) => Some(caller.directory_for_handle(fd)?),
+            None => None,
+        };
+        let rename_policy = RenamePolicy::capture(caller, fs, files.rename)?;
         self.next_handle = next_handle;
         self.goal = Some(Goal {
             handle,
             options,
             allowed_tool,
-            reads: ReadBudget::new(read_limits),
+            reads: GoalReads::new(read_limits, read_directory),
             members: [const { None }; MAX_CHILDREN],
             cancelled_before_launch: false,
             file: None,

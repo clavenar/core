@@ -142,6 +142,13 @@ pub struct RenameOptions {
     pub preserve_file: Option<usize>,
 }
 
+/// Owner's descriptors for the independent RamFS policies of one goal.
+#[derive(Clone, Copy, Default)]
+pub struct FileOptions {
+    pub read_directory: Option<usize>,
+    pub rename: RenameOptions,
+}
+
 /// Immutable options for goal creation. The helper restriction applies to delegation.
 #[derive(Clone, Copy)]
 pub struct CreateOptions {

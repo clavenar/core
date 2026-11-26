@@ -66,6 +66,7 @@ keywords!(GoalFlag {
     ReplyBytes => "--reply-bytes",
     Children => "--children",
     ReadBytes => "--read-bytes",
+    ReadUnder => "--read-under",
     HelperReadBytes => "--helper-read-bytes",
     AllowHelper => "--allow-helper",
     AllowTool => "--allow-tool",

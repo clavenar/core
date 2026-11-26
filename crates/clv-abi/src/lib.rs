@@ -88,6 +88,8 @@ pub const SYS_GOAL_DISCARD: usize = 74;
 pub const SYS_GOAL_REVIEW_WITH_DEADLINE: usize = 75;
 pub const SYS_GOAL_PUBLICATION_AUDIT: usize = 76;
 pub const SYS_GOAL_CREATE_WITH_RENAME_SCOPE: usize = 77;
+pub const SYS_GOAL_CREATE_WITH_READ_SCOPE: usize = 78;
+pub const SYS_GOAL_READ_DECISIONS: usize = 79;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_RAMFS_HANDLE: usize = usize::MAX;

@@ -3,7 +3,9 @@ use clv_abi::agent::{
     RUN_STAGE_RENAME, RUN_SUSPENDED,
 };
 use clv_abi::audit::DelegationDenial;
-use clv_abi::goal::{CreateOptions, FileRecipient, ReadLimits, RenameOptions, ReviewToken};
+use clv_abi::goal::{
+    CreateOptions, FileOptions, FileRecipient, ReadLimits, RenameOptions, ReviewToken,
+};
 use clv_abi::tool::ToolId;
 use clv_abi::{
     ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, NO_RAMFS_HANDLE, OPEN_READ,
@@ -15,16 +17,17 @@ use clv_abi::{
     SYS_CHDIR, SYS_CLOSE, SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT,
     SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL,
     SYS_GOAL_CLOSE, SYS_GOAL_COMMIT, SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE,
-    SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_RENAME_SCOPE,
-    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_DISCARD,
-    SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
-    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_PUBLICATION_AUDIT,
-    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_RENAME_AUDIT,
-    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE,
-    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
-    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE,
-    SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR,
-    SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_READ_SCOPE,
+    SYS_GOAL_CREATE_WITH_RENAME_SCOPE, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF,
+    SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
+    SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
+    SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT,
+    SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW,
+    SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
+    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
+    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
+    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
     SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
     SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
     SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
@@ -38,7 +41,8 @@ use crate::ipc::pipe::PipeResult;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::usercopy::UserStack;
 use crate::scheduler::{
-    DelegationAudit, DelegationTarget, LaunchScope, Mailbox, ReceiveResult, Scheduler, WaitResult,
+    DelegationAudit, DelegationTarget, LaunchScope, Mailbox, ReadAudit, ReceiveResult, Scheduler,
+    WaitResult,
 };
 
 const CONSOLE_WRITE_LIMIT: usize = 128;
@@ -137,44 +141,40 @@ pub(crate) fn dispatch(
                 },
                 ReadLimits::default(),
                 None,
-                RenameOptions::default(),
+                FileOptions::default(),
                 fs,
             )
             .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_CREATE_WITH_OPTIONS
         | SYS_GOAL_CREATE_PRESERVING_FILE
-        | SYS_GOAL_CREATE_WITH_RENAME_SCOPE => {
-            let (words, rename) = match number {
-                SYS_GOAL_CREATE_WITH_RENAME_SCOPE => (
-                    read_create_options(stack, a1, a2),
-                    RenameOptions {
-                        directory: Some(a0),
-                        preserve_file: (a3 != NO_RAMFS_HANDLE).then_some(a3),
-                    },
-                ),
-                SYS_GOAL_CREATE_PRESERVING_FILE => (
-                    read_create_options(stack, a1, a2),
-                    RenameOptions {
-                        directory: None,
-                        preserve_file: Some(a0),
-                    },
-                ),
-                _ => (
-                    Some([
-                        a0,
-                        a1,
-                        a2,
-                        a3,
-                        frame.registers[REG_A4],
-                        frame.registers[REG_A5],
-                    ]),
-                    RenameOptions::default(),
-                ),
+        | SYS_GOAL_CREATE_WITH_RENAME_SCOPE
+        | SYS_GOAL_CREATE_WITH_READ_SCOPE => {
+            let a4 = frame.registers[REG_A4];
+            let words = if number == SYS_GOAL_CREATE_WITH_OPTIONS {
+                Some([a0, a1, a2, a3, a4, frame.registers[REG_A5]])
+            } else {
+                read_create_options(stack, a1, a2)
+            };
+            let optional_handle = |fd| (fd != NO_RAMFS_HANDLE).then_some(fd);
+            let (read_directory, rename_directory, preserve_file) = match number {
+                SYS_GOAL_CREATE_WITH_READ_SCOPE => {
+                    (Some(a0), optional_handle(a4), optional_handle(a3))
+                }
+                SYS_GOAL_CREATE_WITH_RENAME_SCOPE => (None, Some(a0), optional_handle(a3)),
+                SYS_GOAL_CREATE_PRESERVING_FILE => (None, None, Some(a0)),
+                _ => (None, None, None),
+            };
+            let files = FileOptions {
+                read_directory,
+                rename: RenameOptions {
+                    directory: rename_directory,
+                    preserve_file,
+                },
             };
             words
                 .and_then(CreateOptions::from_registers_with_allowed_tool)
                 .and_then(|(options, limits, tool)| {
-                    scheduler.create_goal(options, limits, tool, rename, fs)
+                    scheduler.create_goal(options, limits, tool, files, fs)
                 })
                 .unwrap_or(SYSCALL_ERROR)
         }
@@ -242,15 +242,20 @@ pub(crate) fn dispatch(
             frame,
             scheduler.goal_publication_audit(a0, a3, |bytes| stack.copy_to_user(bytes, a1, a2)),
         ),
-        SYS_GOAL_READ_AUDIT | SYS_GOAL_READ_AUDIT_WITH_LIMIT => scheduler
-            .goal_read_audit(a0, number == SYS_GOAL_READ_AUDIT_WITH_LIMIT, |bytes| {
-                stack.copy_to_user(bytes, a1, a2)
-            })
-            .map_or(SYSCALL_ERROR, |(count, overwritten, spent)| {
-                frame.registers[REG_A1] = overwritten;
-                frame.registers[REG_A2] = spent;
-                count
-            }),
+        SYS_GOAL_READ_AUDIT | SYS_GOAL_READ_AUDIT_WITH_LIMIT | SYS_GOAL_READ_DECISIONS => {
+            let view = match number {
+                SYS_GOAL_READ_AUDIT => ReadAudit::Budget,
+                SYS_GOAL_READ_AUDIT_WITH_LIMIT => ReadAudit::BudgetWithLimit,
+                _ => ReadAudit::Decisions,
+            };
+            scheduler
+                .goal_read_audit(a0, view, |bytes| stack.copy_to_user(bytes, a1, a2))
+                .map_or(SYSCALL_ERROR, |(count, overwritten, spent)| {
+                    frame.registers[REG_A1] = overwritten;
+                    frame.registers[REG_A2] = spent;
+                    count
+                })
+        }
         SYS_GOAL_GRANT_FILE | SYS_GOAL_GRANT_DELEGABLE_FILE | SYS_GOAL_GRANT_FILE_FOR_RENAME => {
             let mode = match number {
                 SYS_GOAL_GRANT_DELEGABLE_FILE => FileGrantMode::Delegate(FileRecipient::Any),

@@ -241,10 +241,15 @@ impl TaskFs {
         directory_fd: usize,
         path: &[u8],
     ) -> Option<usize> {
-        let Node::Directory(directory) = self.node_for_handle(directory_fd)? else {
+        let directory = self.directory_for_handle(directory_fd)?;
+        self.open_path(fs, PathBase::Confined(directory), path, false)
+    }
+
+    pub(crate) fn directory_for_handle(&self, fd: usize) -> Option<DirectoryId> {
+        let Node::Directory(directory) = self.node_for_handle(fd)? else {
             return None;
         };
-        self.open_path(fs, PathBase::Confined(directory), path, false)
+        Some(directory)
     }
 
     pub(super) fn node_for_handle(&self, fd: usize) -> Option<Node> {
@@ -286,11 +291,10 @@ impl TaskFs {
         fs: &mut RamFs,
         path: &[u8],
         mut live_task_fs: impl Iterator<Item = &'a TaskFs>,
-        rename_policy: Option<&RenamePolicy>,
+        goal_pins: impl FnOnce(DirectoryId) -> bool,
     ) -> Option<usize> {
         fs.rmdir(self.cwd?, path, |directory| {
-            rename_policy.is_some_and(|policy| policy.directory == directory)
-                || live_task_fs.any(|task_fs| task_fs.uses_directory(directory))
+            goal_pins(directory) || live_task_fs.any(|task_fs| task_fs.uses_directory(directory))
         })
     }
 
@@ -323,17 +327,15 @@ impl TaskFs {
         fs: &RamFs,
         fd: usize,
         length: usize,
-        deliver: impl FnOnce(&[u8]) -> bool,
+        deliver: impl FnOnce(Option<DirectoryId>, &[u8]) -> bool,
     ) -> Option<usize> {
         let slot = self.handle_slot(fd)?;
         let handle = self.slots[slot].as_mut()?;
         // Another handle can truncate the file below this cursor.
-        let remaining = fs
-            .contents(handle.node)?
-            .get(handle.cursor..)
-            .unwrap_or(&[]);
+        let (contents, parent) = fs.readable_file(handle.node)?;
+        let remaining = contents.get(handle.cursor..).unwrap_or(&[]);
         let bytes = &remaining[..remaining.len().min(length)];
-        if !deliver(bytes) {
+        if !deliver(parent, bytes) {
             return None;
         }
         handle.cursor += bytes.len();

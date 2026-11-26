@@ -16,6 +16,7 @@ pub(crate) struct GoalOptions<'a> {
     pub children: Option<usize>,
     pub reply_bytes: Option<usize>,
     pub read_limits: ReadLimits,
+    pub read_under: Option<&'a [u8]>,
     pub allowed_helper: Option<Program>,
     pub allowed_tool: Option<ToolId>,
     pub preserve_file: Option<&'a [u8]>,
@@ -40,6 +41,9 @@ impl<'a> GoalOptions<'a> {
                 }
                 GoalFlag::ReadBytes if matches!(command, GoalCommand::Create) => {
                     parse_count(rest, &mut options.read_limits.goal)?
+                }
+                GoalFlag::ReadUnder if matches!(command, GoalCommand::Create) => {
+                    parse_path(rest, &mut options.read_under)?
                 }
                 GoalFlag::HelperReadBytes if matches!(command, GoalCommand::Create) => {
                     parse_count(rest, &mut options.read_limits.helpers)?
