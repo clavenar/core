@@ -49,6 +49,7 @@ keywords!(Subcommand {
     StageRename => "stage-rename",
     Diff => "diff",
     Commit => "commit",
+    Discard => "discard",
     RevokeFile => "revoke-file",
     Run => "run",
     Audit => "audit",

@@ -57,6 +57,13 @@ pub enum CommitResult {
     PostconditionFailed = 2,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum DiscardResult {
+    Discarded = 0,
+    Empty = 1,
+}
+
 pub enum GoalDiff<'a> {
     Empty,
     Rename {

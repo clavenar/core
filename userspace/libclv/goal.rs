@@ -5,19 +5,20 @@ use clv_abi::audit::{
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
-    CancelResult, CloseResult, CommitResult, CreateOptions, FileRecipient, GoalDiff, GoalStatus,
-    PublicationError, ReadLimits, RenameReview, ReviewToken,
+    CancelResult, CloseResult, CommitResult, CreateOptions, DiscardResult, FileRecipient, GoalDiff,
+    GoalStatus, PublicationError, ReadLimits, RenameReview, ReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
     MESSAGE_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
     SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
     SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE, SYS_GOAL_CREATE_WITH_OPTIONS,
-    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_GRANT_DELEGABLE_FILE,
-    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO,
-    SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT,
-    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVOKE_FILE,
-    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
+    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_DISCARD,
+    SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
+    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW,
+    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
+    SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -208,6 +209,15 @@ pub fn commit(goal: usize, token: ReviewToken) -> Option<CommitResult> {
         n if n == CommitResult::PostconditionFailed as usize => {
             Some(CommitResult::PostconditionFailed)
         }
+        _ => None,
+    }
+}
+
+/// Lets the owner discard the goal's pending rename and invalidate its review token.
+pub fn discard(goal: usize) -> Option<DiscardResult> {
+    match syscall(SYS_GOAL_DISCARD, goal, 0, 0) {
+        n if n == DiscardResult::Discarded as usize => Some(DiscardResult::Discarded),
+        n if n == DiscardResult::Empty as usize => Some(DiscardResult::Empty),
         _ => None,
     }
 }

@@ -1,5 +1,7 @@
 use clv_abi::audit::{RenameDenial, RenameRecord};
-use clv_abi::goal::{CommitResult, GoalStatus, PublicationError, RenameReview, ReviewToken};
+use clv_abi::goal::{
+    CommitResult, DiscardResult, GoalStatus, PublicationError, RenameReview, ReviewToken,
+};
 use clv_abi::{LaunchParent, PATH_MAX_BYTES};
 
 use super::{Goal, Scheduler};
@@ -60,16 +62,26 @@ impl Goal {
         Ok(())
     }
 
+    fn discard_rename(&mut self, fs: &mut RamFs) -> DiscardResult {
+        let Some(rename) = self.rename.take() else {
+            return DiscardResult::Empty;
+        };
+        rename.change.discard(fs);
+        DiscardResult::Discarded
+    }
+
     pub(super) fn discard_granted_rename(&mut self, fs: &mut RamFs) {
-        if let Some(rename) = self.rename.take_if(|rename| rename.from_file_grant) {
-            rename.change.discard(fs);
+        if self
+            .rename
+            .as_ref()
+            .is_some_and(|rename| rename.from_file_grant)
+        {
+            self.discard_rename(fs);
         }
     }
 
     pub(super) fn release_transaction(&mut self, fs: &mut RamFs) {
-        if let Some(rename) = self.rename.take() {
-            rename.change.discard(fs);
-        }
+        self.discard_rename(fs);
         if let Some(input) = self.preserved_file.take() {
             input.release(fs);
         }
@@ -156,6 +168,15 @@ impl Scheduler {
             RenameReview::Preview
         };
         Some((count, source_len, result))
+    }
+
+    pub(crate) fn discard_goal_rename(
+        &mut self,
+        handle: usize,
+        fs: &mut RamFs,
+    ) -> Option<DiscardResult> {
+        self.shell_goal(handle)?;
+        Some(self.goal.as_mut()?.discard_rename(fs))
     }
 
     pub(crate) fn commit_goal(

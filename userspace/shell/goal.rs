@@ -3,8 +3,8 @@ mod options;
 
 use super::command::{GoalFlag, Subcommand};
 use clv::goal::{
-    self, CancelResult, CloseResult, CommitResult, FileRecipient, GoalStatus, PublicationError,
-    RenameReview, ReplyBudget, ReviewToken,
+    self, CancelResult, CloseResult, CommitResult, DiscardResult, FileRecipient, GoalStatus,
+    PublicationError, RenameReview, ReplyBudget, ReviewToken,
 };
 use clv::{agent, fs, print};
 use clv_abi::agent::{NO_DEFINITION, SHA256_BYTES};
@@ -26,7 +26,7 @@ pub(super) fn help() {
     print(b"goal run [--reply-bytes N] <program>\r\n");
     print(GRANT_HELP);
     print(RENAME_HELP);
-    print(b"goal diff  goal commit  goal revoke-file  goal status  goal budget  goal cancel  goal close\r\n");
+    print(b"goal diff  goal commit  goal discard  goal revoke-file  goal status  goal budget  goal cancel  goal close\r\n");
     print(audit::HELP);
 }
 
@@ -58,11 +58,14 @@ pub(super) fn command(
         (Subcommand::Create, arguments) => create(arguments, current),
         (Subcommand::GrantFile, arguments) => grant_file(handle, arguments),
         (Subcommand::StageRename, arguments) => stage_rename(handle, arguments),
-        (action @ (Subcommand::Diff | Subcommand::Commit), b"") => match current {
-            Some(goal) if matches!(action, Subcommand::Diff) => show_diff(goal),
-            Some(goal) => commit(goal),
-            None => print(b"no current goal\r\n"),
-        },
+        (action @ (Subcommand::Diff | Subcommand::Commit | Subcommand::Discard), b"") => {
+            match (action, current) {
+                (Subcommand::Commit, Some(goal)) => commit(goal),
+                (Subcommand::Discard, Some(goal)) => discard(goal),
+                (_, Some(goal)) => show_diff(goal),
+                (_, None) => print(b"no current goal\r\n"),
+            }
+        }
         (Subcommand::RevokeFile, b"") => match handle {
             Some(handle) if goal::revoke_file(handle) => print(b"file revoked\r\n"),
             Some(_) => print(b"cannot revoke file\r\n"),
@@ -226,6 +229,17 @@ fn commit(goal: &mut CurrentGoal) {
         Some(CommitResult::Conflict) => b"commit conflict\r\n",
         Some(CommitResult::PostconditionFailed) => b"postcondition failed\r\n",
         None => b"cannot commit goal\r\n",
+    });
+}
+
+fn discard(goal: &mut CurrentGoal) {
+    let Some(result) = goal::discard(goal.handle) else {
+        return print(b"cannot discard goal changes\r\n");
+    };
+    goal.review = None;
+    print(match result {
+        DiscardResult::Discarded => b"rename discarded\r\n",
+        DiscardResult::Empty => b"no staged changes\r\n",
     });
 }
 

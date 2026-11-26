@@ -1001,6 +1001,47 @@ To check a read-only grant, repeat the first sequence through `goal diff`
 using `goal grant-file /work/draft.txt`. The agent exits with status 1
 and the diff is empty.
 
+### Discard a staged rename
+
+`goal discard` lets the owner withdraw the pending rename and keep the goal
+open. At a fresh QEMU prompt, stage a rename, discard it, then let the agent
+propose a different name using the same file grant.
+
+```text
+write /draft.txt hello
+goal create --preserve-file /draft.txt
+goal grant-file --stage-rename /draft.txt
+goal stage-rename /draft.txt first.txt
+goal discard
+goal diff
+agent run hello --stage-rename final.txt
+wait hello
+goal diff
+```
+
+The first discard prints `rename discarded` and the first diff prints
+`no staged changes`. After the agent exits, the second diff shows
+`rename /draft.txt -> final.txt` and `ready to commit`. In the same session,
+decline that reviewed rename.
+
+```text
+goal discard
+goal commit
+goal discard
+goal diff
+goal status
+goal audit --renames
+ls /
+cat /draft.txt
+goal close
+```
+
+Discard invalidates the saved token, so `goal commit` asks for a passing
+review. The repeated discard and the diff both print `no staged changes`.
+The goal is still completed, and its audit lists both staging decisions.
+The file is still named `draft.txt` and contains `hello`. Discard also works
+after a review reports `conflict` or `postcondition failed`.
+
 ### Inspect rename staging decisions
 
 `goal audit --renames` shows the last four staging decisions for the current
@@ -1411,6 +1452,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 71 `goal_grant_file_for_rename` | `a0` goal handle, `a1` owner's file handle | 0 when the ready goal receives the grant, or -1 on rejection |
 | 72 `agent_stage_rename` | `a0` granted file handle, `a1` new basename address, `a2` length (1–64 bytes) | 0 when the calling agent stages the rename, or -1 on rejection |
 | 73 `goal_rename_audit` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes | Retained staging decision count (0–4), with overwritten count in `a1`, or -1 on failure |
+| 74 `goal_discard` | `a0` goal handle | 0 when a pending rename was discarded, 1 when the diff was already empty, or -1 for an invalid caller or goal |
 
 Calls 66 and 67 are restricted to the goal owner. Call 66 requires a linked
 writable RamFS file and an empty staging slot. It rejects an occupied name,
@@ -1464,6 +1506,13 @@ helper requires a delegable grant. Call 72 verifies that the caller is the
 goal's live agent and that its open descriptor carries this goal's rename
 permission. It uses the same slot, basename checks and publication rules as
 call 66. Only the goal owner can review and commit the proposal.
+
+Call 74 accepts the owner's open goal handle in any goal state. It releases
+the reference held by the pending rename and invalidates its review token.
+The owner can discard a proposal even when its review returned no token.
+The public file and RamFS revision stay intact. The goal retains its lifecycle
+state, file grant, preserved input, budgets and audit history. A ready or
+running goal can stage a replacement under the same rules.
 
 The shell owns the goal and controls its agents. Calls 49, 51, 56 and 64 also
 accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
