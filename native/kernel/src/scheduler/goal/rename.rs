@@ -1,9 +1,9 @@
 use clv_abi::audit::{RenameDenial, RenameRecord};
-use clv_abi::goal::{CommitResult, GoalStatus, ReviewToken};
+use clv_abi::goal::{CommitResult, GoalStatus, PublicationError, RenameReview, ReviewToken};
 use clv_abi::{LaunchParent, PATH_MAX_BYTES};
 
 use super::{Goal, Scheduler};
-use crate::fs::ramfs::{RamFs, StagedRename, TaskFs};
+use crate::fs::ramfs::{PreservedFile, RamFs, StagedRename, TaskFs};
 
 pub(super) struct PendingRename {
     change: StagedRename,
@@ -12,13 +12,26 @@ pub(super) struct PendingRename {
 }
 
 impl PendingRename {
-    fn review(&mut self, next_handle: &mut usize) -> Option<ReviewToken> {
-        if self.token.is_none() {
-            let token = ReviewToken::new(*next_handle)?;
-            *next_handle = token.get().checked_add(1)?;
-            self.token = Some(token);
+    fn review(
+        &mut self,
+        fs: &RamFs,
+        preserved_file: Option<&PreservedFile>,
+        next_handle: &mut usize,
+    ) -> Result<ReviewToken, PublicationError> {
+        if let Err(reason) = self.change.check(fs, preserved_file) {
+            self.token = None;
+            return Err(reason);
         }
-        self.token
+        if let Some(token) = self.token {
+            return Ok(token);
+        }
+        let token = ReviewToken::new(*next_handle).ok_or(PublicationError::Unavailable)?;
+        *next_handle = token
+            .get()
+            .checked_add(1)
+            .ok_or(PublicationError::Unavailable)?;
+        self.token = Some(token);
+        Ok(token)
     }
 }
 
@@ -120,24 +133,29 @@ impl Scheduler {
         &mut self,
         handle: usize,
         review: bool,
+        fs: &RamFs,
         deliver: impl FnOnce(&[u8]) -> bool,
-    ) -> Option<(usize, usize, Option<ReviewToken>)> {
+    ) -> Option<(usize, usize, RenameReview)> {
         let goal = self.shell_goal(handle)?;
-        let can_issue = review && matches!(goal.status(), GoalStatus::Completed { .. });
-        let Some(pending) = &mut self.goal.as_mut()?.rename else {
-            return deliver(&[]).then_some((0, 0, None));
+        let can_review = review && matches!(goal.status(), GoalStatus::Completed { .. });
+        let goal = self.goal.as_mut()?;
+        let Some(pending) = &mut goal.rename else {
+            return deliver(&[]).then_some((0, 0, RenameReview::Preview));
         };
         let (names, source_len) = pending.change.diff();
         let count = names.len();
         if !deliver(names) {
             return None;
         }
-        let token = if can_issue {
-            pending.review(&mut self.next_handle)
+        let result = if can_review {
+            match pending.review(fs, goal.preserved_file.as_ref(), &mut self.next_handle) {
+                Ok(token) => RenameReview::Ready(token),
+                Err(reason) => RenameReview::Blocked(reason),
+            }
         } else {
-            None
+            RenameReview::Preview
         };
-        Some((count, source_len, token))
+        Some((count, source_len, result))
     }
 
     pub(crate) fn commit_goal(
@@ -155,10 +173,14 @@ impl Scheduler {
             return None;
         }
         pending.token = None;
-        let result = pending.change.publish(fs, goal.preserved_file.as_ref())?;
-        if result == CommitResult::Committed {
-            goal.release_transaction(fs);
+        match pending.change.publish(fs, goal.preserved_file.as_ref()) {
+            Ok(()) => {
+                goal.release_transaction(fs);
+                Some(CommitResult::Committed)
+            }
+            Err(PublicationError::Conflict) => Some(CommitResult::Conflict),
+            Err(PublicationError::PostconditionFailed) => Some(CommitResult::PostconditionFailed),
+            Err(PublicationError::Unavailable) => None,
         }
-        Some(result)
     }
 }

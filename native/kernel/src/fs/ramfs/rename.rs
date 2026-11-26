@@ -1,5 +1,5 @@
 use clv_abi::audit::RenameDenial;
-use clv_abi::goal::{CommitResult, RENAME_DIFF_MAX_BYTES};
+use clv_abi::goal::{PublicationError, RENAME_DIFF_MAX_BYTES};
 
 use super::{
     CWD_PATH_CAPACITY, DirectoryId, NAME_LIMIT, Name, Node, RamFs, Revision,
@@ -58,28 +58,54 @@ impl StagedRename {
         fs.release(Node::WritableFile(self.file_index));
     }
 
-    pub(crate) fn publish(
+    fn checked_target(
         &self,
-        fs: &mut RamFs,
+        fs: &RamFs,
         preserved_file: Option<&PreservedFile>,
-    ) -> Option<CommitResult> {
+    ) -> Result<(Name, Revision), PublicationError> {
         let (names, split) = self.diff();
         let (path, new_name) = names.split_at(split);
-        let old_name = path.rsplit(|&byte| byte == b'/').next()?;
+        let old_name = path
+            .rsplit(|&byte| byte == b'/')
+            .next()
+            .ok_or(PublicationError::Unavailable)?;
         if fs.revision != self.base
             || fs.lookup(self.parent, old_name) != Some(Node::WritableFile(self.file_index))
             || fs.lookup(self.parent, new_name).is_some()
         {
-            return Some(CommitResult::Conflict);
+            return Err(PublicationError::Conflict);
         }
-        let name = Name::new(new_name)?;
-        let file = fs.writable[self.file_index].as_mut()?;
+        let file = fs.writable[self.file_index]
+            .as_ref()
+            .ok_or(PublicationError::Unavailable)?;
         if preserved_file.is_some_and(|input| !input.matches(self.file_index, file)) {
-            return Some(CommitResult::PostconditionFailed);
+            return Err(PublicationError::PostconditionFailed);
         }
-        fs.revision.advance()?;
+        let name = Name::new(new_name).ok_or(PublicationError::Unavailable)?;
+        let revision = fs.revision.next().ok_or(PublicationError::Unavailable)?;
+        Ok((name, revision))
+    }
+
+    pub(crate) fn check(
+        &self,
+        fs: &RamFs,
+        preserved_file: Option<&PreservedFile>,
+    ) -> Result<(), PublicationError> {
+        self.checked_target(fs, preserved_file).map(|_| ())
+    }
+
+    pub(crate) fn publish(
+        &self,
+        fs: &mut RamFs,
+        preserved_file: Option<&PreservedFile>,
+    ) -> Result<(), PublicationError> {
+        let (name, revision) = self.checked_target(fs, preserved_file)?;
+        let file = fs.writable[self.file_index]
+            .as_mut()
+            .ok_or(PublicationError::Unavailable)?;
         file.name = name;
-        Some(CommitResult::Committed)
+        fs.revision = revision;
+        Ok(())
     }
 }
 

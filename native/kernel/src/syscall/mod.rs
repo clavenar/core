@@ -176,13 +176,13 @@ pub(crate) fn dispatch(
             .stage_agent_rename(fs, a0, a2, |name| stack.copy_from_user(a1, name))
             .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_DIFF | SYS_GOAL_REVIEW => scheduler
-            .read_goal_diff(a0, number == SYS_GOAL_REVIEW, |names| {
+            .read_goal_diff(a0, number == SYS_GOAL_REVIEW, fs, |names| {
                 stack.copy_to_user(names, a1, a2)
             })
-            .map_or(SYSCALL_ERROR, |(count, source_len, token)| {
+            .map_or(SYSCALL_ERROR, |(count, source_len, review)| {
                 frame.registers[REG_A1] = source_len;
                 if number == SYS_GOAL_REVIEW {
-                    frame.registers[REG_A2] = token.map_or(0, ReviewToken::get);
+                    (frame.registers[REG_A2], frame.registers[REG_A3]) = review.registers();
                 }
                 count
             }),

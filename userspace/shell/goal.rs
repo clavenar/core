@@ -3,8 +3,8 @@ mod options;
 
 use super::command::{GoalFlag, Subcommand};
 use clv::goal::{
-    self, CancelResult, CloseResult, CommitResult, FileRecipient, GoalStatus, ReplyBudget,
-    ReviewToken,
+    self, CancelResult, CloseResult, CommitResult, FileRecipient, GoalStatus, PublicationError,
+    RenameReview, ReplyBudget, ReviewToken,
 };
 use clv::{agent, fs, print};
 use clv_abi::agent::{NO_DEFINITION, SHA256_BYTES};
@@ -196,11 +196,22 @@ fn stage_rename(goal: Option<usize>, arguments: &[u8]) {
 fn show_diff(goal: &mut CurrentGoal) {
     let mut buffer = [0; clv_abi::goal::RENAME_DIFF_MAX_BYTES];
     goal.review = None;
-    match goal::review(goal.handle, &mut buffer) {
+    match goal::review_with_status(goal.handle, &mut buffer) {
         Some((goal::GoalDiff::Empty, _)) => print(b"no staged changes\r\n"),
-        Some((goal::GoalDiff::Rename { source, new_name }, token)) => {
-            goal.review = token;
-            print_line(&[b"rename ", source, b" -> ", new_name])
+        Some((goal::GoalDiff::Rename { source, new_name }, review)) => {
+            print_line(&[b"rename ", source, b" -> ", new_name]);
+            print(match review {
+                RenameReview::Preview => b"preview only\r\n",
+                RenameReview::Ready(token) => {
+                    goal.review = Some(token);
+                    b"ready to commit\r\n"
+                }
+                RenameReview::Blocked(PublicationError::Conflict) => b"conflict\r\n",
+                RenameReview::Blocked(PublicationError::PostconditionFailed) => {
+                    b"postcondition failed\r\n"
+                }
+                RenameReview::Blocked(PublicationError::Unavailable) => b"review unavailable\r\n",
+            });
         }
         None => print(b"cannot read goal diff\r\n"),
     }
@@ -208,7 +219,7 @@ fn show_diff(goal: &mut CurrentGoal) {
 
 fn commit(goal: &mut CurrentGoal) {
     let Some(token) = goal.review.take() else {
-        return print(b"run goal diff after completion\r\n");
+        return print(b"goal commit requires a passing goal diff after completion\r\n");
     };
     print(match goal::commit(goal.handle, token) {
         Some(CommitResult::Committed) => b"rename committed\r\n",

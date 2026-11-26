@@ -6,7 +6,7 @@ use clv_abi::audit::{
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
     CancelResult, CloseResult, CommitResult, CreateOptions, FileRecipient, GoalDiff, GoalStatus,
-    ReadLimits, ReviewToken,
+    PublicationError, ReadLimits, RenameReview, ReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -164,17 +164,27 @@ pub fn stage_rename(goal: usize, fd: usize, new_name: &[u8]) -> bool {
 
 /// Reads the pending change into the owner's stack buffer without consuming it.
 pub fn diff(goal: usize, buffer: &mut [u8]) -> Option<GoalDiff<'_>> {
-    read_diff(SYS_GOAL_DIFF, goal, buffer).map(|(diff, _)| diff)
+    read_diff(SYS_GOAL_DIFF, goal, buffer).map(|(diff, _, _)| diff)
 }
 
-/// A completed goal can return a single-use commit token along with its diff.
+/// A passing review of a completed goal returns a single-use commit token.
 pub fn review(goal: usize, buffer: &mut [u8]) -> Option<(GoalDiff<'_>, Option<ReviewToken>)> {
-    let (diff, token) = read_diff(SYS_GOAL_REVIEW, goal, buffer)?;
+    let (diff, token, _) = read_diff(SYS_GOAL_REVIEW, goal, buffer)?;
     Some((diff, ReviewToken::new(token)))
 }
 
-fn read_diff(number: usize, goal: usize, buffer: &mut [u8]) -> Option<(GoalDiff<'_>, usize)> {
-    let (count, source_len, token, _) = ecall(
+/// Returns the frozen diff alongside the kernel's decision on issuing a commit token.
+pub fn review_with_status(goal: usize, buffer: &mut [u8]) -> Option<(GoalDiff<'_>, RenameReview)> {
+    let (diff, token, status) = read_diff(SYS_GOAL_REVIEW, goal, buffer)?;
+    Some((diff, RenameReview::from_registers(token, status)?))
+}
+
+fn read_diff(
+    number: usize,
+    goal: usize,
+    buffer: &mut [u8],
+) -> Option<(GoalDiff<'_>, usize, usize)> {
+    let (count, source_len, token, status) = ecall(
         number,
         goal,
         buffer.as_mut_ptr().expose_provenance(),
@@ -188,7 +198,7 @@ fn read_diff(number: usize, goal: usize, buffer: &mut [u8]) -> Option<(GoalDiff<
         ([], _) | (_, []) => return None,
         (source, new_name) => GoalDiff::Rename { source, new_name },
     };
-    Some((diff, token))
+    Some((diff, token, status))
 }
 
 pub fn commit(goal: usize, token: ReviewToken) -> Option<CommitResult> {

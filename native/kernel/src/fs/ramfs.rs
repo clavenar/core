@@ -111,8 +111,12 @@ impl WritableFile {
 struct Revision(u64);
 
 impl Revision {
+    fn next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+
     fn advance(&mut self) -> Option<()> {
-        self.0 = self.0.checked_add(1)?;
+        *self = self.next()?;
         Some(())
     }
 }

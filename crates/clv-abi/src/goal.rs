@@ -7,8 +7,47 @@ pub const MAX_CHILDREN: usize = 3;
 /// Maximum combined byte length of a canonical source path and a destination basename.
 pub const RENAME_DIFF_MAX_BYTES: usize = 512;
 
-/// A boot-local handle for one reviewed change. Zero denotes a preview without a token.
+/// A boot-local handle for one reviewed change. Zero denotes the absence of a token.
 pub type ReviewToken = core::num::NonZeroUsize;
+
+/// Failures encountered while reviewing or publishing a rename.
+/// The discriminants are the blocked review statuses in a3 of call 68.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum PublicationError {
+    Conflict = 2,
+    PostconditionFailed = 3,
+    Unavailable = 4,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RenameReview {
+    Preview,
+    Ready(ReviewToken),
+    Blocked(PublicationError),
+}
+
+impl RenameReview {
+    /// Call 68 returns the token in a2 and the review status in a3.
+    pub const fn registers(self) -> (usize, usize) {
+        match self {
+            Self::Preview => (0, 0),
+            Self::Ready(token) => (token.get(), 1),
+            Self::Blocked(reason) => (0, reason as usize),
+        }
+    }
+
+    pub const fn from_registers(token: usize, status: usize) -> Option<Self> {
+        Some(match (ReviewToken::new(token), status) {
+            (None, 0) => Self::Preview,
+            (Some(token), 1) => Self::Ready(token),
+            (None, 2) => Self::Blocked(PublicationError::Conflict),
+            (None, 3) => Self::Blocked(PublicationError::PostconditionFailed),
+            (None, 4) => Self::Blocked(PublicationError::Unavailable),
+            _ => return None,
+        })
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]

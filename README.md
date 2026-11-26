@@ -864,8 +864,9 @@ goal close
 ```
 
 The first attempt reports `cannot stage rename`, and the first diff says
-`no staged changes`. The second diff prints `rename /work/draft.txt -> final.txt`.
-You can read it repeatedly. The public directory still lists only `draft.txt`.
+`no staged changes`. The second diff prints `rename /work/draft.txt -> final.txt`
+and `preview only` while the goal is ready. You can read it repeatedly.
+The public directory still lists only `draft.txt`.
 After cancellation the diff is empty and `cat` prints `hello`.
 
 Staging retains the original file and records both names at that moment.
@@ -877,8 +878,9 @@ successfully, or exiting the owner releases the pending change.
 ### Publish a reviewed RamFS rename
 
 After a goal completes successfully, run `goal diff` to review the staged
-rename. The shell saves the token returned with that diff. Entering
-`goal commit` authorizes that exact rename. At a fresh QEMU prompt, use
+rename. When RamFS validates the change, the shell prints `ready to commit`
+and saves its single-use token. Entering `goal commit` authorizes that exact
+rename and checks it again. At a fresh QEMU prompt, use
 `echo` to bring the goal to a successful completion.
 
 ```text
@@ -896,10 +898,10 @@ goal diff
 goal close
 ```
 
-The first diff prints `rename /work/draft.txt -> final.txt`. Commit reports
-`rename committed`. The directory now lists only `final.txt`, its contents
-are still `hello`, and the final diff says `no staged changes`. Open handles
-to the file keep their cursors and access rights.
+The first diff prints `rename /work/draft.txt -> final.txt` and `ready to commit`.
+Commit reports `rename committed`. The directory now lists only `final.txt`.
+Its contents are still `hello`, and the final diff says `no staged changes`.
+Open handles to the file keep their cursors and access rights.
 
 To see a conflict, reboot and repeat through the first `goal diff`. Then run
 
@@ -938,15 +940,20 @@ cat /work/final.txt
 goal close
 ```
 
-The commit prints `rename committed`, the directory lists `final.txt`, and
-`cat` prints `hello`. To see the two rejection cases, start each run from a
-fresh boot. Insert `write /work/draft.txt revised` at the point below. After
-`goal commit`, use `cat /work/draft.txt` to inspect the result.
+To verify each outcome, start the sequence above from a fresh boot. Insert
+`write /work/draft.txt revised` at the indicated point. For the three runs
+with an extra write, use `cat /work/draft.txt` after `ls /work`.
 
-| When the extra write runs | Commit result | Public file |
-| --- | --- | --- |
-| Between `goal create` and `goal stage-rename` | `postcondition failed` | `draft.txt` contains `revised` |
-| Between `goal diff` and `goal commit` | `commit conflict` | `draft.txt` contains `revised` |
+| When the extra write runs | `goal diff` | `goal commit` | Public file |
+| --- | --- | --- | --- |
+| No extra write | `ready to commit` | `rename committed` | `final.txt` contains `hello` |
+| Between `goal create` and `goal stage-rename` | `postcondition failed` | Requires a passing review | `draft.txt` contains `revised` |
+| Between `wait echo` and `goal diff` | `conflict` | Requires a passing review | `draft.txt` contains `revised` |
+| Between `goal diff` and `goal commit` | `ready to commit` | `commit conflict` | `draft.txt` contains `revised` |
+
+A rejected review still prints the frozen source and destination. It clears
+any earlier token. Repeating `goal diff` after a commit conflict shows that
+same rename and reports `conflict`.
 
 Replacing the input with a new file of identical contents before staging
 also fails the postcondition. The option can be combined with the existing
@@ -1398,7 +1405,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 65 `goal_audit_with_tool` | Same arguments as call 52 | Retained delegation count and overwritten count as in call 59, with 104 bytes per entry |
 | 66 `goal_stage_rename` | `a0` goal handle, `a1` owner's file handle, `a2` new basename address, `a3` length (1–64 bytes) | 0 when staged, or -1 on rejection |
 | 67 `goal_diff` | `a0` goal handle, `a1` stack destination, `a2` capacity in bytes | Total bytes copied in `a0`, source path length in `a1`. An empty diff returns zero in both registers. Failure returns -1 in `a0`. |
-| 68 `goal_review` | Same arguments as call 67 | Same diff and lengths as call 67, with a review token in `a2` or zero for a preview |
+| 68 `goal_review` | Same arguments as call 67 | Same diff and lengths as call 67, with a token or zero in `a2` and review status in `a3` |
 | 69 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, 2 on a failed file postcondition, or -1 for an invalid caller, goal, token, or unavailable revision |
 | 70 `goal_create_preserving_file` | `a0` owner's file handle, `a1` stack address of the six call 48 argument words in order (little-endian RV64), `a2` length in bytes (48) | Fresh goal handle, or -1 on rejection |
 | 71 `goal_grant_file_for_rename` | `a0` goal handle, `a1` owner's file handle | 0 when the ready goal receives the grant, or -1 on rejection |
@@ -1414,21 +1421,31 @@ A stack buffer of `RENAME_DIFF_MAX_BYTES` suffices for any diff. An empty
 diff also accepts zero capacity. A short buffer or an invalid nonempty
 destination range fails before copying any bytes.
 
-Call 68 can issue a token only to the owning shell, after the complete diff
-has been copied for a successfully completed goal. An empty diff, another
-goal state or an exhausted handle counter yields a preview. Repeated reviews
-of the same change return the outstanding token. Use call 67 for a read-only
-preview. Cancellation, successful close and owner exit discard both the
-proposal and any token.
+Call 68 copies the frozen diff to the owning shell. Once the goal has
+completed successfully and the full diff has been delivered, RamFS checks
+the original revision, source identity at its original name, and vacant
+destination. For a goal created with call 70, RamFS also compares the source's
+identity, length and contents with the saved input. A conflict takes precedence
+over a failed postcondition.
+
+| Status in `a3` | Meaning | Token in `a2` |
+| --- | --- | --- |
+| 0 | Preview for an empty diff or a ready, running, failed or cancelled goal. | 0 |
+| 1 | Ready to commit. The checks passed. | Nonzero, single-use |
+| 2 | Conflict. The base revision, original source or destination has changed. | 0 |
+| 3 | Postcondition failed. The staged file differs from the preserved input. | 0 |
+| 4 | Review unavailable. The kernel cannot prepare publication or allocate a token. | 0 |
+
+Repeated passing reviews return the same outstanding token. A rejected review
+clears that token and leaves the frozen diff available. A failed copy returns
+-1 before checking the change or altering its token. Call 67 reads the diff
+without changing review state. Cancellation, successful close and owner exit
+discard both the proposal and any token.
 
 Call 69 checks the caller, goal state and token. It consumes a matching token
-and checks the original RamFS revision, retained source at its original name,
-and vacant destination in one syscall. For a goal created with call 70,
-RamFS then compares the staged source's identity, length and contents with
-the saved input. A conflict takes precedence over a failed postcondition.
-Either rejection preserves the public files and staged diff. Reviewing it
-again uses the original base and input. Success updates only the file's name,
-advances the revision and clears the diff.
+and repeats the RamFS checks in the same syscall that publishes the rename.
+A rejection preserves the public files and staged diff. Success updates only
+the file's name, advances the revision and clears the diff.
 Public file and directory creation or removal, truncating opens, nonempty
 writes to linked files and publication advance the revision. A mutation
 requiring a new revision fails if the counter is exhausted.
