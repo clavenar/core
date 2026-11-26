@@ -1,7 +1,7 @@
 use clv_abi::audit::{
-    AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, EncodedReadRecordWithLimit,
-    EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, ReadRecord,
-    ReadRecordWithLimit, ReplyRecord,
+    AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, EncodedPublicationRecord,
+    EncodedReadRecordWithLimit, EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord,
+    ReadRecord, ReadRecordWithLimit, ReplyRecord,
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
@@ -16,10 +16,10 @@ use clv_abi::{
     SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE, SYS_GOAL_CREATE_WITH_OPTIONS,
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_DISCARD,
     SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
-    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT,
-    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW,
-    SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
+    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_PUBLICATION_AUDIT,
+    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_RENAME_AUDIT,
+    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -213,15 +213,7 @@ fn read_diff(
 }
 
 pub fn commit(goal: usize, token: ReviewToken) -> Option<CommitResult> {
-    match syscall(SYS_GOAL_COMMIT, goal, token.get(), 0) {
-        n if n == CommitResult::Committed as usize => Some(CommitResult::Committed),
-        n if n == CommitResult::Conflict as usize => Some(CommitResult::Conflict),
-        n if n == CommitResult::PostconditionFailed as usize => {
-            Some(CommitResult::PostconditionFailed)
-        }
-        n if n == CommitResult::ReviewExpired as usize => Some(CommitResult::ReviewExpired),
-        _ => None,
-    }
+    CommitResult::from_register(syscall(SYS_GOAL_COMMIT, goal, token.get(), 0))
 }
 
 /// Lets the owner discard the goal's pending rename and invalidate its review token.
@@ -289,6 +281,24 @@ pub fn rename_audit_rows(
 ) -> Option<(&[EncodedRenameRecord], usize)> {
     let (rows, overwritten, _) = audit_rows(SYS_GOAL_RENAME_AUDIT, goal, records)?;
     Some((rows, overwritten))
+}
+
+/// Copies one row (index zero is oldest) and returns the retained and overwritten counts.
+/// Index zero also succeeds for an empty history, leaving the buffer untouched.
+pub fn publication_audit_row(
+    goal: usize,
+    index: usize,
+    record: &mut EncodedPublicationRecord,
+) -> Option<(usize, usize)> {
+    let (count, overwritten, _, _) = ecall(
+        SYS_GOAL_PUBLICATION_AUDIT,
+        goal,
+        record.as_mut_ptr().expose_provenance(),
+        size_of_val(record),
+        index,
+        0,
+    );
+    (count <= AUDIT_CAPACITY).then_some((count, overwritten))
 }
 
 /// Returns the retained RamFS read decisions and the total bytes delivered over the goal's lifetime.

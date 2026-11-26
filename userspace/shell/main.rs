@@ -154,21 +154,56 @@ fn print_handle(label: &[u8], handle: usize) {
     print_line(&[label, &hex(handle)]);
 }
 
-// Short status lines fit in one console call. Extended audit lines can exceed 128 bytes.
-fn print_line(parts: &[&[u8]]) {
-    let mut line = [0; 128];
-    let mut len = 0;
-    for &byte in parts.iter().flat_map(|part| part.iter()).chain(b"\r\n") {
-        line[len] = byte;
-        len += 1;
-        if len == line.len() {
-            clv::write_console(&line);
-            len = 0;
+// Buffer short lines in one console call and stream long, escaped audit fields.
+struct ConsoleLine {
+    buffer: [u8; 128],
+    len: usize,
+}
+
+impl ConsoleLine {
+    fn new() -> Self {
+        Self {
+            buffer: [0; 128],
+            len: 0,
         }
     }
-    if len > 0 {
-        clv::write_console(&line[..len]);
+
+    fn push(&mut self, byte: u8) {
+        self.buffer[self.len] = byte;
+        self.len += 1;
+        if self.len == self.buffer.len() {
+            clv::write_console(&self.buffer);
+            self.len = 0;
+        }
     }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.push(byte);
+        }
+    }
+
+    fn quoted(&mut self, bytes: &[u8]) {
+        self.push(b'"');
+        for byte in bytes.escape_ascii() {
+            self.push(byte);
+        }
+        self.push(b'"');
+    }
+
+    fn finish(&mut self, parts: &[&[u8]]) {
+        for part in parts {
+            self.write(part);
+        }
+        self.write(b"\r\n");
+        if self.len > 0 {
+            clv::write_console(&self.buffer[..self.len]);
+        }
+    }
+}
+
+fn print_line(parts: &[&[u8]]) {
+    ConsoleLine::new().finish(parts);
 }
 
 #[panic_handler]

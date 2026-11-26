@@ -1,4 +1,4 @@
-use clv_abi::audit::{RenameDenial, RenameRecord};
+use clv_abi::audit::{PublicationOutcome, RenameDenial, RenameRecord};
 use clv_abi::goal::{
     CommitResult, DiscardResult, GoalStatus, PublicationError, ReviewToken, TimedRenameReview,
     TimedReviewToken,
@@ -194,7 +194,15 @@ impl Scheduler {
         fs: &mut RamFs,
     ) -> Option<DiscardResult> {
         self.shell_goal(handle)?;
-        Some(self.goal.as_mut()?.discard_rename(fs))
+        let goal = self.goal.as_mut()?;
+        if let Some(pending) = &goal.rename {
+            goal.publication_audit.record(
+                pending
+                    .change
+                    .publication_record(fs, PublicationOutcome::Discarded),
+            );
+        }
+        Some(goal.discard_rename(fs))
     }
 
     pub(crate) fn commit_goal(
@@ -211,17 +219,24 @@ impl Scheduler {
         let review = pending
             .review_token
             .take_if(|review| review.token == token)?;
-        if !review_is_live(review, monotonic_nanos()) {
-            return Some(CommitResult::ReviewExpired);
-        }
-        match pending.change.publish(fs, goal.preserved_file.as_ref()) {
-            Ok(()) => {
-                goal.release_transaction(fs);
-                Some(CommitResult::Committed)
+        let result = if review_is_live(review, monotonic_nanos()) {
+            match pending.change.publish(fs, goal.preserved_file.as_ref()) {
+                Ok(()) => Some(CommitResult::Committed),
+                Err(PublicationError::Conflict) => Some(CommitResult::Conflict),
+                Err(PublicationError::PostconditionFailed) => {
+                    Some(CommitResult::PostconditionFailed)
+                }
+                Err(PublicationError::Unavailable) => None,
             }
-            Err(PublicationError::Conflict) => Some(CommitResult::Conflict),
-            Err(PublicationError::PostconditionFailed) => Some(CommitResult::PostconditionFailed),
-            Err(PublicationError::Unavailable) => None,
+        } else {
+            Some(CommitResult::ReviewExpired)
+        };
+        let outcome = result.map_or(PublicationOutcome::Unavailable, PublicationOutcome::Commit);
+        goal.publication_audit
+            .record(pending.change.publication_record(fs, outcome));
+        if result == Some(CommitResult::Committed) {
+            goal.release_transaction(fs);
         }
+        result
     }
 }

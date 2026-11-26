@@ -80,7 +80,7 @@ entries! {
         "goal budget" => "Show the reply-byte balance",
     },
     Audit {
-        "goal audit [--replies | --reads | --renames]" =>
+        "goal audit [--replies | --reads | --renames | --publication]" =>
             "Show audit records (default is delegations)",
     },
     GoalEnd {

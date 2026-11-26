@@ -57,8 +57,8 @@ build, shell and kernel use that registry for names and stable launch
 selectors. A versioned file tool maps an exact tool ID to one of those
 programs. [Program registry](crates/clv-abi/src/program.rs) · [File tool registry](crates/clv-abi/src/tool.rs)
 The loader accepts static, little-endian ELF64 executables with one
-read/execute segment of at most 24 KiB at `0x00400000`. The loader allocates
-one to six pages based on the segment's memory size (`p_memsz`) and zero-fills
+read/execute segment of at most 28 KiB at `0x00400000`. The loader allocates
+one to seven pages based on the segment's memory size (`p_memsz`) and zero-fills
 any bytes beyond the file data. Boot reports each program's validated entry
 address. If loading fails, it prints `User ELF load failed` with the program
 name and idles.
@@ -71,7 +71,7 @@ read/write, non-executable stack. It starts at `0x00402000` for one- and
 two-page images and immediately after the image for larger programs. The
 initial stack pointer is at the top of that page. Nonempty syscall buffers
 must fit within the calling task's stack. The kernel and UART mappings are
-shared in supervisor mode. The kernel, 48 KiB supervisor stack, and 39-frame
+shared in supervisor mode. The kernel, 48 KiB supervisor stack, and 47-frame
 boot pool fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
@@ -1138,6 +1138,57 @@ the diff, and both audit reads show the same `staged` decision. The public
 file still contains `hello`. A successful `goal commit` also keeps the staging
 history available until the owner closes the goal.
 
+### Inspect rename publication decisions
+
+`goal audit --publication` shows the current goal's last four commit decisions
+and explicit discards, oldest first. Each row gives the absolute source path
+and destination basename captured at staging. `base` is the RamFS revision at
+staging. `revision` is the public revision when the kernel made the decision.
+Only the owner can read the history. Closing the goal releases it.
+
+At a fresh QEMU prompt, edit the source after reviewing its rename.
+
+```text
+write /draft.txt hello
+goal create --preserve-file /draft.txt
+goal stage-rename /draft.txt final.txt
+goal run echo
+wait echo
+goal diff
+write /draft.txt revised
+goal commit
+goal discard
+goal audit --publication
+cat /draft.txt
+goal close
+```
+
+The commit reports `commit conflict`, and `cat` prints `revised`. The audit
+shows two decisions for the same proposal.
+
+```text
+source="/draft.txt" new_name="final.txt" base=2 revision=4 outcome=conflict
+source="/draft.txt" new_name="final.txt" base=2 revision=4 outcome=discarded
+```
+
+In the same boot, stage the rename against the edited file in a fresh goal.
+
+```text
+goal create --preserve-file /draft.txt
+goal stage-rename /draft.txt final.txt
+goal run echo
+wait echo
+goal diff
+goal commit
+goal audit --publication
+cat /final.txt
+goal close
+```
+
+The new goal shows one row with `base=4 revision=5 outcome=published`, and
+`final.txt` contains `revised`. To see `outcome=review-expired`, leave QEMU
+running for at least 61 seconds between `goal diff` and `goal commit`.
+
 ### Share a read allowance across two helper launches
 
 Two different helper programs can run at the same time. Each program has
@@ -1509,6 +1560,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 73 `goal_rename_audit` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes | Retained staging decision count (0–4), with overwritten count in `a1`, or -1 on failure |
 | 74 `goal_discard` | `a0` goal handle | 0 when a pending rename was discarded, 1 when the diff was already empty, or -1 for an invalid caller or goal |
 | 75 `goal_review_with_deadline` | Same arguments as call 68 | Same diff, lengths and token. With a nonzero token, `a3` holds the absolute guest deadline in nanoseconds. With a zero token, `a3` holds the call 68 review status. |
+| 76 `goal_publication_audit` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` zero-based row index (oldest first) | Retained decision count (0–4) in `a0` and overwritten count in `a1`, or -1 on failure |
 
 Calls 66 and 67 are restricted to the goal owner. Call 66 requires a linked
 writable RamFS file and an empty staging slot. It rejects an occupied name,
@@ -1782,6 +1834,34 @@ input, checks the goal state and staging slot, then resolves the file
 descriptor and validates the source and destination. A failed launch or
 shell path open ends before a staging call. Revocation, cancellation and
 publication preserve earlier decisions. Closing the goal releases its history.
+
+Call 76 reads the decisions made by call 69 with a matching review token and
+by call 74 when it discards a pending rename. Previews, reviews, invalid or
+replayed tokens, empty discards and automatic cleanup leave this history
+untouched. The fifth decision replaces the oldest row and increments the
+overwritten count, which saturates at the largest RV64 unsigned value.
+
+Each 552-byte row starts with five little-endian 64-bit words giving the
+outcome, base revision, observed revision, source path length and destination
+basename length. The remaining 512 bytes contain the two frozen names back to
+back, followed by zero padding. The shell quotes both names and escapes their
+bytes. A published rename advances the revision by one.
+
+| Outcome code | Shell output |
+| --- | --- |
+| 0 | `published` |
+| 1 | `conflict` |
+| 2 | `postcondition-failed` |
+| 3 | `review-expired` |
+| 4 | `unavailable` |
+| 5 | `discarded` |
+
+The owner can reuse a single stack buffer to read indices zero through
+`count - 1`. Only the owner can cause a publication decision, so consecutive
+reads see the same history until the owner commits, discards or closes the
+goal. Index zero on an empty history returns zero and accepts zero capacity.
+An invalid index, a short buffer for a retained row, or an invalid destination
+range fails before copying any bytes.
 
 Calls 52, 53, 57, 59, 61, 65 and 73 each copy up to four retained entries, oldest
 first. A short buffer or an invalid destination range returns -1 before copying

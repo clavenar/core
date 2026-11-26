@@ -1,6 +1,8 @@
 //! Wire formats for the goal owner's delegation, reply and RamFS histories.
 
+mod publication;
 mod rename;
+pub use publication::{EncodedPublicationRecord, PublicationOutcome, PublicationRecord};
 pub use rename::{EncodedRenameRecord, RenameDenial, RenameRecord};
 
 use crate::agent::SHA256_BYTES;

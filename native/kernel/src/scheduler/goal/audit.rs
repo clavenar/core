@@ -3,11 +3,20 @@ use clv_abi::audit::AUDIT_CAPACITY;
 use super::DelegationAudit;
 use crate::scheduler::Scheduler;
 
-#[derive(Default)]
 pub(super) struct AuditHistory<Record> {
     entries: [Record; AUDIT_CAPACITY],
     len: usize,
     overwritten: usize,
+}
+
+impl<const WORDS: usize> Default for AuditHistory<[[u8; 8]; WORDS]> {
+    fn default() -> Self {
+        Self {
+            entries: [[[0; 8]; WORDS]; AUDIT_CAPACITY],
+            len: 0,
+            overwritten: 0,
+        }
+    }
 }
 
 impl<const WORDS: usize> AuditHistory<[[u8; 8]; WORDS]> {
@@ -71,5 +80,20 @@ impl Scheduler {
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize)> {
         self.shell_goal(handle)?.rename_audit.read(copy)
+    }
+
+    pub(crate) fn goal_publication_audit(
+        &self,
+        handle: usize,
+        index: usize,
+        copy: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<(usize, usize)> {
+        let history = &self.shell_goal(handle)?.publication_audit;
+        let bytes = if index == 0 && history.len == 0 {
+            &[][..]
+        } else {
+            history.entries[..history.len].get(index)?.as_flattened()
+        };
+        copy(bytes).then_some((history.len, history.overwritten))
     }
 }

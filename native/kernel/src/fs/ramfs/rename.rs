@@ -1,4 +1,6 @@
-use clv_abi::audit::RenameDenial;
+use clv_abi::audit::{
+    EncodedPublicationRecord, PublicationOutcome, PublicationRecord, RenameDenial,
+};
 use clv_abi::goal::{PublicationError, RENAME_DIFF_MAX_BYTES};
 
 use super::{
@@ -52,6 +54,24 @@ impl StagedRename {
     pub(crate) fn diff(&self) -> (&[u8], usize) {
         let length = self.source_len + self.new_name_len;
         (&self.names[self.names.len() - length..], self.source_len)
+    }
+
+    pub(crate) fn publication_record(
+        &self,
+        fs: &RamFs,
+        outcome: PublicationOutcome,
+    ) -> EncodedPublicationRecord {
+        let (names, split) = self.diff();
+        let (source, new_name) = names.split_at(split);
+        PublicationRecord {
+            outcome,
+            base_revision: self.base.0,
+            revision: fs.revision.0,
+            source,
+            new_name,
+        }
+        .encode()
+        .expect("a staged RamFS rename and its decision fit the audit record")
     }
 
     pub(crate) fn discard(self, fs: &mut RamFs) {

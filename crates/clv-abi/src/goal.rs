@@ -101,6 +101,18 @@ pub enum CommitResult {
     ReviewExpired = 3,
 }
 
+impl CommitResult {
+    pub const fn from_register(value: usize) -> Option<Self> {
+        Some(match value {
+            0 => Self::Committed,
+            1 => Self::Conflict,
+            2 => Self::PostconditionFailed,
+            3 => Self::ReviewExpired,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum DiscardResult {

@@ -1,11 +1,12 @@
-use crate::help::Entry;
+use crate::{ConsoleLine, help::Entry};
 use clv::goal;
 use clv_abi::audit::{
-    AUDIT_CAPACITY, DelegationDenial, DelegationRecordWithTool, ReadLimitScope,
-    ReadRecordWithLimit, RenameDenial, RenameRecord, ReplyRecord,
+    AUDIT_CAPACITY, DelegationDenial, DelegationRecordWithTool, PublicationOutcome,
+    PublicationRecord, ReadLimitScope, ReadRecordWithLimit, RenameDenial, RenameRecord,
+    ReplyRecord,
 };
 use clv_abi::tool::FILE_TOOLS;
-use clv_abi::{LaunchParent, PATH_MAX_BYTES, Program};
+use clv_abi::{LaunchParent, Program};
 
 use super::{DIGITS, amount, decimal, hex, hex_digest, print, print_line};
 
@@ -14,6 +15,7 @@ enum View {
     Replies,
     Reads,
     Renames,
+    Publication,
 }
 
 pub(super) fn show(handle: Option<usize>, option: &[u8]) {
@@ -22,6 +24,7 @@ pub(super) fn show(handle: Option<usize>, option: &[u8]) {
         b"--replies" => View::Replies,
         b"--reads" => View::Reads,
         b"--renames" => View::Renames,
+        b"--publication" => View::Publication,
         _ => return Entry::Audit.usage(),
     };
     let Some(handle) = handle else {
@@ -34,6 +37,19 @@ pub(super) fn show(handle: Option<usize>, option: &[u8]) {
 
 fn show_rows(handle: usize, view: View) -> Option<()> {
     match view {
+        View::Publication => {
+            // Only this owner changes publication history. Reuse one row on its 4 KiB stack.
+            let mut record = [[0; 8]; _];
+            let (count, overwritten) = goal::publication_audit_row(handle, 0, &mut record)?;
+            print_header(handle, count, overwritten);
+            for index in 0..count {
+                if index != 0 {
+                    goal::publication_audit_row(handle, index, &mut record)?;
+                }
+                print_publication(PublicationRecord::decode(&record)?);
+            }
+            Some(())
+        }
         View::Renames => {
             let mut records = [Default::default(); AUDIT_CAPACITY];
             let (rows, overwritten) = goal::rename_audit_rows(handle, &mut records)?;
@@ -182,22 +198,42 @@ fn print_rename(entry: RenameRecord<'_>) {
         Err(RenameDenial::GoalInactive) => b" denied=goal-inactive",
         Err(RenameDenial::InvalidBuffer) => b" denied=invalid-buffer",
     };
-    let mut text = [0; 4 * PATH_MAX_BYTES + 2];
-    let name: &[u8] = if let Some(name) = entry.basename {
-        text[0] = b'"';
-        let mut end = 1;
-        for byte in name.escape_ascii() {
-            text[end] = byte;
-            end += 1;
-        }
-        text[end] = b'"';
-        &text[..=end]
+    let mut line = ConsoleLine::new();
+    line.write(b"name=");
+    if let Some(name) = entry.basename {
+        line.quoted(name);
     } else {
-        b"<unavailable>"
-    };
+        line.write(b"<unavailable>");
+    }
     let mut child = [0; 18];
     let (caller, identity) = caller_fields(entry.caller, &mut child);
-    print_line(&[b"name=", name, decision, caller, identity]);
+    line.finish(&[decision, caller, identity]);
+}
+
+fn print_publication(entry: PublicationRecord<'_>) {
+    use goal::CommitResult;
+
+    let outcome: &[u8] = match entry.outcome {
+        PublicationOutcome::Commit(CommitResult::Committed) => b"published",
+        PublicationOutcome::Commit(CommitResult::Conflict) => b"conflict",
+        PublicationOutcome::Commit(CommitResult::PostconditionFailed) => b"postcondition-failed",
+        PublicationOutcome::Commit(CommitResult::ReviewExpired) => b"review-expired",
+        PublicationOutcome::Unavailable => b"unavailable",
+        PublicationOutcome::Discarded => b"discarded",
+    };
+    let mut line = ConsoleLine::new();
+    line.write(b"source=");
+    line.quoted(entry.source);
+    line.write(b" new_name=");
+    line.quoted(entry.new_name);
+    line.finish(&[
+        b" base=",
+        decimal(entry.base_revision as usize, &mut [0; DIGITS]),
+        b" revision=",
+        decimal(entry.revision as usize, &mut [0; DIGITS]),
+        b" outcome=",
+        outcome,
+    ]);
 }
 
 fn print_reply(entry: ReplyRecord) {

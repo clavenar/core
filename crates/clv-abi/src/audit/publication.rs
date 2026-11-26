@@ -1,0 +1,84 @@
+use crate::PATH_MAX_BYTES;
+use crate::goal::{CommitResult, RENAME_DIFF_MAX_BYTES};
+
+/// Decision, base and observed revisions, source and basename lengths, then the frozen diff.
+pub type EncodedPublicationRecord = [[u8; 8]; 5 + RENAME_DIFF_MAX_BYTES.div_ceil(8)];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PublicationOutcome {
+    Commit(CommitResult),
+    Unavailable,
+    Discarded,
+}
+
+impl PublicationOutcome {
+    fn code(self) -> u64 {
+        match self {
+            Self::Commit(result) => result as u64,
+            Self::Unavailable => 4,
+            Self::Discarded => 5,
+        }
+    }
+
+    fn from_code(code: u64) -> Option<Self> {
+        Some(match code {
+            4 => Self::Unavailable,
+            5 => Self::Discarded,
+            _ => Self::Commit(CommitResult::from_register(code.try_into().ok()?)?),
+        })
+    }
+}
+
+pub struct PublicationRecord<'a> {
+    pub outcome: PublicationOutcome,
+    pub base_revision: u64,
+    /// RamFS revision immediately after the decision, including the new version on success.
+    pub revision: u64,
+    pub source: &'a [u8],
+    pub new_name: &'a [u8],
+}
+
+impl<'a> PublicationRecord<'a> {
+    fn valid(&self) -> bool {
+        self.source.starts_with(b"/")
+            && (1..=PATH_MAX_BYTES).contains(&self.new_name.len())
+            && self.revision >= self.base_revision
+            && (self.outcome != PublicationOutcome::Commit(CommitResult::Committed)
+                || self.base_revision.checked_add(1) == Some(self.revision))
+    }
+
+    pub fn encode(&self) -> Option<EncodedPublicationRecord> {
+        if !self.valid() {
+            return None;
+        }
+        let mut record: EncodedPublicationRecord = [[0; 8]; _];
+        let [code, base, revision, source_len, name_len, names @ ..] = &mut record;
+        let (source, rest) = names
+            .as_flattened_mut()
+            .split_at_mut_checked(self.source.len())?;
+        rest.get_mut(..self.new_name.len())?
+            .copy_from_slice(self.new_name);
+        source.copy_from_slice(self.source);
+        *code = self.outcome.code().to_le_bytes();
+        *base = self.base_revision.to_le_bytes();
+        *revision = self.revision.to_le_bytes();
+        *source_len = (source.len() as u64).to_le_bytes();
+        *name_len = (self.new_name.len() as u64).to_le_bytes();
+        Some(record)
+    }
+
+    pub fn decode(record: &'a EncodedPublicationRecord) -> Option<Self> {
+        let [code, base, revision, source_len, name_len, names @ ..] = record;
+        let source_len = usize::try_from(u64::from_le_bytes(*source_len)).ok()?;
+        let name_len = usize::try_from(u64::from_le_bytes(*name_len)).ok()?;
+        let (source, rest) = names.as_flattened().split_at_checked(source_len)?;
+        let row = Self {
+            outcome: PublicationOutcome::from_code(u64::from_le_bytes(*code))?,
+            base_revision: u64::from_le_bytes(*base),
+            revision: u64::from_le_bytes(*revision),
+            source,
+            new_name: rest.get(..name_len)?,
+        };
+        row.valid().then_some(row)
+    }
+}

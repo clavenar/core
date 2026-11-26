@@ -86,6 +86,7 @@ pub const SYS_AGENT_STAGE_RENAME: usize = 72;
 pub const SYS_GOAL_RENAME_AUDIT: usize = 73;
 pub const SYS_GOAL_DISCARD: usize = 74;
 pub const SYS_GOAL_REVIEW_WITH_DEADLINE: usize = 75;
+pub const SYS_GOAL_PUBLICATION_AUDIT: usize = 76;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
