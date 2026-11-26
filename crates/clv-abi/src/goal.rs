@@ -1,3 +1,4 @@
+use crate::tool::ToolId;
 use crate::{CompletionKind, NO_CHILD_HANDLE, Program};
 
 /// Maximum number of successful member launches over the lifetime of a goal.
@@ -23,6 +24,7 @@ impl CreateOptions {
     const ALLOWED_HELPER: usize = 2;
     const READ_LIMIT: usize = 4;
     const HELPER_READ_LIMIT: usize = 8;
+    const ALLOWED_TOOL: usize = 16;
 
     /// Call 48 takes the child limit, option flags, reply limit and helper selector in a0–a3.
     pub fn registers(self) -> (usize, usize, usize, usize) {
@@ -116,6 +118,39 @@ impl CreateOptions {
         )?;
         let helpers = (flags & Self::HELPER_READ_LIMIT != 0).then_some(helper_reads);
         Some((options, ReadLimits { goal, helpers }))
+    }
+
+    /// Bit 4 uses a3 for an exact tool ID. Bit 1 uses the same word for a program.
+    pub fn registers_with_allowed_tool(
+        self,
+        limits: ReadLimits,
+        allowed_tool: Option<ToolId>,
+    ) -> Option<[usize; 6]> {
+        let mut registers = self.registers_with_read_limits(limits);
+        if let Some(id) = allowed_tool {
+            if self.allowed_helper.is_some() {
+                return None;
+            }
+            registers[1] |= Self::ALLOWED_TOOL;
+            registers[3] = id.0.try_into().ok()?;
+        }
+        Some(registers)
+    }
+
+    pub fn from_registers_with_allowed_tool(
+        mut registers: [usize; 6],
+    ) -> Option<(Self, ReadLimits, Option<ToolId>)> {
+        let allowed_tool = if registers[1] & Self::ALLOWED_TOOL != 0 {
+            if registers[1] & Self::ALLOWED_HELPER != 0 {
+                return None;
+            }
+            registers[1] &= !Self::ALLOWED_TOOL;
+            Some(ToolId(registers[3] as u64))
+        } else {
+            None
+        };
+        let (options, limits) = Self::from_registers_with_read_limits(registers)?;
+        Some((options, limits, allowed_tool))
     }
 }
 

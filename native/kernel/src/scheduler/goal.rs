@@ -68,6 +68,7 @@ impl Member {
 pub(super) struct Goal {
     handle: usize,
     options: CreateOptions,
+    allowed_tool: Option<ToolId>,
     reads: ReadBudget,
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
@@ -219,6 +220,7 @@ impl Scheduler {
         &mut self,
         options: CreateOptions,
         read_limits: ReadLimits,
+        allowed_tool: Option<ToolId>,
     ) -> Option<usize> {
         if self.current != SHELL_TASK_INDEX
             || self.goal.is_some()
@@ -226,11 +228,15 @@ impl Scheduler {
         {
             return None;
         }
+        if let Some(id) = allowed_tool {
+            crate::programs::file_tool(id)?;
+        }
         let handle = self.next_handle;
         self.next_handle = handle.checked_add(1)?;
         self.goal = Some(Goal {
             handle,
             options,
+            allowed_tool,
             reads: ReadBudget::new(read_limits),
             members: [const { None }; MAX_CHILDREN],
             cancelled_before_launch: false,

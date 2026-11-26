@@ -8,15 +8,30 @@ use clv_abi::{LaunchParent, Program};
 
 use super::{DIGITS, amount, decimal, hex, hex_digest, print, print_line};
 
-pub(super) fn show(handle: usize, option: &[u8]) {
-    if show_rows(handle, option).is_none() {
+enum View {
+    Delegations,
+    Replies,
+    Reads,
+}
+
+pub(super) fn show(handle: Option<usize>, option: &[u8]) {
+    let view = match option {
+        b"" => View::Delegations,
+        b"--replies" => View::Replies,
+        b"--reads" => View::Reads,
+        _ => return print(b"usage: goal audit [--replies | --reads]\r\n"),
+    };
+    let Some(handle) = handle else {
+        return print(b"no current goal\r\n");
+    };
+    if show_rows(handle, view).is_none() {
         print(b"cannot read goal audit\r\n");
     }
 }
 
-fn show_rows(handle: usize, option: &[u8]) -> Option<()> {
-    match option {
-        b"--reads" => {
+fn show_rows(handle: usize, view: View) -> Option<()> {
+    match view {
+        View::Reads => {
             let mut records = [Default::default(); AUDIT_CAPACITY];
             let (rows, overwritten, total) =
                 goal::read_audit_rows_with_limit(handle, &mut records)?;
@@ -29,7 +44,7 @@ fn show_rows(handle: usize, option: &[u8]) -> Option<()> {
             print_line(&[b"read_bytes=", decimal(total, &mut [0; DIGITS])]);
             Some(())
         }
-        b"--replies" => {
+        View::Replies => {
             let mut records = [Default::default(); AUDIT_CAPACITY];
             let (rows, overwritten) = goal::reply_audit_rows(handle, &mut records)?;
             print_snapshot(
@@ -39,7 +54,7 @@ fn show_rows(handle: usize, option: &[u8]) -> Option<()> {
                 print_reply,
             )
         }
-        _ => {
+        View::Delegations => {
             let mut records = [Default::default(); AUDIT_CAPACITY];
             let (rows, overwritten) = goal::audit_with_tool(handle, &mut records)?;
             print_snapshot(
@@ -188,5 +203,6 @@ fn denial_name(reason: DelegationDenial) -> &'static [u8] {
         DelegationDenial::InvalidArgument => b"invalid-argument",
         DelegationDenial::HelperNotAllowed => b"helper-not-allowed",
         DelegationDenial::ArgumentNotAllowed => b"argument-not-allowed",
+        DelegationDenial::ToolNotAllowed => b"tool-not-allowed",
     }
 }

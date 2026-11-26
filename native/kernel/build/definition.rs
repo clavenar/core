@@ -3,7 +3,7 @@ use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, DefinitionId, DefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2,
     FileDelegation, FileToolInvocation,
 };
-use clv_abi::tool::FILE_TOOLS;
+use clv_abi::tool::FileTool;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
@@ -48,9 +48,7 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
         }
         .encode(&mut buffer),
         (FIND_GREETING_V2, None, Some(name)) => FileToolInvocation {
-            tool: FILE_TOOLS
-                .iter()
-                .find(|tool| tool.name == name)
+            tool: FileTool::named(name.as_bytes())
                 .expect("unknown file tool revision")
                 .id,
             argument,

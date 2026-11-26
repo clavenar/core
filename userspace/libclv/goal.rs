@@ -6,6 +6,7 @@ pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
     CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus, ReadLimits,
 };
+use clv_abi::tool::ToolId;
 use clv_abi::{
     MESSAGE_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
     SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_CREATE,
@@ -52,8 +53,18 @@ pub fn create_with_read_limit(options: CreateOptions, read_limit: Option<usize>)
 
 /// Sets independent ceilings for all goal reads and for the subset made by delegated helpers.
 pub fn create_with_read_limits(options: CreateOptions, limits: ReadLimits) -> Option<usize> {
+    create_with_allowed_tool(options, limits, None)
+}
+
+/// Creates a goal with an optional exact tool revision for helper delegations.
+pub fn create_with_allowed_tool(
+    options: CreateOptions,
+    limits: ReadLimits,
+    allowed_tool: Option<ToolId>,
+) -> Option<usize> {
     if options.child_limit == 1
         && options.allowed_helper.is_none()
+        && allowed_tool.is_none()
         && limits.goal.is_none()
         && limits.helpers.is_none()
     {
@@ -62,7 +73,7 @@ pub fn create_with_read_limits(options: CreateOptions, limits: ReadLimits) -> Op
             .map_or_else(create, create_with_reply_budget);
     }
     let [children, flags, replies, helper, reads, helper_reads] =
-        options.registers_with_read_limits(limits);
+        options.registers_with_allowed_tool(limits, allowed_tool)?;
     let (handle, ..) = ecall6(
         SYS_GOAL_CREATE_WITH_OPTIONS,
         children,

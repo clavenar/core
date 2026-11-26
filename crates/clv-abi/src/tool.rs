@@ -20,3 +20,9 @@ pub const TEXT_SEARCH_V1: FileTool = FileTool {
 };
 
 pub const FILE_TOOLS: &[FileTool] = &[TEXT_SEARCH_V1];
+
+impl FileTool {
+    pub fn named(name: &[u8]) -> Option<&'static Self> {
+        FILE_TOOLS.iter().find(|tool| tool.name.as_bytes() == name)
+    }
+}

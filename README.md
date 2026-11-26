@@ -808,6 +808,40 @@ The only reply is the agent's zero-byte failure, and all 36 reply bytes are
 available when the agent exits. The shorthand `find-greeting` still selects
 revision 1, whose ordinary program delegation has no tool identity.
 
+### Require an exact tool revision for a goal
+
+`goal create --allow-tool text.search@1` restricts every helper delegation
+for that goal to the registered `text.search@1` invocation. The rule applies
+to the agent and to the shell when it delegates on the agent's behalf.
+Choose one of `--allow-tool` and `--allow-helper` at creation. The file
+grant still controls the recipient and literal, and the goal's read and
+reply budgets apply.
+
+```text
+goal create --children 2 --allow-tool text.search@1 --read-bytes 18 --reply-bytes 36
+goal grant-file --delegate-to grep --argument Hello /hello.txt
+agent run hello --mock find-greeting@2
+wait hello
+recv hello
+goal audit
+goal audit --reads
+goal audit --replies
+goal budget
+goal close
+```
+
+Repeat the sequence with `agent run hello --mock find-greeting@1`. Both
+definitions request the same executable, literal and 18-byte helper allowance.
+
+| Definition | `recv hello` | Delegation audit | Bytes read | Reply bytes spent |
+| --- | --- | --- | ---: | ---: |
+| `find-greeting@2` | `Hello from RamFS` | Accepted, `caller=agent`, `tool=text.search@1` | 18 | 36 |
+| `find-greeting@1` | `cannot delegate child` | `denied=tool-not-allowed caller=agent` | 0 | 0 |
+
+Revision 1 requests `grep` directly. The kernel records the denial before
+allocating the helper. Only the agent's zero-byte failure reply appears in
+the reply audit, and all 36 reply bytes are available after it exits.
+
 ### Share a read allowance across two helper launches
 
 Two different helper programs can run at the same time. Each program has
@@ -1151,7 +1185,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 45 `goal_run_with_reply_budget` | `a0` goal handle, `a1` program selector, `a2` requested reply bytes | Fresh ordinary child launch handle |
 | 46 `agent_run_with_reply_budget` | Same as call 45, plus `a3` start mode (0 runnable, 1 suspended) | Fresh agent handle, with the child launch handle in `a1` |
 | 47 `goal_grant_file` | `a0` goal handle, `a1` open RamFS file handle owned by the shell | 0 when attached, -1 on rejection |
-| 48 `goal_create_with_options` | `a0` lifetime child limit (1, 2 or 3), `a1` option flags, `a2` total reply bytes if bit 0 is set, `a3` allowed helper selector if bit 1 is set, `a4` total RamFS read bytes if bit 2 is set, `a5` helper RamFS read bytes if bit 3 is set | Fresh goal handle, or -1 on rejection |
+| 48 `goal_create_with_options` | `a0` lifetime child limit (1, 2 or 3), `a1` option flags, `a2` total reply bytes if bit 0 is set, `a3` allowed helper program (bit 1) or exact tool ID (bit 4), `a4` total RamFS read bytes if bit 2 is set, `a5` helper RamFS read bytes if bit 3 is set | Fresh goal handle, or -1 on rejection |
 | 49 `agent_delegate` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle, or -1 on rejection |
 | 50 `goal_grant_delegable_file` | `a0` goal handle, `a1` shell file handle | 0 when attached with permission for the goal's agent to delegate read access, or -1 on rejection |
 | 51 `agent_delegate_with_file` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle with read access to the agent's file, or -1 on rejection |
@@ -1176,12 +1210,13 @@ agent. The kernel resolves its original launch and agent handle. Only the shell
 can delegate by supplying an explicit agent handle. An unauthorized caller
 or a stale handle returns -1 in `a0`. Calls 33 and 43 create single-child
 goals with unrestricted helper selection and unlimited reads. Call 48
-accepts up to three lifetime launches. Each option register is ignored when
-its flag is clear.
+accepts up to three lifetime launches. Bits 1 and 4 are mutually exclusive.
+When both are clear, the kernel ignores `a3`. Each budget register is
+ignored when its flag is clear.
 Setting bit 2 or bit 3 with its register zero creates a zero-byte goal or
 helper allowance respectively. Omitting either flag leaves that allowance unlimited.
-Unknown flag bits or an unknown selected helper return -1 before
-the kernel allocates a goal handle.
+Unknown flag bits, conflicting selector flags, an unknown program or an
+unregistered tool revision return -1 before the kernel allocates a goal handle.
 The run calls accept a ready goal or a running goal with a place left. They
 return -1 for an unknown selector or start mode, a busy program slot, a full
 goal, a second agent, insufficient available bytes, or exhausted handles.
@@ -1253,8 +1288,11 @@ admission. The high 32 bits of the ID select the tool family and the low 32
 bits select the exact revision. `text.search@1` has ID `0x0000000100000001`.
 An unknown revision fails before any helper launch or budget reservation.
 
-Calls 49, 51, 56 and 64 check the selected helper program against the
-goal's allowed helper before checking the program slot or reserving resources.
+Calls 49, 51, 56 and 64 check the goal's delegation rule before checking
+the program slot or reserving resources. A program rule requires the helper
+to resolve to the allowed executable. A tool rule requires call 64 with the
+exact registered ID and revision, even when a program request names the same
+executable. Direct goal and agent launches use their ordinary admission rules.
 On admission they transfer a byte count from zero up to the agent's remaining
 allowance before the helper's first instruction. Both shares count toward
 the goal's reserved total. Call 49 starts the helper with zero in `a1`, `a2`
@@ -1312,6 +1350,7 @@ uses code 2. The shell displays that denial as `unknown-tool`.
 | 10 | Invalid argument length or caller buffer |
 | 11 | The goal does not allow this program as a delegated helper |
 | 12 | The file grant requires an argument and the launch omits it or supplies different bytes |
+| 13 | The goal requires an exact tool revision and this delegation requests a program or a different registered tool |
 
 Call 53 returns the decisions recorded when a goal member's `message_send`
 or `reply_send` reaches the budget check. The kernel validates the mailbox,

@@ -3,6 +3,7 @@ use clv_abi::audit::{
     DelegationDenial, DelegationRecord, DelegationRecordWithCaller, DelegationRecordWithTool,
     DelegationRequest, RequestedTool, UNRESOLVED_TOOL_PROGRAM,
 };
+use clv_abi::tool::ToolId;
 use clv_abi::{LaunchParent, Program};
 
 use super::{DelegationTarget, Goal, MemberRole};
@@ -36,7 +37,7 @@ impl Scheduler {
         let launch = if agent.completion.is_some() {
             Err(DelegationDenial::AgentFinished)
         } else {
-            goal.helper_program(request.program)
+            goal.helper_program(request.program, tool.as_ref().map(|requested| requested.id))
                 .and_then(|program| self.prepare_launch(program, None, owner))
         };
         let goal = self.goal.as_mut()?;
@@ -106,8 +107,18 @@ impl DelegationTarget {
 }
 
 impl Goal {
-    fn helper_program(&self, selector: usize) -> Result<Program, DelegationDenial> {
+    fn helper_program(
+        &self,
+        selector: usize,
+        requested_tool: Option<ToolId>,
+    ) -> Result<Program, DelegationDenial> {
         let program = Program::from_raw(selector).ok_or(DelegationDenial::UnknownProgram)?;
+        if self
+            .allowed_tool
+            .is_some_and(|allowed| Some(allowed) != requested_tool)
+        {
+            return Err(DelegationDenial::ToolNotAllowed);
+        }
         if self
             .options
             .allowed_helper

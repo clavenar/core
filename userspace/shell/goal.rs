@@ -12,7 +12,7 @@ use super::{
     split_word,
 };
 
-const CREATE_HELP: &[u8] = b"goal create [--children 1|2|3] [--reply-bytes N] [--allow-helper <program>] [--read-bytes N] [--helper-read-bytes N]\r\n";
+const CREATE_HELP: &[u8] = b"goal create [--children 1|2|3] [--reply-bytes N] [--allow-helper <program> | --allow-tool <name@rev>] [--read-bytes N] [--helper-read-bytes N]\r\n";
 const GRANT_HELP: &[u8] =
     b"goal grant-file [--delegable | --delegate-to <program> [--argument <literal>]] <path>\r\n";
 
@@ -54,11 +54,7 @@ pub(super) fn command(
             None => print(b"no current goal\r\n"),
         },
         (b"run", arguments) => children.run_in_goal(handle, arguments),
-        (b"audit", option @ (b"" | b"--replies" | b"--reads")) => match handle {
-            Some(handle) => audit::show(handle, option),
-            None => print(b"no current goal\r\n"),
-        },
-        (b"audit", _) => print(b"usage: goal audit [--replies | --reads]\r\n"),
+        (b"audit", option) => audit::show(handle, option),
         (b"budget", b"") => match handle.and_then(goal::budget) {
             Some(budget) => print_budget(budget),
             None => print(b"no current goal\r\n"),
@@ -141,13 +137,14 @@ fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
     let Some((options, b"")) = GoalOptions::parse(arguments, GoalCommand::Create) else {
         return print_usage(CREATE_HELP);
     };
-    let result = goal::create_with_read_limits(
+    let result = goal::create_with_allowed_tool(
         goal::CreateOptions {
             child_limit: options.children.unwrap_or(1),
             reply_limit: options.reply_bytes,
             allowed_helper: options.allowed_helper,
         },
         options.read_limits,
+        options.allowed_tool,
     );
     match result {
         Some(handle) => {

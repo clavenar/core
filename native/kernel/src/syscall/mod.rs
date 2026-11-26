@@ -132,9 +132,10 @@ pub(crate) fn dispatch(
                     allowed_helper: None,
                 },
                 ReadLimits::default(),
+                None,
             )
             .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_CREATE_WITH_OPTIONS => CreateOptions::from_registers_with_read_limits([
+        SYS_GOAL_CREATE_WITH_OPTIONS => CreateOptions::from_registers_with_allowed_tool([
             a0,
             a1,
             a2,
@@ -142,7 +143,7 @@ pub(crate) fn dispatch(
             frame.registers[REG_A4],
             frame.registers[REG_A5],
         ])
-        .and_then(|(options, limits)| scheduler.create_goal(options, limits))
+        .and_then(|(options, limits, tool)| scheduler.create_goal(options, limits, tool))
         .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_RUN | SYS_GOAL_RUN_WITH_REPLY_BUDGET => {
             let scope = LaunchScope::Goal {

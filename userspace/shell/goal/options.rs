@@ -1,6 +1,7 @@
 use crate::{number, split_word};
 use clv_abi::Program;
 use clv_abi::goal::{MAX_CHILDREN, ReadLimits};
+use clv_abi::tool::{FileTool, ToolId};
 
 pub(crate) enum GoalCommand {
     Create,
@@ -16,6 +17,7 @@ enum Flag {
     ReadBytes,
     HelperReadBytes,
     AllowHelper,
+    AllowTool,
     Suspended,
     WithFile,
 }
@@ -26,6 +28,7 @@ const FLAGS: &[(&[u8], Flag)] = &[
     (b"read-bytes", Flag::ReadBytes),
     (b"helper-read-bytes", Flag::HelperReadBytes),
     (b"allow-helper", Flag::AllowHelper),
+    (b"allow-tool", Flag::AllowTool),
     (b"suspended", Flag::Suspended),
     (b"with-file", Flag::WithFile),
 ];
@@ -36,6 +39,7 @@ pub(crate) struct GoalOptions {
     pub reply_bytes: Option<usize>,
     pub read_limits: ReadLimits,
     pub allowed_helper: Option<Program>,
+    pub allowed_tool: Option<ToolId>,
     pub suspended: bool,
     pub with_file: bool,
 }
@@ -60,12 +64,17 @@ impl GoalOptions {
                 Flag::HelperReadBytes if matches!(command, GoalCommand::Create) => {
                     parse_count(rest, &mut options.read_limits.helpers)?
                 }
-                Flag::AllowHelper
+                Flag::AllowHelper | Flag::AllowTool
                     if matches!(command, GoalCommand::Create)
-                        && options.allowed_helper.is_none() =>
+                        && options.allowed_helper.is_none()
+                        && options.allowed_tool.is_none() =>
                 {
                     let (name, rest) = split_word(rest);
-                    options.allowed_helper = Some(Program::named(name)?);
+                    if matches!(flag, Flag::AllowTool) {
+                        options.allowed_tool = Some(FileTool::named(name)?.id);
+                    } else {
+                        options.allowed_helper = Some(Program::named(name)?);
+                    }
                     rest
                 }
                 Flag::Suspended
