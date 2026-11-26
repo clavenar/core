@@ -21,13 +21,13 @@ impl Scheduler {
         argument: Result<Option<Message>, DelegationDenial>,
     ) -> Option<usize> {
         let (goal, agent, owner, agent_handle) = if agent_handle == CURRENT_AGENT {
-            let child = self.tasks[self.current].launch.as_ref()?.handle;
-            let goal = self.goal.as_ref()?;
-            let member = goal.members().find(|member| member.is_live(child))?;
-            let MemberRole::Agent(binding) = member.role else {
-                return None;
-            };
-            (goal, member, LaunchParent::Agent(child), binding.handle)
+            let (goal, member, binding) = self.current_agent_member()?;
+            (
+                goal,
+                member,
+                LaunchParent::Agent(member.handle),
+                binding.handle,
+            )
         } else {
             let (goal, member, _) = self.agent_member(agent_handle)?;
             (goal, member, LaunchParent::Shell, agent_handle)

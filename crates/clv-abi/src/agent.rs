@@ -9,6 +9,8 @@ pub const RUN_REPLY_LIMIT: usize = 2;
 pub const RUN_PLAN_INTENT: usize = 4;
 /// Selects the two-byte definition ID in a PlanDefinition request.
 pub const RUN_PLAN_DEFINITION: usize = 8;
+/// Selects a destination basename for the agent to propose on its granted file.
+pub const RUN_STAGE_RENAME: usize = 16;
 /// A zero agent handle on a delegation call selects the calling task's live agent.
 pub const CURRENT_AGENT: usize = 0;
 

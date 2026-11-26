@@ -1,7 +1,7 @@
 mod handles;
 mod rename;
 
-pub(crate) use handles::{FileGrant, GrantArgument, TaskFs};
+pub(crate) use handles::{FileGrant, FileGrantMode, GrantArgument, TaskFs};
 pub(crate) use rename::{PreservedFile, StagedRename};
 
 const WRITABLE_FILE_COUNT: usize = 4;
@@ -132,6 +132,14 @@ impl RamFs {
             next_handle_id: 0,
             revision: Revision(0),
         }
+    }
+
+    fn linked_file(&self, node: Node) -> Option<(usize, &WritableFile)> {
+        let Node::WritableFile(index) = node else {
+            return None;
+        };
+        let file = self.writable[index].as_ref().filter(|file| file.linked)?;
+        Some((index, file))
     }
 
     fn open(&mut self, base: PathBase, path: &[u8], writable: bool) -> Option<Node> {

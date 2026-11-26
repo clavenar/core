@@ -17,12 +17,7 @@ pub(crate) struct PreservedFile {
 
 impl PreservedFile {
     pub(super) fn capture(fs: &mut RamFs, node: Node) -> Option<Self> {
-        let Node::WritableFile(file_index) = node else {
-            return None;
-        };
-        let file = fs.writable[file_index]
-            .as_ref()
-            .filter(|file| file.linked)?;
+        let (file_index, file) = fs.linked_file(node)?;
         let snapshot = Self {
             file_index,
             contents: file.contents,
@@ -42,7 +37,7 @@ impl PreservedFile {
     }
 }
 
-/// A retained file and the names captured when its owner staged this rename.
+/// A retained file and the names captured when this rename was staged.
 pub(crate) struct StagedRename {
     file_index: usize,
     parent: DirectoryId,
@@ -89,11 +84,8 @@ impl StagedRename {
 
 impl RamFs {
     pub(super) fn stage_rename(&mut self, source: Node, new_name: &[u8]) -> Option<StagedRename> {
-        let Node::WritableFile(index) = source else {
-            return None;
-        };
-        let file = self.writable[index].as_ref()?;
-        if !file.linked || !Name::valid(new_name) || self.lookup(file.parent, new_name).is_some() {
+        let (index, file) = self.linked_file(source)?;
+        if !Name::valid(new_name) || self.lookup(file.parent, new_name).is_some() {
             return None;
         }
         let mut names = [0; DIFF_CAPACITY];

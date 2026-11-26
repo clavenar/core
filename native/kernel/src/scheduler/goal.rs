@@ -13,12 +13,12 @@ use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin};
 use clv_abi::audit::{EncodedRecordWithTool, EncodedReplyRecord, ReplyRecord};
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
-    CancelResult, CloseResult, CreateOptions, FileRecipient, GoalStatus, MAX_CHILDREN, ReadLimits,
+    CancelResult, CloseResult, CreateOptions, GoalStatus, MAX_CHILDREN, ReadLimits,
 };
 use clv_abi::tool::ToolId;
 
 use super::{AgentBinding, SHELL_TASK_INDEX, Scheduler, TaskState};
-use crate::fs::ramfs::{FileGrant, GrantArgument, PreservedFile, RamFs, TaskFs};
+use crate::fs::ramfs::{FileGrant, FileGrantMode, GrantArgument, PreservedFile, RamFs, TaskFs};
 
 pub(crate) enum DelegationTarget {
     Program { selector: usize, with_file: bool },
@@ -281,7 +281,7 @@ impl Scheduler {
         &mut self,
         handle: usize,
         fd: usize,
-        recipient: Option<FileRecipient>,
+        mode: FileGrantMode,
         argument: Option<GrantArgument>,
         fs: &mut RamFs,
     ) -> Option<()> {
@@ -295,14 +295,16 @@ impl Scheduler {
         goal.file = Some(
             self.tasks[self.current]
                 .fs
-                .retain_file(fs, handle, fd, recipient, argument)?,
+                .retain_file(fs, handle, fd, mode, argument)?,
         );
         Some(())
     }
 
     pub(crate) fn revoke_goal_file(&mut self, handle: usize, fs: &mut RamFs) -> Option<()> {
         self.shell_goal(handle)?;
-        self.goal.as_mut()?.release_file(fs);
+        let goal = self.goal.as_mut()?;
+        goal.release_file(fs);
+        goal.discard_granted_rename(fs);
         // A full goal has already released its pin. Its issued handles still carry its ID.
         for task in &mut self.tasks {
             task.fs.revoke_goal_file(fs, handle);
@@ -319,6 +321,16 @@ impl Scheduler {
             MemberRole::Agent(binding) if binding.handle == handle => Some((goal, member, binding)),
             _ => None,
         })
+    }
+
+    fn current_agent_member(&self) -> Option<(&Goal, &Member, AgentBinding)> {
+        let child = self.tasks[self.current].launch.as_ref()?.handle;
+        let goal = self.goal.as_ref()?;
+        let member = goal.members().find(|member| member.is_live(child))?;
+        let MemberRole::Agent(binding) = member.role else {
+            return None;
+        };
+        Some((goal, member, binding))
     }
 
     pub(crate) fn agent_status(

@@ -62,13 +62,19 @@ keywords!(Subcommand {
 });
 
 keywords!(GoalFlag {
-    ReplyBytes => "reply-bytes",
-    Children => "children",
-    ReadBytes => "read-bytes",
-    HelperReadBytes => "helper-read-bytes",
-    AllowHelper => "allow-helper",
-    AllowTool => "allow-tool",
-    PreserveFile => "preserve-file",
-    Suspended => "suspended",
-    WithFile => "with-file",
+    ReplyBytes => "--reply-bytes",
+    Children => "--children",
+    ReadBytes => "--read-bytes",
+    HelperReadBytes => "--helper-read-bytes",
+    AllowHelper => "--allow-helper",
+    AllowTool => "--allow-tool",
+    PreserveFile => "--preserve-file",
+    Suspended => "--suspended",
+    WithFile => "--with-file",
+    Delegable => "--delegable",
+    DelegateTo => "--delegate-to",
+    Argument => "--argument",
+    Delegate => "--delegate",
+    Mock => "--mock",
+    StageRename => "--stage-rename",
 });

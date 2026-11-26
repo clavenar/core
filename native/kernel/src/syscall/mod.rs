@@ -1,6 +1,6 @@
 use clv_abi::agent::{
     AgentLaunch, NO_DEFINITION, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
-    RUN_SUSPENDED,
+    RUN_STAGE_RENAME, RUN_SUSPENDED,
 };
 use clv_abi::audit::DelegationDenial;
 use clv_abi::goal::{CreateOptions, FileRecipient, ReadLimits, ReviewToken};
@@ -10,27 +10,28 @@ use clv_abi::{
     PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, Program, ReplyKind, RequestKind,
     SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE, SYS_AGENT_DELEGATE_WITH_FILE_ARG,
     SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
-    SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STATUS,
-    SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE, SYS_EVENT_WAIT,
-    SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_AUDIT_WITH_TOOL,
-    SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT, SYS_GOAL_CREATE,
-    SYS_GOAL_CREATE_PRESERVING_FILE, SYS_GOAL_CREATE_WITH_OPTIONS,
+    SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STAGE_RENAME,
+    SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE,
+    SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
+    SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
+    SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE, SYS_GOAL_CREATE_WITH_OPTIONS,
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_GRANT_DELEGABLE_FILE,
-    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
-    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT,
-    SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN,
-    SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_FILE_ARG, SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
-    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO,
+    SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT,
+    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
+    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
+    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
+    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
+    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::console::write_task;
 use crate::drivers::uart;
-use crate::fs::ramfs::{GrantArgument, RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
+use crate::fs::ramfs::{FileGrantMode, GrantArgument, RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
 use crate::ipc::pipe::PipeResult;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::usercopy::UserStack;
@@ -172,6 +173,10 @@ pub(crate) fn dispatch(
             scheduler.stage_goal_rename(a0, fs, a1, name)
         })
         .unwrap_or(SYSCALL_ERROR),
+        SYS_AGENT_STAGE_RENAME => with_user_path(stack, a1, a2, |name| {
+            scheduler.stage_agent_rename(fs, a0, name)
+        })
+        .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_DIFF | SYS_GOAL_REVIEW => scheduler
             .read_goal_diff(a0, number == SYS_GOAL_REVIEW, |names| {
                 stack.copy_to_user(names, a1, a2)
@@ -218,10 +223,14 @@ pub(crate) fn dispatch(
                 frame.registers[REG_A2] = spent;
                 count
             }),
-        SYS_GOAL_GRANT_FILE | SYS_GOAL_GRANT_DELEGABLE_FILE => {
-            let recipient = (number == SYS_GOAL_GRANT_DELEGABLE_FILE).then_some(FileRecipient::Any);
+        SYS_GOAL_GRANT_FILE | SYS_GOAL_GRANT_DELEGABLE_FILE | SYS_GOAL_GRANT_FILE_FOR_RENAME => {
+            let mode = match number {
+                SYS_GOAL_GRANT_DELEGABLE_FILE => FileGrantMode::Delegate(FileRecipient::Any),
+                SYS_GOAL_GRANT_FILE_FOR_RENAME => FileGrantMode::StageRename,
+                _ => FileGrantMode::Read,
+            };
             scheduler
-                .grant_goal_file(a0, a1, recipient, None, fs)
+                .grant_goal_file(a0, a1, mode, None, fs)
                 .map_or(SYSCALL_ERROR, |()| 0)
         }
         SYS_GOAL_GRANT_FILE_TO | SYS_GOAL_GRANT_FILE_TO_WITH_ARG => Program::from_raw(a2)
@@ -237,7 +246,7 @@ pub(crate) fn dispatch(
                 scheduler.grant_goal_file(
                     a0,
                     a1,
-                    Some(FileRecipient::Program(program)),
+                    FileGrantMode::Delegate(FileRecipient::Program(program)),
                     argument,
                     fs,
                 )
@@ -268,6 +277,7 @@ pub(crate) fn dispatch(
                 0 => Some(RequestKind::DelegateWithFile),
                 RUN_PLAN_INTENT => Some(RequestKind::PlanIntent),
                 RUN_PLAN_DEFINITION => Some(RequestKind::PlanDefinition),
+                RUN_STAGE_RENAME => Some(RequestKind::StageRename),
                 _ => None,
             };
             let launch = kind

@@ -25,6 +25,13 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, writer: us
     let mut buffer = [0; DELEGATION_REQUEST_MAX_BYTES];
     match clv::receive_request(&mut buffer) {
         Some(LaunchRequest::Received {
+            kind: RequestKind::StageRename,
+            bytes,
+            ..
+        }) => usize::from(
+            grant_kind != GrantKind::File as usize || !agent::stage_rename(handle, bytes),
+        ),
+        Some(LaunchRequest::Received {
             kind: RequestKind::DelegateWithFile,
             bytes,
             ..

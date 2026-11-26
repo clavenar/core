@@ -28,10 +28,10 @@ impl<'a> GoalOptions<'a> {
         let mut options = Self::default();
         loop {
             let (word, rest) = split_word(arguments);
-            let Some(name) = word.strip_prefix(b"--") else {
+            if !word.starts_with(b"--") {
                 break;
-            };
-            let flag = GoalFlag::parse(name);
+            }
+            let flag = GoalFlag::parse(word);
             arguments = match flag {
                 GoalFlag::ReplyBytes => parse_count(rest, &mut options.reply_bytes)?,
                 GoalFlag::Children if matches!(command, GoalCommand::Create) => {

@@ -6,6 +6,7 @@ use crate::fs::ramfs::{RamFs, StagedRename};
 pub(super) struct PendingRename {
     change: StagedRename,
     token: Option<ReviewToken>,
+    from_file_grant: bool,
 }
 
 impl PendingRename {
@@ -20,6 +21,12 @@ impl PendingRename {
 }
 
 impl Goal {
+    pub(super) fn discard_granted_rename(&mut self, fs: &mut RamFs) {
+        if let Some(rename) = self.rename.take_if(|rename| rename.from_file_grant) {
+            rename.change.discard(fs);
+        }
+    }
+
     pub(super) fn release_transaction(&mut self, fs: &mut RamFs) {
         if let Some(rename) = self.rename.take() {
             rename.change.discard(fs);
@@ -38,15 +45,38 @@ impl Scheduler {
         fd: usize,
         new_name: &[u8],
     ) -> Option<usize> {
-        let goal = self.shell_goal(handle)?;
+        self.shell_goal(handle)?;
+        self.stage_rename(fs, fd, new_name, None)
+    }
+
+    pub(crate) fn stage_agent_rename(
+        &mut self,
+        fs: &mut RamFs,
+        fd: usize,
+        new_name: &[u8],
+    ) -> Option<usize> {
+        let (goal, _, _) = self.current_agent_member()?;
+        self.stage_rename(fs, fd, new_name, Some(goal.handle))
+    }
+
+    fn stage_rename(
+        &mut self,
+        fs: &mut RamFs,
+        fd: usize,
+        new_name: &[u8],
+        granting_goal: Option<usize>,
+    ) -> Option<usize> {
+        let goal = self.goal.as_mut()?;
         if goal.rename.is_some() || !goal.is_active() {
             return None;
         }
-        let slot = &mut self.goal.as_mut()?.rename;
-        let change = self.tasks[self.current].fs.stage_rename(fs, fd, new_name)?;
-        *slot = Some(PendingRename {
+        let change = self.tasks[self.current]
+            .fs
+            .stage_rename(fs, fd, new_name, granting_goal)?;
+        goal.rename = Some(PendingRename {
             change,
             token: None,
+            from_file_grant: granting_goal.is_some(),
         });
         Some(0)
     }

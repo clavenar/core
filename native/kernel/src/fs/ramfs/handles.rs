@@ -16,13 +16,20 @@ impl Node {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileGrantMode {
+    Read,
+    Delegate(FileRecipient),
+    StageRename,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Access {
     ReadOnly,
     ReadWrite,
-    /// A read-only handle derived from this goal's grant, including helper copies.
+    /// Every derived handle retains its goal ID for revocation.
     GoalFile {
         goal: usize,
-        delegable: bool,
+        mode: FileGrantMode,
     },
 }
 
@@ -75,11 +82,11 @@ impl GrantArgument {
     }
 }
 
-/// Pins the shell-authorized file and its delegation rules while the goal can admit a child.
+/// Pins the shell-authorized file and its grant rules while the goal can admit a child.
 pub(crate) struct FileGrant {
     node: Node,
     goal: usize,
-    recipient: Option<FileRecipient>,
+    mode: FileGrantMode,
     argument: Option<GrantArgument>,
 }
 
@@ -87,7 +94,11 @@ impl FileGrant {
     pub(crate) fn open_for_child(&self, fs: &mut RamFs, is_agent: bool) -> Option<TaskFs> {
         let access = Access::GoalFile {
             goal: self.goal,
-            delegable: is_agent && self.recipient.is_some(),
+            mode: if is_agent {
+                self.mode
+            } else {
+                FileGrantMode::Read
+            },
         };
         TaskFs::from_grant(fs, self.node, access)
     }
@@ -99,19 +110,22 @@ impl FileGrant {
         helper: Program,
         argument: Option<&[u8]>,
     ) -> Result<TaskFs, DelegationDenial> {
+        let FileGrantMode::Delegate(recipient) = self.mode else {
+            return Err(DelegationDenial::NoDelegableFile);
+        };
         let required = Access::GoalFile {
             goal: self.goal,
-            delegable: true,
+            mode: self.mode,
         };
         if !agent
             .slots
             .iter()
             .flatten()
-            .any(|handle| handle.access == required)
+            .any(|handle| handle.access == required && handle.node == self.node)
         {
             return Err(DelegationDenial::NoDelegableFile);
         }
-        if let Some(FileRecipient::Program(allowed)) = self.recipient
+        if let FileRecipient::Program(allowed) = recipient
             && allowed != helper
         {
             return Err(DelegationDenial::FileRecipientNotAllowed);
@@ -160,15 +174,18 @@ impl TaskFs {
         fs: &mut RamFs,
         goal: usize,
         fd: usize,
-        recipient: Option<FileRecipient>,
+        mode: FileGrantMode,
         argument: Option<GrantArgument>,
     ) -> Option<FileGrant> {
         let node = self.grant_node(fd, GrantKind::File)?;
+        if mode == FileGrantMode::StageRename {
+            fs.linked_file(node)?;
+        }
         fs.retain(node);
         Some(FileGrant {
             node,
             goal,
-            recipient,
+            mode,
             argument,
         })
     }
@@ -187,8 +204,19 @@ impl TaskFs {
         fs: &mut RamFs,
         fd: usize,
         new_name: &[u8],
+        granting_goal: Option<usize>,
     ) -> Option<StagedRename> {
-        fs.stage_rename(self.node_for_handle(fd)?, new_name)
+        let handle = self.slots[self.handle_slot(fd)?].as_ref()?;
+        if let Some(goal) = granting_goal {
+            let required = Access::GoalFile {
+                goal,
+                mode: FileGrantMode::StageRename,
+            };
+            if handle.access != required {
+                return None;
+            }
+        }
+        fs.stage_rename(handle.node, new_name)
     }
 
     fn from_grant(fs: &mut RamFs, node: Node, access: Access) -> Option<Self> {

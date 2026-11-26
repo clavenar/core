@@ -1,7 +1,7 @@
 mod audit;
 mod options;
 
-use super::command::Subcommand;
+use super::command::{GoalFlag, Subcommand};
 use clv::goal::{
     self, CancelResult, CloseResult, CommitResult, FileRecipient, GoalStatus, ReplyBudget,
     ReviewToken,
@@ -18,7 +18,7 @@ use super::{
 
 const CREATE_HELP: &[u8] = b"goal create [--children 1|2|3] [--reply-bytes N] [--allow-helper <program> | --allow-tool <name@rev>] [--read-bytes N] [--helper-read-bytes N] [--preserve-file <path>]\r\n";
 const GRANT_HELP: &[u8] =
-    b"goal grant-file [--delegable | --delegate-to <program> [--argument <literal>]] <path>\r\n";
+    b"goal grant-file [--stage-rename | --delegable | --delegate-to <program> [--argument <literal>]] <path>\r\n";
 const RENAME_HELP: &[u8] = b"goal stage-rename <source> <new-name>\r\n";
 
 pub(super) fn help() {
@@ -30,7 +30,7 @@ pub(super) fn help() {
 }
 
 pub(super) const AGENT_RUN_HELP: &[u8] = b"agent run [--suspended] [--reply-bytes N] <program> [request]\r\n\
-      hello accepts --mock find-greeting[@REV] | --delegate --with-file --reply-bytes N grep -F <pattern>\r\n";
+      hello accepts --stage-rename <new-name> | --mock find-greeting[@REV] | --delegate --with-file --reply-bytes N grep -F <pattern>\r\n";
 pub(super) const AGENT_DELEGATE_HELP: &[u8] =
     b"agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n";
 
@@ -104,15 +104,24 @@ pub(super) fn command(
 enum FileTarget<'a> {
     Recipient(Option<FileRecipient>),
     WithArgument(Program, &'a [u8]),
+    StageRename,
 }
 
 fn grant_options(arguments: &[u8]) -> Option<(FileTarget<'_>, &[u8])> {
-    let (target, path) = match split_word(arguments) {
-        (b"--delegable", path) => (FileTarget::Recipient(Some(FileRecipient::Any)), path),
-        (b"--delegate-to", rest) => {
+    let (word, rest) = split_word(arguments);
+    let (target, path) = match GoalFlag::parse(word) {
+        GoalFlag::StageRename => {
+            let (path, b"") = split_literal(rest)? else {
+                return None;
+            };
+            (FileTarget::StageRename, path)
+        }
+        GoalFlag::Delegable => (FileTarget::Recipient(Some(FileRecipient::Any)), rest),
+        GoalFlag::DelegateTo => {
             let (name, path) = split_word(rest);
             let program = Program::named(name)?;
-            if let (b"--argument", rest) = split_word(path) {
+            let (option, rest) = split_word(path);
+            if matches!(GoalFlag::parse(option), GoalFlag::Argument) {
                 let (argument, path) = split_literal(rest)?;
                 (FileTarget::WithArgument(program, argument), path)
             } else {
@@ -124,7 +133,8 @@ fn grant_options(arguments: &[u8]) -> Option<(FileTarget<'_>, &[u8])> {
         }
         _ => (FileTarget::Recipient(None), arguments),
     };
-    (!path.is_empty() && split_word(path).0 != b"--argument").then_some((target, path))
+    (!path.is_empty() && !matches!(GoalFlag::parse(split_word(path).0), GoalFlag::Argument))
+        .then_some((target, path))
 }
 
 fn grant_file(goal: Option<usize>, arguments: &[u8]) {
@@ -133,6 +143,7 @@ fn grant_file(goal: Option<usize>, arguments: &[u8]) {
     };
     let granted = with_goal_file(goal, path, |goal, fd| match target {
         FileTarget::Recipient(recipient) => goal::grant_file_with_recipient(goal, fd, recipient),
+        FileTarget::StageRename => goal::grant_file_for_rename(goal, fd),
         FileTarget::WithArgument(program, literal) => {
             goal::grant_file_to_with_arg(goal, fd, program, literal)
         }

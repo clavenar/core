@@ -953,6 +953,47 @@ also fails the postcondition. The option can be combined with the existing
 goal budgets and helper restrictions. A child needs a separate file grant
 to read the input.
 
+### Let the goal's agent propose a rename
+
+At a fresh QEMU prompt, give `hello` permission to stage a rename of one
+writable file. Its request supplies only the new basename. The kernel uses
+the file handle from the agent's own launch to identify the source.
+
+```text
+mkdir /work
+write /work/draft.txt hello
+goal create --preserve-file /work/draft.txt
+goal grant-file --stage-rename /work/draft.txt
+agent run hello --stage-rename final.txt
+wait hello
+goal diff
+ls /work
+goal commit
+cat /work/final.txt
+goal close
+```
+
+`hello` exits with status 0. `goal diff` shows `rename /work/draft.txt -> final.txt`,
+and `ls /work` still lists only `draft.txt`. After `goal commit` reports
+`rename committed`, `cat` prints `hello`. The request uses zero file-read
+and reply bytes.
+
+To try revocation, repeat from a fresh boot through `ls /work`, then run
+
+```text
+goal revoke-file
+goal commit
+goal diff
+cat /work/draft.txt
+goal close
+```
+
+The saved review token fails with `cannot commit goal`. The diff says
+`no staged changes` and the original file still contains `hello`.
+To check a read-only grant, repeat the first sequence through `goal diff`
+using `goal grant-file /work/draft.txt`. The agent exits with status 1
+and the diff is empty.
+
 ### Share a read allowance across two helper launches
 
 Two different helper programs can run at the same time. Each program has
@@ -1319,6 +1360,8 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 68 `goal_review` | Same arguments as call 67 | Same diff and lengths as call 67, with a review token in `a2` or zero for a preview |
 | 69 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, 2 on a failed file postcondition, or -1 for an invalid caller, goal, token, or unavailable revision |
 | 70 `goal_create_preserving_file` | `a0` owner's file handle, `a1` stack address of the six call 48 argument words in order (little-endian RV64), `a2` length in bytes (48) | Fresh goal handle, or -1 on rejection |
+| 71 `goal_grant_file_for_rename` | `a0` goal handle, `a1` owner's file handle | 0 when the ready goal receives the grant, or -1 on rejection |
+| 72 `agent_stage_rename` | `a0` granted file handle, `a1` new basename address, `a2` length (1–64 bytes) | 0 when the calling agent stages the rename, or -1 on rejection |
 
 Calls 66 and 67 are restricted to the goal owner. Call 66 requires a linked
 writable RamFS file and an empty staging slot. It rejects an occupied name,
@@ -1355,6 +1398,14 @@ cursor. A rejected creation consumes no goal handle or pin. The owner can
 close the descriptor immediately. Successful publication, cancellation,
 successful close or owner exit releases the retained input.
 
+Call 71 requires a linked writable RamFS file and an empty file-grant slot.
+The direct agent receives read access and permission to stage a rename.
+Ordinary direct children receive read access only. Delegating a file to a
+helper requires a delegable grant. Call 72 verifies that the caller is the
+goal's live agent and that its open descriptor carries this goal's rename
+permission. It uses the same slot, basename checks and publication rules as
+call 66. Only the goal owner can review and commit the proposal.
+
 The shell owns the goal and controls its agents. Calls 49, 51, 56 and 64 also
 accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
 agent. The kernel resolves its original launch and agent handle. Only the shell
@@ -1378,15 +1429,16 @@ The agent run calls also create and bind the agent in that operation. Direct
 children inherit any file granted to the goal. Call 58 queues a typed
 request before the agent starts. Bit 0 starts it suspended. Bit 1 selects
 the explicit agent reply allowance in `a3`. Otherwise the agent inherits
-the available balance. Bits 2 and 3 select the request format.
+the available balance. Bits 2, 3 and 4 select the request format.
 
 | Format flags | Request kind | Payload |
 | --- | --- | --- |
-| Both clear | `DelegateWithFile` (tag 4) | Two little-endian RV64 words for the helper selector and its reply allowance, followed by 0–64 literal argument bytes |
+| All clear | `DelegateWithFile` (tag 4) | Two little-endian RV64 words for the helper selector and its reply allowance, followed by 0–64 literal argument bytes |
 | Bit 2 only | `PlanIntent` (tag 5) | One intent byte. Intent 1 for `hello` pins `find-greeting@1`. Other legacy intents retain their original delivery behavior. |
 | Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. The pairs `[1, 1]` and `[1, 2]` select the corresponding `find-greeting` revisions for `hello`. |
+| Bit 4 only | `StageRename` (tag 7) | 1–64 bytes for the proposed basename. `hello` presents the name and its startup file descriptor to call 72. |
 
-Unknown flag bits, both format bits set, an unreadable buffer or the wrong
+Unknown flag bits, multiple format bits set, an unreadable buffer or the wrong
 length fail before admission. For tag 6 the kernel also verifies that the
 definition exists for the selected executable before consuming handles,
 reserving bytes or launching the child. The kernel supplies the digest
@@ -1410,11 +1462,13 @@ goal finishes. Each child can close its own handle. Exit, fault or cancellation
 closes any handle it still holds.
 
 Call 60 withdraws the goal's retained file and closes all descriptors
-derived from that grant, including copies already held by helpers. Only the
-owning shell can call it. Each read and revocation runs to completion on
-the boot hart. Bytes delivered earlier stay charged. A later read using a
-revoked descriptor fails before copying or charging bytes. Other opens of
-the same file keep their own authority and cursor.
+derived from that grant, including copies already held by helpers. It also
+discards any unpublished rename staged through that grant and invalidates
+its review token. Owner-staged renames and the goal's preserved input survive
+revocation. Only the owning shell can call it. Each read and revocation runs
+to completion on the boot hart. Bytes delivered earlier stay charged. A later
+read using a revoked descriptor fails before copying or charging bytes. Other
+opens of the same file keep their own authority and cursor.
 
 Revocation succeeds when the goal has no outstanding grant. The owner can
 attach a fresh grant while the goal is still ready. After revocation in a

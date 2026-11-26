@@ -13,10 +13,10 @@ use clv_abi::{
     SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
     SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE, SYS_GOAL_CREATE_WITH_OPTIONS,
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_GRANT_DELEGABLE_FILE,
-    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
-    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO,
+    SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT,
+    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -114,6 +114,11 @@ pub fn grant_file(goal: usize, fd: usize) -> bool {
     grant_file_with_recipient(goal, fd, None)
 }
 
+/// Gives the direct agent permission to stage a rename of this writable RamFS file.
+pub fn grant_file_for_rename(goal: usize, fd: usize) -> bool {
+    syscall(SYS_GOAL_GRANT_FILE_FOR_RENAME, goal, fd, 0) == 0
+}
+
 /// Also lets the goal's agent pass read access to its helper.
 pub fn grant_delegable_file(goal: usize, fd: usize) -> bool {
     grant_file_with_recipient(goal, fd, Some(FileRecipient::Any))
@@ -144,7 +149,7 @@ pub fn grant_file_to_with_arg(goal: usize, fd: usize, program: Program, argument
     }) == Some(0)
 }
 
-/// Withdraws the goal's file grant and closes every handle derived from it.
+/// Closes all derived handles and discards any pending rename staged through the grant.
 pub fn revoke_file(goal: usize) -> bool {
     syscall(SYS_GOAL_REVOKE_FILE, goal, 0, 0) == 0
 }

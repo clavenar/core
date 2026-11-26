@@ -5,6 +5,7 @@ use clv_abi::{
 };
 
 use super::{
+    command::GoalFlag,
     goal::{AGENT_DELEGATE_HELP, AGENT_RUN_HELP, GoalCommand, GoalOptions},
     hex, print_handle, print_line, print_usage, split_literal, split_word,
 };
@@ -264,15 +265,26 @@ fn agent_run_args(
     arguments: &[u8],
 ) -> Option<(GoalOptions<'_>, Program, Option<agent::RunRequest<'_>>)> {
     let (options, program, rest) = goal_program(arguments, GoalCommand::AgentRun)?;
-    let request = match (program, split_word(rest)) {
-        (_, (b"", _)) => None,
-        (Program::Hello, (b"--delegate", args)) => Some(agent::RunRequest::DelegateWithFile(
-            Helper::parse(args)?.file_request()?,
-        )),
-        (Program::Hello, (b"--mock", name)) => {
-            Some(agent::RunRequest::Definition(mock_definition(name)?))
+    let request = if rest.is_empty() {
+        None
+    } else {
+        let (flag, args) = split_word(rest);
+        if program != Program::Hello {
+            return None;
         }
-        _ => return None,
+        Some(match GoalFlag::parse(flag) {
+            GoalFlag::Delegate => {
+                agent::RunRequest::DelegateWithFile(Helper::parse(args)?.file_request()?)
+            }
+            GoalFlag::Mock => agent::RunRequest::Definition(mock_definition(args)?),
+            GoalFlag::StageRename => {
+                let (name, b"") = split_literal(args)? else {
+                    return None;
+                };
+                agent::RunRequest::StageRename(name)
+            }
+            _ => return None,
+        })
     };
     Some((options, program, request))
 }

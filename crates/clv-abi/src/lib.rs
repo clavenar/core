@@ -81,6 +81,8 @@ pub const SYS_GOAL_DIFF: usize = 67;
 pub const SYS_GOAL_REVIEW: usize = 68;
 pub const SYS_GOAL_COMMIT: usize = 69;
 pub const SYS_GOAL_CREATE_PRESERVING_FILE: usize = 70;
+pub const SYS_GOAL_GRANT_FILE_FOR_RENAME: usize = 71;
+pub const SYS_AGENT_STAGE_RENAME: usize = 72;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
@@ -94,6 +96,7 @@ pub enum RequestKind {
     DelegateWithFile = 4,
     PlanIntent = 5,
     PlanDefinition = 6,
+    StageRename = 7,
 }
 
 impl RequestKind {
@@ -105,6 +108,7 @@ impl RequestKind {
             value if value == Self::DelegateWithFile as usize => Some(Self::DelegateWithFile),
             value if value == Self::PlanIntent as usize => Some(Self::PlanIntent),
             value if value == Self::PlanDefinition as usize => Some(Self::PlanDefinition),
+            value if value == Self::StageRename as usize => Some(Self::StageRename),
             _ => None,
         }
     }

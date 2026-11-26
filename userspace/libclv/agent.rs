@@ -4,13 +4,13 @@ pub use clv_abi::agent::{
 };
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT,
-    RUN_REPLY_LIMIT, RUN_SUSPENDED,
+    RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_SUSPENDED,
 };
 use clv_abi::{
-    MESSAGE_MAX_BYTES, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
+    MESSAGE_MAX_BYTES, PATH_MAX_BYTES, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
     SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_RESUME, SYS_AGENT_RUN,
     SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST,
-    SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND,
+    SYS_AGENT_STAGE_RENAME, SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -72,6 +72,7 @@ pub enum RunRequest<'a> {
     DelegateWithFile(FileDelegation<'a>),
     Plan(PlanIntent),
     Definition(DefinitionId),
+    StageRename(&'a [u8]),
 }
 
 /// Launches an agent with an optional typed request in its mailbox.
@@ -102,6 +103,12 @@ pub fn launch(
             buffer[..2].copy_from_slice(&id.encode());
             &buffer[..2]
         }
+        RunRequest::StageRename(name) => {
+            flags |= RUN_STAGE_RENAME;
+            let bytes = buffer[..PATH_MAX_BYTES].get_mut(..name.len())?;
+            bytes.copy_from_slice(name);
+            bytes
+        }
     };
     let (agent, child, ..) = ecall6(
         SYS_AGENT_RUN_WITH_REQUEST,
@@ -116,6 +123,13 @@ pub fn launch(
         agent: syscall_result(agent)?,
         child,
     })
+}
+
+/// Proposes a basename for the file granted to the calling goal agent.
+pub fn stage_rename(fd: usize, new_name: &[u8]) -> bool {
+    with_stack_bytes::<PATH_MAX_BYTES>(new_name, |address, length| {
+        syscall(SYS_AGENT_STAGE_RENAME, fd, address, length)
+    }) == Some(0)
 }
 
 /// Starts an ordinary helper using bytes from the live agent's reservation.
