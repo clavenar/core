@@ -47,6 +47,14 @@ impl TaskState {
             || self == Self::WaitingForMessage(handle)
             || self == Self::WaitingForEvent
     }
+
+    // An agent blocked on its helper can still finish while its own parent waits.
+    fn can_finish(self) -> bool {
+        matches!(
+            self,
+            Self::Runnable | Self::WaitingForChild(_) | Self::WaitingForMessage(_)
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -55,8 +63,16 @@ struct PendingEvent {
     kind: CompletionKind,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaunchParent {
+    Shell,
+    /// The agent's original child launch handle, independent of program slot reuse.
+    Agent(usize),
+}
+
 struct ChildLaunch {
     handle: usize,
+    parent: LaunchParent,
     request: Option<Message>,
     reply: Option<Message>,
     legacy_file_reply: bool,
@@ -69,6 +85,7 @@ struct PreparedLaunch {
     program: Program,
     handle: usize,
     next_handle: usize,
+    parent: LaunchParent,
 }
 
 #[derive(Clone, Copy)]
@@ -213,6 +230,7 @@ impl Scheduler {
         program: usize,
         suspended: bool,
         reply_bytes: Option<usize>,
+        request: Option<Message>,
     ) -> Option<AgentLaunch> {
         let agent = self.next_handle;
         let child = self.start_child(
@@ -222,7 +240,7 @@ impl Scheduler {
                 handle: goal,
                 reply_bytes,
             },
-            None,
+            request,
             Some(agent),
             TaskState::for_agent(suspended),
         )?;
@@ -233,8 +251,19 @@ impl Scheduler {
         &self,
         program: Program,
         agent: Option<usize>,
+        parent: LaunchParent,
     ) -> Result<PreparedLaunch, DelegationDenial> {
-        if self.tasks[task_index(program)].state != TaskState::Stopped {
+        let task = &self.tasks[task_index(program)];
+        // Relaunching can discard one's own results, but never another live parent's.
+        let other_results = task.launch.as_ref().is_some_and(|previous| {
+            previous.parent != parent
+                && (previous.reply.is_some()
+                    || previous.completion.is_some()
+                    || previous.event.is_some()
+                    || previous.pipe.as_ref().is_some_and(Pipe::reader_open))
+                && self.live_parent(previous.parent).is_some()
+        });
+        if task.state != TaskState::Stopped || other_results {
             return Err(DelegationDenial::ProgramBusy);
         }
         // An agent takes the first handle of the pair. Commit the sequence only on success.
@@ -251,6 +280,7 @@ impl Scheduler {
             program,
             handle,
             next_handle,
+            parent,
         })
     }
 
@@ -267,7 +297,7 @@ impl Scheduler {
             return None;
         }
         let launch = self
-            .prepare_launch(Program::from_raw(program)?, agent)
+            .prepare_launch(Program::from_raw(program)?, agent, LaunchParent::Shell)
             .ok()?;
         let task_fs = match scope {
             LaunchScope::Plain => TaskFs::empty(),
@@ -303,6 +333,7 @@ impl Scheduler {
             program,
             handle,
             next_handle,
+            parent,
         } = launch;
         let index = task_index(program);
         let task = &mut self.tasks[index];
@@ -330,6 +361,7 @@ impl Scheduler {
                 .is_some_and(|message| message.kind == MessageKind::Request(RequestKind::ReadFile));
         task.launch = Some(ChildLaunch {
             handle,
+            parent,
             request,
             reply: None,
             legacy_file_reply,
@@ -347,15 +379,13 @@ impl Scheduler {
         handle: usize,
         frame: &mut TrapFrame,
     ) -> WaitResult<TaskCompletion> {
-        let Some((launch, state)) = self.launch_for_shell(handle) else {
+        let Some((launch, state)) = self.launch_for_parent(handle) else {
             return WaitResult::Unavailable;
         };
         if let Some(completion) = launch.completion.take() {
             return WaitResult::Ready(completion);
         }
-        if *state == TaskState::Runnable
-            && self.block_current(frame, TaskState::WaitingForChild(handle))
-        {
+        if state.can_finish() && self.block_current(frame, TaskState::WaitingForChild(handle)) {
             WaitResult::Blocked
         } else {
             WaitResult::Unavailable
@@ -382,10 +412,13 @@ impl Scheduler {
                 kind: event.kind,
             });
         }
-        let can_finish = self
-            .tasks
-            .iter()
-            .any(|task| task.launch.is_some() && task.state == TaskState::Runnable);
+        let can_finish = self.tasks.iter().any(|task| {
+            task.state.can_finish()
+                && task
+                    .launch
+                    .as_ref()
+                    .is_some_and(|launch| launch.parent == LaunchParent::Shell)
+        });
         if can_finish && self.block_current(frame, TaskState::WaitingForEvent) {
             WaitResult::Blocked
         } else {
@@ -399,10 +432,7 @@ impl Scheduler {
         length: usize,
         copy: impl FnOnce(&mut [u8]) -> bool,
     ) -> Option<usize> {
-        if self.tasks[SHELL_TASK_INDEX].state == TaskState::Stopped {
-            return None;
-        }
-
+        let parent = self.live_parent(self.tasks[self.current].launch.as_ref()?.parent)?;
         let sender = self.current_id();
         let launch = self.tasks[self.current].launch.as_mut()?;
         if launch.reply.is_some() {
@@ -422,7 +452,7 @@ impl Scheduler {
         }
         launch.reply = Some(reply);
         let handle = launch.handle;
-        self.tasks[SHELL_TASK_INDEX]
+        self.tasks[parent]
             .state
             .wake_from(TaskState::WaitingForMessage(handle));
         Some(length)
@@ -441,7 +471,7 @@ impl Scheduler {
                 .as_mut()
                 .map(|launch| (&mut launch.request, None)),
             Mailbox::ChildReply(handle) => self
-                .launch_for_shell(handle)
+                .launch_for_parent(handle)
                 .map(|(launch, state)| (&mut launch.reply, Some((handle, *state)))),
         };
         let Some((pending, wait_for)) = pending else {
@@ -462,8 +492,9 @@ impl Scheduler {
         }
         match wait_for {
             Some((_, TaskState::WaitingForPipeSpace)) => ReceiveResult::Error,
-            Some((handle, TaskState::Runnable))
-                if self.block_current(frame, TaskState::WaitingForMessage(handle)) =>
+            Some((handle, state))
+                if state.can_finish()
+                    && self.block_current(frame, TaskState::WaitingForMessage(handle)) =>
             {
                 ReceiveResult::Blocked
             }
@@ -515,7 +546,7 @@ impl Scheduler {
             if let Some(goal) = &mut self.goal {
                 goal.finish_child(launch.handle, completion, fs);
             }
-            if shell_live {
+            if shell_live && launch.parent == LaunchParent::Shell {
                 launch.event = Some(PendingEvent {
                     sequence: self.next_event_sequence,
                     kind: completion.kind_and_value().0,
@@ -527,11 +558,13 @@ impl Scheduler {
                 pipe.close_writer();
             }
             let handle = launch.handle;
-            let shell = &mut self.tasks[SHELL_TASK_INDEX];
-            if shell.state.waits_for_result(handle)
-                || shell.state == TaskState::WaitingForPipeData(handle)
-            {
-                shell.state = TaskState::Runnable;
+            let owner = launch.parent;
+            if let Some(parent) = self.live_parent(owner) {
+                let state = &mut self.tasks[parent].state;
+                if state.waits_for_result(handle) || *state == TaskState::WaitingForPipeData(handle)
+                {
+                    *state = TaskState::Runnable;
+                }
             }
         }
     }
@@ -540,11 +573,19 @@ impl Scheduler {
         self.tasks.iter().position(|task| task.has_launch(handle))
     }
 
-    fn launch_for_shell(&mut self, handle: usize) -> Option<(&mut ChildLaunch, &mut TaskState)> {
-        if self.current != SHELL_TASK_INDEX {
+    fn live_parent(&self, parent: LaunchParent) -> Option<usize> {
+        let index = match parent {
+            LaunchParent::Shell => SHELL_TASK_INDEX,
+            LaunchParent::Agent(handle) => self.launch_index(handle)?,
+        };
+        (self.tasks[index].state != TaskState::Stopped).then_some(index)
+    }
+
+    fn launch_for_parent(&mut self, handle: usize) -> Option<(&mut ChildLaunch, &mut TaskState)> {
+        let index = self.launch_index(handle)?;
+        if self.live_parent(self.tasks[index].launch.as_ref()?.parent) != Some(self.current) {
             return None;
         }
-        let index = self.launch_index(handle)?;
         let task = &mut self.tasks[index];
         Some((task.launch.as_mut()?, &mut task.state))
     }

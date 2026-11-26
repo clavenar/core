@@ -13,6 +13,46 @@ pub(super) struct Children {
     handles: [usize; PROGRAMS.len()],
 }
 
+struct Helper<'a> {
+    program: Program,
+    reply_bytes: usize,
+    with_file: bool,
+    argument: Option<&'a [u8]>,
+}
+
+impl<'a> Helper<'a> {
+    fn parse(arguments: &'a [u8]) -> Option<Self> {
+        let (options, rest) = GoalOptions::parse(arguments, GoalCommand::AgentDelegate)?;
+        let (name, args) = split_word(rest);
+        let program = Program::named(name)?;
+        let argument = match (program, options.with_file, args) {
+            (Program::Grep, true, _) => {
+                let (pattern, b"") = grep_pattern(args)? else {
+                    return None;
+                };
+                Some(pattern)
+            }
+            (Program::Grep, false, _) => return None,
+            (_, _, b"") => None,
+            _ => return None,
+        };
+        Some(Self {
+            program,
+            reply_bytes: options.reply_bytes?,
+            with_file: options.with_file,
+            argument,
+        })
+    }
+
+    fn file_request(&self) -> Option<agent::FileDelegation<'a>> {
+        Some(agent::FileDelegation {
+            program: self.program,
+            reply_bytes: self.reply_bytes,
+            argument: self.argument?,
+        })
+    }
+}
+
 impl Children {
     pub(super) fn new() -> Self {
         Self {
@@ -47,13 +87,8 @@ impl Children {
         }
     }
 
-    fn goal_child(arguments: &[u8], command: GoalCommand) -> Option<(Program, GoalOptions)> {
-        let (options, name) = GoalOptions::parse(arguments, command)?;
-        Some((Program::named(name)?, options))
-    }
-
     pub(super) fn run_in_goal(&mut self, goal: Option<usize>, arguments: &[u8]) {
-        let Some((program, options)) = Self::goal_child(arguments, GoalCommand::Run) else {
+        let Some((options, program, b"")) = goal_program(arguments, GoalCommand::Run) else {
             return print(b"usage: goal run [--reply-bytes N] <program>\r\n");
         };
         let Some(goal) = goal else {
@@ -76,16 +111,26 @@ impl Children {
         goal: usize,
         arguments: &[u8],
     ) -> Option<agent::AgentLaunch> {
-        let Some((program, options)) = Self::goal_child(arguments, GoalCommand::AgentRun) else {
-            print(b"usage: agent run [--suspended] [--reply-bytes N] <program>\r\n");
+        let Some((options, program, request)) = agent_run_args(arguments) else {
+            print(b"usage: agent run [--suspended] [--reply-bytes N] <program> [--delegate --with-file --reply-bytes N grep -F <pattern>]\r\n");
             return None;
         };
-        let Some(launch) = agent::run_with_options(
-            goal,
-            program as usize,
-            options.suspended,
-            options.reply_bytes,
-        ) else {
+        let result = match request {
+            Some(request) => agent::run_with_request(
+                goal,
+                program as usize,
+                options.suspended,
+                options.reply_bytes,
+                &request,
+            ),
+            None => agent::run_with_options(
+                goal,
+                program as usize,
+                options.suspended,
+                options.reply_bytes,
+            ),
+        };
+        let Some(launch) = result else {
             print(b"cannot start agent\r\n");
             return None;
         };
@@ -96,38 +141,24 @@ impl Children {
     pub(super) fn delegate(&mut self, agent: Option<usize>, arguments: &[u8]) {
         const USAGE: &[u8] =
             b"usage: agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n";
-        let Some((
-            GoalOptions {
-                reply_bytes: Some(bytes),
-                with_file,
-                ..
-            },
-            rest,
-        )) = GoalOptions::parse(arguments, GoalCommand::AgentDelegate)
-        else {
-            return print(USAGE);
-        };
-        let (name, args) = split_word(rest);
-        let Some(program) = Program::named(name) else {
+        let Some(helper) = Helper::parse(arguments) else {
             return print(USAGE);
         };
         let Some(agent) = agent else {
             return print(b"no current agent\r\n");
         };
-        let launch = match (program, with_file, args) {
-            (Program::Grep, true, _) => {
-                let Some((pattern, b"")) = grep_pattern(args) else {
-                    return print(USAGE);
-                };
-                agent::delegate_with_file_arg(agent, program as usize, bytes, pattern)
+        let program = helper.program as usize;
+        let launch = match helper.argument {
+            Some(argument) => {
+                agent::delegate_with_file_arg(agent, program, helper.reply_bytes, argument)
             }
-            (Program::Grep, false, _) => return print(USAGE),
-            (_, true, b"") => agent::delegate_with_file(agent, program as usize, bytes),
-            (_, false, b"") => agent::delegate(agent, program as usize, bytes),
-            _ => return print(USAGE),
+            None if helper.with_file => {
+                agent::delegate_with_file(agent, program, helper.reply_bytes)
+            }
+            None => agent::delegate(agent, program, helper.reply_bytes),
         };
         if let Some(handle) = launch {
-            self.handles[program as usize] = handle;
+            self.handles[program] = handle;
             print_handle(b"delegated child=", handle);
         } else {
             print(b"cannot delegate child\r\n");
@@ -240,6 +271,24 @@ impl Children {
     }
 }
 
+fn agent_run_args(
+    arguments: &[u8],
+) -> Option<(GoalOptions, Program, Option<agent::FileDelegation<'_>>)> {
+    let (options, program, rest) = goal_program(arguments, GoalCommand::AgentRun)?;
+    let request = match (program, split_word(rest)) {
+        (_, (b"", _)) => None,
+        (Program::Hello, (b"--delegate", args)) => Some(Helper::parse(args)?.file_request()?),
+        _ => return None,
+    };
+    Some((options, program, request))
+}
+
+fn goal_program(arguments: &[u8], command: GoalCommand) -> Option<(GoalOptions, Program, &[u8])> {
+    let (options, rest) = GoalOptions::parse(arguments, command)?;
+    let (name, rest) = split_word(rest);
+    Some((options, Program::named(name)?, rest))
+}
+
 fn request_kind(arguments: &[u8], default: RequestKind) -> (RequestKind, &[u8]) {
     match split_word(arguments) {
         (b"--echo", rest) => (RequestKind::Echo, rest),
@@ -248,7 +297,7 @@ fn request_kind(arguments: &[u8], default: RequestKind) -> (RequestKind, &[u8]) 
     }
 }
 
-/// Both grep launch paths parse the same literal. Quotes allow spaces and the empty pattern.
+/// Quotes allow spaces and the empty pattern across all grep launch paths.
 fn grep_pattern(arguments: &[u8]) -> Option<(&[u8], &[u8])> {
     let (b"-F", rest) = split_word(arguments) else {
         return None;
@@ -299,6 +348,7 @@ fn print_reply(handle: usize) {
             ReplyKind::Denied => print(b"read denied: no directory grant\r\n"),
             ReplyKind::ReadFailed => print(b"cannot read requested file\r\n"),
             ReplyKind::ResultTooLarge => print(b"grep result exceeds 64 bytes\r\n"),
+            ReplyKind::DelegationFailed => print(b"cannot delegate child\r\n"),
         },
         None => print(b"recv failed\r\n"),
     }

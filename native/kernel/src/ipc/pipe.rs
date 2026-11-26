@@ -86,4 +86,8 @@ impl Pipe {
     pub(crate) fn is_reading(&self) -> bool {
         self.reader == Reader::Reading
     }
+
+    pub(crate) fn reader_open(&self) -> bool {
+        self.reader != Reader::Closed
+    }
 }

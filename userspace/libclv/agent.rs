@@ -1,11 +1,13 @@
-pub use clv_abi::agent::{AgentLaunch, AgentStatus, ControlResult};
+pub use clv_abi::agent::{AgentLaunch, AgentStatus, CURRENT_AGENT, ControlResult, FileDelegation};
+use clv_abi::agent::{DELEGATION_REQUEST_MAX_BYTES, RUN_REPLY_LIMIT, RUN_SUSPENDED};
 use clv_abi::{
     MESSAGE_MAX_BYTES, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
     SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_RESUME, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
-    SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_STATUS, SYS_AGENT_SUSPEND,
+    SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STATUS,
+    SYS_AGENT_SUSPEND,
 };
 
-use super::{ecall, syscall, syscall_result, with_stack_bytes};
+use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
 
 /// Creates the goal's agent and starts its child in one call.
 pub fn run(goal: usize, program: usize) -> Option<AgentLaunch> {
@@ -36,6 +38,35 @@ pub fn run_with_options(
         reply_bytes.unwrap_or(0),
         usize::from(suspended),
         0,
+    );
+    Some(AgentLaunch {
+        agent: syscall_result(agent)?,
+        child,
+    })
+}
+
+/// Queues a file delegation request as part of the agent launch.
+pub fn run_with_request(
+    goal: usize,
+    program: usize,
+    suspended: bool,
+    reply_bytes: Option<usize>,
+    request: &FileDelegation<'_>,
+) -> Option<AgentLaunch> {
+    let mut buffer = [0; DELEGATION_REQUEST_MAX_BYTES];
+    let bytes = request.encode(&mut buffer)?;
+    let mut flags = if suspended { RUN_SUSPENDED } else { 0 };
+    if reply_bytes.is_some() {
+        flags |= RUN_REPLY_LIMIT;
+    }
+    let (agent, child, ..) = ecall6(
+        SYS_AGENT_RUN_WITH_REQUEST,
+        goal,
+        program,
+        flags,
+        reply_bytes.unwrap_or(0),
+        bytes.as_ptr().expose_provenance(),
+        bytes.len(),
     );
     Some(AgentLaunch {
         agent: syscall_result(agent)?,
@@ -76,6 +107,16 @@ pub fn delegate_with_file_arg(
         )
         .0
     })
+}
+
+/// A running agent delegates its own file and receives the helper's results.
+pub fn delegate_from_current(request: &FileDelegation<'_>) -> Option<usize> {
+    delegate_with_file_arg(
+        CURRENT_AGENT,
+        request.program as usize,
+        request.reply_bytes,
+        request.argument,
+    )
 }
 
 pub fn status(agent: usize) -> Option<AgentStatus> {

@@ -18,16 +18,29 @@ use clv_abi::{
 };
 use core::arch::asm;
 
-#[inline(never)]
+#[inline]
 fn ecall(
+    number: usize,
+    a0: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+) -> (usize, usize, usize, usize) {
+    ecall6(number, a0, a1, a2, a3, a4, 0)
+}
+
+#[inline(never)]
+fn ecall6(
     number: usize,
     mut a0: usize,
     mut a1: usize,
     mut a2: usize,
     mut a3: usize,
     a4: usize,
+    a5: usize,
 ) -> (usize, usize, usize, usize) {
-    // SAFETY: The kernel takes the number in a7 and arguments in a0 through a4.
+    // SAFETY: The kernel takes the number in a7 and arguments in a0 through a5.
     // Results use a0 through a3. The kernel preserves the other registers.
     unsafe {
         asm!(
@@ -37,6 +50,7 @@ fn ecall(
             inlateout("a2") a2,
             inlateout("a3") a3,
             in("a4") a4,
+            in("a5") a5,
             in("a7") number,
             options(nostack),
         );

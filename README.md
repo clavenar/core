@@ -75,8 +75,8 @@ explicit file or directory grants. In a child, `open`, `mkdir`, `unlink`,
 `rmdir`, `chdir`, and `getcwd` return -1.
 
 The shell stays interactive after `run`. Every launch starts with a cleared
-stack and fresh registers and timer state. Exit, fault, or goal cancellation
-frees the child's slot.
+stack and fresh registers and timer state. A parent can reuse its child's
+program slot after exit, fault or goal cancellation.
 
 `run hello <directory>` grants the child a read-only directory handle. The
 child starts with that single handle and uses `open_at` to read and print
@@ -396,8 +396,8 @@ goal close
 The status is `Cancelled`. On a fresh boot, `event` prints `no child event`
 because this goal never launched a child. Cancelling a running goal stops
 all its live members before the command returns. Its status is then
-`Cancelled child=<handle>`. Each cancelled member produces a completion
-event and a wait result. A reply it already sent is still available through
+`Cancelled child=<handle>`. For each child it launched, the shell can
+collect a completion event, a wait result and any reply already sent through
 `recv <name>`. The stock `echo`
 exits quickly. If it finished first, `goal cancel` prints `goal already finished`.
 
@@ -584,6 +584,39 @@ available in its file. A budget denial returns an error before copying data.
 If some allowance remains, the caller can retry from the same position with
 a smaller buffer.
 
+### Let a running agent delegate a search
+
+At the QEMU prompt, give `hello` a request to run `grep` on its granted file.
+The shell launches only `hello`. When scheduled, `hello` asks the kernel to
+start its helper with 18 reply bytes and a read-only copy of its file handle.
+It waits for the helper to finish, collects the typed reply and forwards it.
+
+```text
+goal create --children 2 --allow-helper grep --read-bytes 18 --reply-bytes 36
+goal grant-file --delegate-to grep /hello.txt
+agent run hello --delegate --with-file --reply-bytes 18 grep -F RamFS
+wait hello
+recv hello
+goal audit
+goal audit --reads
+goal audit --replies
+goal budget
+goal close
+```
+
+`wait hello` reports exit 0 and `recv hello` prints `Hello from RamFS`.
+The delegation audit names the agent and the accepted helper. Only the helper
+reads the 18-byte file. The reply audit records two sends of 18 bytes, one
+by each launch. The final balance is `available=0 reserved=0 spent=36`.
+
+Repeat with `--allow-helper echo` in the first command. The audit shows
+`denied=helper-not-allowed`, `hello` exits 1, and `recv hello` prints
+`cannot delegate child`. Both the read and reply totals are zero.
+
+To inspect the goal before delegation, add `--suspended` before `hello` and
+run `goal audit`. It shows zero entries until you issue `agent resume`.
+An empty match result is forwarded as an empty `Matches` reply with exit 1.
+
 ### Native syscall ABI
 
 The user program passes the call number in `a7` and executes `ecall`. Call 0
@@ -675,9 +708,9 @@ handles from one boot-wide sequence. RamFS allocates its handles independently.
 Call 16 (`wait`) takes the child handle in `a0`. On success, `a0` contains
 the result type. For exit (0) or fault (1), `a1` holds the full exit status
 or fault cause. For cancellation (2), `a1` is zero. The call returns -1 in
-`a0` for an invalid handle, a caller other than the shell, or an already
-collected status. Waiting on a suspended child returns -1 immediately. The
-shell can collect its result after it finishes or is cancelled.
+`a0` for an invalid handle, a caller other than the launch parent, or an
+already collected status. Waiting on a suspended child returns -1 immediately.
+A parent can wait for an agent that is itself waiting on a helper.
 
 Call 18 (`spawn_at`) takes a program selector in `a0` and a directory handle
 from the caller in `a1`. It returns a child handle on success and -1 on error.
@@ -685,12 +718,12 @@ The child receives its own directory handle in `a1` and a grant kind of 1 in
 `a2`. Launches without a grant set `a2` to 0.
 
 Call 19 (`message_send`) takes a user stack address in `a0` and a length from
-1 to 64 bytes in `a1`. A shell-launched child can queue one message for its
+1 to 64 bytes in `a1`. A launched child can queue one message for its
 live parent. The call returns the byte count on success and -1 on error. A
 send to a full mailbox preserves its queued message.
 
 Call 20 (`message_recv`) takes a user stack destination in `a0` and its nonzero
-capacity in `a1`. The shell passes a child handle in `a2` to receive a reply.
+capacity in `a1`. The launch parent passes a child handle in `a2` to receive a reply.
 A launched child passes 0 in `a2` to receive its request. The result gives
 the byte count in `a0` and the sender's task ID in `a1`. An empty reply mailbox
 blocks while the selected child runs. Other empty reads return 0 in both
@@ -740,7 +773,7 @@ insufficient capacity, or a caller without a child launch returns -1 in
 the same request once.
 
 Call 26 (`reply_send`) takes a user stack payload address in `a0`, length in
-`a1`, and reply kind in `a2`. A shell-launched child can queue one reply for
+`a1`, and reply kind in `a2`. A launched child can queue one reply for
 its live parent. The kernel records the sending task's ID. The call returns the
 payload length on success. For an empty payload it ignores the address and
 returns 0. Invalid arguments or a full mailbox return -1 and preserve any
@@ -754,13 +787,14 @@ queued reply.
 | 4 `ReadFailed` | Empty | The program could not read its input or serve the request |
 | 5 `Matches` | 0–64 bytes | All selected lines, or zero bytes for no matches |
 | 6 `ResultTooLarge` | Empty | The matched lines exceed the reply capacity |
+| 7 `DelegationFailed` | Empty | The agent could not start the requested helper |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
 and status 1 if the request or send fails.
 
 Call 27 (`reply_recv`) takes a user stack destination in `a0`, its capacity
-in `a1`, and a shell-owned child handle in `a2`. It waits for a reply or child
+in `a1`, and a child handle owned by the caller in `a2`. It waits for a reply or child
 completion. On delivery it returns the byte count in `a0`, the kernel-recorded
 sender in `a1`, and the child's reply kind in `a2`. A zero-capacity buffer
 can receive a zero-byte reply. During suspension or after completion an empty
@@ -809,11 +843,12 @@ relaunch invalidates the previous pipe handle along with the previous launch.
 Call 32 (`event_wait`) takes no arguments. Only the shell can collect events.
 It receives the oldest pending completion's launch handle in `a0` and its
 kind in `a1` (0 for exit, 1 for fault, 2 for cancellation). While the shell
-is alive, the kernel records one notification per completed launch, up to three
-at a time. The boot greeting has no parent launch and produces no event.
+is alive, the kernel records one notification per completed shell-owned launch,
+up to three at a time. Agent-launched helpers deliver replies and wait results
+to their agent. The boot greeting has no parent launch and produces no event.
 Other callers receive -1 in `a0`.
 
-With an empty queue, the call sleeps while a launched child can still run.
+With an empty queue, the call sleeps while a shell-owned child can make progress.
 If every outstanding child is suspended or blocked writing to a full pipe,
 or there are no outstanding children, it returns zero in both registers.
 The shell can resume an agent, drain or close a pipe, and retry. Reading an
@@ -848,9 +883,13 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 55 `spawn_with_file_arg` | `a0` program selector, `a1` shell file handle, `a2` argument address, `a3` argument length | Fresh child handle with a read-only file and an `Argument` request |
 | 56 `agent_delegate_with_file_arg` | `a0` agent handle, `a1` program selector, `a2` reply bytes, `a3` argument address, `a4` argument length | Fresh helper handle with the delegated read-only file and an `Argument` request |
 | 57 `goal_read_audit` | Same arguments as call 52 | Retained read entry count (0–4), overwritten count in `a1` and lifetime bytes delivered in `a2`, or -1 on failure |
+| 58 `agent_run_with_request` | `a0` goal, `a1` program, `a2` flags, `a3` optional agent reply allowance, `a4` request address, `a5` request length | Fresh agent handle, with its child launch handle in `a1` |
 
-Only the shell can use these calls. A stale or invalid handle or a call
-from another task returns -1 in `a0`. Calls 33 and 43 create single-child
+The shell owns the goal and controls its agents. Calls 49, 51 and 56 also
+accept `CURRENT_AGENT` (zero) when the calling task is itself the goal's live
+agent. The kernel resolves its original launch and agent handle. Only the shell
+can delegate by supplying an explicit agent handle. An unauthorized caller
+or a stale handle returns -1 in `a0`. Calls 33 and 43 create single-child
 goals with unrestricted helper selection and unlimited reads. Call 48 also
 supports two children. Each option register is ignored when its flag is clear.
 Setting bit 2 with `a4` zero creates a zero-byte read allowance.
@@ -862,9 +901,15 @@ goal, a second agent, insufficient available bytes, or exhausted handles.
 A failed launch preserves goal membership, grants, reservations and launch handles.
 
 The kernel binds the child to the goal before its first instruction.
-The agent run calls also create and bind the agent in that operation. Every
-goal child starts with an empty mailbox and uses the ordinary reply, event
-and wait calls. Direct children inherit any file granted to the goal.
+The agent run calls also create and bind the agent in that operation. Direct
+children inherit any file granted to the goal. Call 58 installs a
+`DelegateWithFile` request (tag 4) before the agent starts. Bit 0 of the flags
+starts it suspended. Bit 1 selects the explicit agent reply allowance in
+`a3`. Otherwise it inherits the available balance. Unknown bits, a bad buffer
+or a length outside 16–80 bytes fail before admission. The first two
+little-endian RV64 words specify the requested helper program and its reply
+allowance. The remaining 0–64 bytes are its literal argument. Admission of
+the helper occurs when the agent makes its own delegation call.
 
 Calls 47, 50 and 54 accept one regular file while the goal is ready. The kernel
 retains the file independently of the shell's descriptor, cursor and pathname. Closing
@@ -891,15 +936,21 @@ agent's open delegable handle before allocating a read-only handle with an
 independent cursor.
 The new file handle arrives in `a1`, file kind 2 in `a2` and zero in `a3`.
 The kernel commits the file grant, reply reservation and launch together.
-The shell receives the ordinary launch handle for replies, events and waits.
+The caller receives the helper handle and owns its reply and wait result.
+The shell receives events for the launches it issues, including helpers it
+launches on behalf of an agent. Across different live parents, a stopped
+program slot stays busy while its old parent has a pending reply, wait
+result, shell event or open pipe reader. This lets the parent collect the
+result even when another caller tries to launch the same program.
 
 Calls 55 and 56 copy up to 64 literal argument bytes into the launch mailbox
 before the child can run. The child reads the argument with call 25. An empty
 argument has tag 3. Invalid arguments fail before admission or reservation.
 
-Call 52 snapshots decisions from calls 49, 51 and 56 made by the owning shell for
-an agent in the open goal. Attempts with a foreign or stale agent handle are
-discarded. Each 48-byte entry begins with the agent handle, requested program
+Call 52 snapshots decisions from calls 49, 51 and 56 made by the owning shell
+or by the live agent. Both use the resolved agent handle in the record.
+Attempts without a valid caller binding are discarded. Each 48-byte entry
+begins with the agent handle, requested program
 selector, requested reply bytes, and file flag (0 or 1). The final two words
 hold the decision code and helper launch handle. All six words are little-endian
 RV64 values. On acceptance, code 0 accompanies the new child's handle.
@@ -964,18 +1015,19 @@ child, including after that child stops while its sibling runs.
 
 If an agent exits or faults with its helper still live, the kernel records
 the agent's completion and then cancels the helper before scheduling another
-task. The shell can collect both events and wait results. In this case
-`goal_status` reports the cancelled helper and `agent_status` reports the
-agent's exit status or fault cause.
+task. For a shell-issued delegation the shell can collect both events and
+wait results. For an agent-issued delegation it can collect the agent's.
+In either case `goal_status` reports the cancelled helper and `agent_status`
+reports the agent's exit status or fault cause.
 
 Repeating suspend or resume on a live agent already in the requested state
 succeeds. A paused child keeps its slot and any queued reply. Suspension and
 resumption produce no completion event.
 
 `goal_cancel` stops each live member by its original launch handle in launch
-order. Its program slot becomes available for reuse immediately. The kernel
-queues one event per cancelled child. Repeating cancellation returns 0 even
-after another launch reuses a slot. Cancelling a ready goal produces no event.
+order. The kernel queues one event per cancelled shell-owned child. Repeating
+cancellation returns 0 even after another launch reuses a slot. Cancelling a
+ready goal produces no event.
 
 Goal and agent status reads are repeatable and survive reuse of the child's
 program slot. Closing the goal releases its agent identity. The child's pending

@@ -67,6 +67,7 @@ pub const SYS_GOAL_GRANT_FILE_TO: usize = 54;
 pub const SYS_SPAWN_WITH_FILE_ARG: usize = 55;
 pub const SYS_AGENT_DELEGATE_WITH_FILE_ARG: usize = 56;
 pub const SYS_GOAL_READ_AUDIT: usize = 57;
+pub const SYS_AGENT_RUN_WITH_REQUEST: usize = 58;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_DIRECTORY_GRANT: usize = usize::MAX;
@@ -77,6 +78,7 @@ pub enum RequestKind {
     Echo = 1,
     ReadFile = 2,
     Argument = 3,
+    DelegateWithFile = 4,
 }
 
 impl RequestKind {
@@ -85,6 +87,7 @@ impl RequestKind {
             value if value == Self::Echo as usize => Some(Self::Echo),
             value if value == Self::ReadFile as usize => Some(Self::ReadFile),
             value if value == Self::Argument as usize => Some(Self::Argument),
+            value if value == Self::DelegateWithFile as usize => Some(Self::DelegateWithFile),
             _ => None,
         }
     }
@@ -100,6 +103,7 @@ pub enum ReplyKind {
     ReadFailed = 4,
     Matches = 5,
     ResultTooLarge = 6,
+    DelegationFailed = 7,
 }
 
 impl ReplyKind {
@@ -111,6 +115,7 @@ impl ReplyKind {
             value if value == Self::ReadFailed as usize => Some(Self::ReadFailed),
             value if value == Self::Matches as usize => Some(Self::Matches),
             value if value == Self::ResultTooLarge as usize => Some(Self::ResultTooLarge),
+            value if value == Self::DelegationFailed as usize => Some(Self::DelegationFailed),
             _ => None,
         }
     }

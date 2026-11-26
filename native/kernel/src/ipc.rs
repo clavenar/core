@@ -1,5 +1,6 @@
 pub(crate) mod pipe;
 
+use clv_abi::agent::{DELEGATION_HEADER_BYTES, DELEGATION_REQUEST_MAX_BYTES};
 use clv_abi::{FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, ReplyKind, RequestKind};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -22,9 +23,15 @@ impl MessageKind {
             | Self::Reply(ReplyKind::Echo) => (1..=MESSAGE_MAX_BYTES).contains(&length),
             Self::Request(RequestKind::Argument)
             | Self::Reply(ReplyKind::FileData | ReplyKind::Matches) => length <= MESSAGE_MAX_BYTES,
-            Self::Reply(ReplyKind::Denied | ReplyKind::ReadFailed | ReplyKind::ResultTooLarge) => {
-                length == 0
+            Self::Request(RequestKind::DelegateWithFile) => {
+                (DELEGATION_HEADER_BYTES..=DELEGATION_REQUEST_MAX_BYTES).contains(&length)
             }
+            Self::Reply(
+                ReplyKind::Denied
+                | ReplyKind::ReadFailed
+                | ReplyKind::ResultTooLarge
+                | ReplyKind::DelegationFailed,
+            ) => length == 0,
         }
     }
 
@@ -40,8 +47,8 @@ impl MessageKind {
 pub(crate) struct Message {
     pub(crate) kind: MessageKind,
     pub(crate) sender: usize,
-    // File replies reserve an extra byte for the legacy reader's status prefix.
-    bytes: [u8; MESSAGE_MAX_BYTES + 1],
+    // Also accommodates the legacy status prefix on a full-sized file reply.
+    bytes: [u8; DELEGATION_REQUEST_MAX_BYTES],
     wire_length: usize,
 }
 
@@ -56,7 +63,7 @@ impl Message {
             return None;
         }
         let prefix = kind.legacy_prefix();
-        let mut bytes = [0; MESSAGE_MAX_BYTES + 1];
+        let mut bytes = [0; DELEGATION_REQUEST_MAX_BYTES];
         let wire_length = prefix.len() + length;
         bytes[..prefix.len()].copy_from_slice(prefix);
         if !copy(&mut bytes[prefix.len()..wire_length]) {
@@ -79,7 +86,7 @@ impl Message {
     }
 
     pub(crate) fn bytes(&self, legacy: bool) -> &[u8] {
-        if legacy {
+        if legacy && matches!(self.kind, MessageKind::Reply(_)) {
             &self.bytes[..self.wire_length.min(MESSAGE_MAX_BYTES)]
         } else {
             &self.bytes[self.kind.legacy_prefix().len()..self.wire_length]

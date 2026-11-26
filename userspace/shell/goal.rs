@@ -195,7 +195,7 @@ pub(super) fn agent_command(
                 None => print(b"no current agent\r\n"),
             }
         }
-        _ => print(b"usage: agent run [--suspended] [--reply-bytes N] <program> | delegate [--with-file] --reply-bytes N <program> [-F <pattern>] | status | suspend | resume\r\n"),
+        _ => print(b"usage: agent run [options] <program> [--delegate --with-file --reply-bytes N grep -F <pattern>] | delegate [--with-file] --reply-bytes N <program> [-F <pattern>] | status | suspend | resume\r\n"),
     }
 }
 

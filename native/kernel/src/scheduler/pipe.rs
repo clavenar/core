@@ -27,7 +27,7 @@ impl Scheduler {
         frame: &mut TrapFrame,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> PipeResult {
-        let Some((launch, child_state)) = self.launch_for_shell(handle) else {
+        let Some((launch, child_state)) = self.launch_for_parent(handle) else {
             return PipeResult::Error;
         };
         let Some(pipe) = launch.pipe.as_mut() else {
@@ -75,7 +75,7 @@ impl Scheduler {
     pub(crate) fn close_pipe(&mut self, handle: usize) -> bool {
         if self.current == SHELL_TASK_INDEX {
             return self
-                .launch_for_shell(handle)
+                .launch_for_parent(handle)
                 .is_some_and(|(launch, state)| launch.close_pipe_reader(state));
         }
         let closed = self.writer_pipe(handle).is_some_and(Pipe::close_writer);

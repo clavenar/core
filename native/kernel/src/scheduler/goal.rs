@@ -291,10 +291,13 @@ impl Scheduler {
         }
         let index = self.launch_index(member.handle)?;
         let state = &mut self.tasks[index].state;
-        if !matches!(state, TaskState::Runnable | TaskState::Suspended) {
+        if *state != TaskState::Suspended && !state.can_finish() {
             return None;
         }
-        *state = TaskState::for_agent(suspended);
+        // A suspended blocking syscall retries at its saved PC after resume.
+        if suspended || *state == TaskState::Suspended {
+            *state = TaskState::for_agent(suspended);
+        }
         Some(ControlResult::Applied)
     }
 

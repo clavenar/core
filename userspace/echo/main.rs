@@ -18,7 +18,7 @@ extern "C" fn _start() -> ! {
             ..
         }) => bytes,
         Some(LaunchRequest::Received {
-            kind: RequestKind::ReadFile | RequestKind::Argument,
+            kind: RequestKind::ReadFile | RequestKind::Argument | RequestKind::DelegateWithFile,
             ..
         }) => {
             clv::send_reply(ReplyKind::ReadFailed, &[]);

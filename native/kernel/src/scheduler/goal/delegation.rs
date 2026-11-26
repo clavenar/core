@@ -1,25 +1,40 @@
 use clv_abi::Program;
+use clv_abi::agent::CURRENT_AGENT;
 use clv_abi::audit::{DelegationDenial, DelegationRecord, DelegationRequest};
 
 use super::{Goal, MemberRole};
 use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::ipc::Message;
-use crate::scheduler::{PreparedLaunch, Scheduler, Task, TaskState};
+use crate::scheduler::{LaunchParent, PreparedLaunch, Scheduler, Task, TaskState};
 
 impl Scheduler {
     pub(crate) fn delegate(
         &mut self,
         fs: &mut RamFs,
-        request: DelegationRequest,
+        mut request: DelegationRequest,
         argument: Result<Option<Message>, DelegationDenial>,
     ) -> Option<usize> {
-        let (goal, agent) = self.agent_member(request.agent)?;
+        let (goal, agent, owner) = if request.agent == CURRENT_AGENT {
+            let child = self.tasks[self.current].launch.as_ref()?.handle;
+            let goal = self.goal.as_ref()?;
+            let member = goal
+                .members()
+                .find(|m| m.handle == child && m.completion.is_none())?;
+            let MemberRole::Agent(handle) = member.role else {
+                return None;
+            };
+            request.agent = handle;
+            (goal, member, LaunchParent::Agent(child))
+        } else {
+            let (goal, member) = self.agent_member(request.agent)?;
+            (goal, member, LaunchParent::Shell)
+        };
         let parent = agent.handle;
         let launch = if agent.completion.is_some() {
             Err(DelegationDenial::AgentFinished)
         } else {
             goal.helper_program(request.program)
-                .and_then(|program| self.prepare_launch(program, None))
+                .and_then(|program| self.prepare_launch(program, None, owner))
         };
         let goal = self.goal.as_mut()?;
         let admission = launch.and_then(|launch| {

@@ -83,6 +83,7 @@ fn run_command(line: &[u8], children: &mut Children, current_goal: &mut Option<g
               goal grant-file [--delegable | --delegate-to <program>] <path>\r\n\
               goal status  goal budget  goal audit [--replies | --reads]  goal cancel  goal close\r\n\
               agent run [--suspended] [--reply-bytes N] <program>\r\n\
+              agent run hello --delegate --with-file --reply-bytes N grep -F <pattern>\r\n\
               agent delegate [--with-file] --reply-bytes N <program> [-F <pattern>]\r\n\
               agent status  agent suspend  agent resume\r\n",
         ),
