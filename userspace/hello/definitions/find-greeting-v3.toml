@@ -1,0 +1,9 @@
+name = "find-greeting"
+revision = 3
+agent = "hello"
+
+[delegate_with_file]
+tool = "text.search@1"
+argument = "Hello"
+reply_bytes = 18
+stdio = true

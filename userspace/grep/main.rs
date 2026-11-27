@@ -1,36 +1,50 @@
 #![no_std]
 #![no_main]
 
-use clv::{LaunchRequest, fs};
+use clv::{LaunchRequest, fs, pipe};
 use clv_abi::tool::TEXT_SEARCH_V1;
-use clv_abi::{GrantKind, MESSAGE_MAX_BYTES, ReplyKind, RequestKind};
+use clv_abi::{GrantKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, ReplyKind, RequestKind};
 use core::panic::PanicInfo;
 
 // SAFETY: The kernel enters this unique symbol with an aligned user stack.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
-extern "C" fn _start(_task: usize, file: usize, grant: usize) -> ! {
+extern "C" fn _start(_task: usize, file: usize, grant: usize, io: usize) -> ! {
     let mut argument = [0; MESSAGE_MAX_BYTES];
+    let Some(LaunchRequest::Received { kind, bytes, .. }) = clv::receive_request(&mut argument)
+    else {
+        fail(ReplyKind::ReadFailed);
+    };
+    if grant != GrantKind::File as usize {
+        fail(ReplyKind::ReadFailed);
+    }
+    let stdout = match kind {
+        RequestKind::Argument => None,
+        RequestKind::FileToolStdio if io != NO_CHILD_HANDLE => Some(io),
+        _ => fail(ReplyKind::ReadFailed),
+    };
+    if let Some(io) = stdout {
+        let mut input = [0; MESSAGE_MAX_BYTES];
+        if pipe::read_to_end(io, &mut input[..bytes.len()]) != Some(bytes) {
+            fail(ReplyKind::ReadFailed);
+        }
+    }
+
     let mut output = [0; MESSAGE_MAX_BYTES];
-    let result = match clv::receive_request(&mut argument) {
-        Some(LaunchRequest::Received {
-            kind: RequestKind::Argument,
-            bytes,
-            ..
-        }) if grant == GrantKind::File as usize => search(file, bytes, &mut output),
-        _ => Err(ReplyKind::ReadFailed),
+    let length = match search(file, bytes, &mut output) {
+        Ok(length) => length,
+        Err(kind) => fail(kind),
     };
-    let status = match result {
-        Ok(length) if clv::send_reply(TEXT_SEARCH_V1.success_reply, &output[..length]) => {
-            usize::from(length == 0)
-        }
-        Ok(_) => 2,
-        Err(kind) => {
-            clv::send_reply(kind, &[]);
-            2
-        }
+    let sent = match stdout {
+        Some(io) => pipe::write_all(io, &output[..length]).is_some(),
+        None => clv::send_reply(TEXT_SEARCH_V1.success_reply, &output[..length]),
     };
-    clv::exit(status)
+    clv::exit(if sent { usize::from(length == 0) } else { 2 })
+}
+
+fn fail(kind: ReplyKind) -> ! {
+    clv::send_reply(kind, &[]);
+    clv::exit(2)
 }
 
 fn contains(line: &[u8], pattern: &[u8]) -> bool {

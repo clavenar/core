@@ -1,13 +1,14 @@
 pub use clv_abi::agent::{
     AgentLaunch, AgentStatus, CURRENT_AGENT, ControlResult, DefinitionId, DefinitionPin,
-    FIND_GREETING_V1, FIND_GREETING_V2, FileDelegation, FileToolInvocation, PlanIntent,
-    ResumeReceipt,
+    FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, FileDelegation, FileToolInvocation,
+    PlanIntent, ResumeReceipt,
 };
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES,
     RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR,
     RUN_SUSPENDED, encode_rename_pair,
 };
+use clv_abi::tool::FILE_TOOL_STDIO;
 use clv_abi::{
     MESSAGE_MAX_BYTES, PATH_MAX_BYTES, Program, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
     SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_LAUNCH_SUPERVISOR,
@@ -168,6 +169,7 @@ pub fn delegate_with_file_arg(
         program,
         reply_bytes,
         argument,
+        0,
     )
 }
 
@@ -179,6 +181,19 @@ pub fn invoke_file_tool(agent: usize, request: &FileToolInvocation<'_>) -> Optio
         request.tool.0.try_into().ok()?,
         request.reply_bytes,
         request.argument,
+        0,
+    )
+}
+
+/// Invokes the file tool with stdin and stdout using its approved literal.
+pub fn invoke_file_tool_stdio(agent: usize, request: &FileToolInvocation<'_>) -> Option<usize> {
+    delegate_literal(
+        SYS_AGENT_INVOKE_FILE_TOOL,
+        agent,
+        request.tool.0.try_into().ok()?,
+        request.reply_bytes,
+        request.argument,
+        FILE_TOOL_STDIO,
     )
 }
 
@@ -188,9 +203,10 @@ fn delegate_literal(
     selector: usize,
     reply_bytes: usize,
     argument: &[u8],
+    mode: usize,
 ) -> Option<usize> {
     with_stack_bytes::<MESSAGE_MAX_BYTES>(argument, |address, length| {
-        ecall(call, agent, selector, reply_bytes, address, length).0
+        ecall6(call, agent, selector, reply_bytes, address, length, mode).0
     })
 }
 

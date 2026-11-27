@@ -63,11 +63,14 @@ impl TaskState {
     }
 
     // An agent blocked on its helper can still finish while its own parent waits.
-    fn can_finish(self) -> bool {
-        matches!(
-            self,
-            Self::Runnable | Self::WaitingForChild(_) | Self::WaitingForMessage(_)
-        )
+    fn can_finish(self, launch: usize) -> bool {
+        match self {
+            Self::Runnable | Self::WaitingForChild(_) | Self::WaitingForMessage(_) => true,
+            Self::WaitingForPipeData(handle) | Self::WaitingForPipeSpace(handle) => {
+                handle != launch
+            }
+            _ => false,
+        }
     }
 }
 
@@ -391,10 +394,13 @@ impl Scheduler {
                 self.tasks[self.current].fs.grant(fs, fd, GrantKind::File)?
             }
         };
-        let pipes = LaunchPipes {
-            stdin: matches!(scope, LaunchScope::Stdio).then(Pipe::new),
-            stdout: matches!(scope, LaunchScope::Stdio | LaunchScope::FileWithPipe(_))
-                .then(Pipe::new),
+        let pipes = match scope {
+            LaunchScope::Stdio => LaunchPipes::stdio(),
+            LaunchScope::FileWithPipe(_) => LaunchPipes {
+                stdin: None,
+                stdout: Some(Pipe::new()),
+            },
+            _ => LaunchPipes::default(),
         };
         Some(self.install_child(launch, task_fs, request, pipes, initial_state))
     }
@@ -467,7 +473,8 @@ impl Scheduler {
         if let Some(completion) = launch.completion.take() {
             return WaitResult::Ready(completion);
         }
-        if state.can_finish() && self.block_current(frame, TaskState::WaitingForChild(handle)) {
+        if state.can_finish(handle) && self.block_current(frame, TaskState::WaitingForChild(handle))
+        {
             WaitResult::Blocked
         } else {
             WaitResult::Unavailable
@@ -495,11 +502,9 @@ impl Scheduler {
             });
         }
         let can_finish = self.tasks.iter().any(|task| {
-            task.state.can_finish()
-                && task
-                    .launch
-                    .as_ref()
-                    .is_some_and(|launch| launch.parent == LaunchParent::Shell)
+            task.launch.as_ref().is_some_and(|launch| {
+                launch.parent == LaunchParent::Shell && task.state.can_finish(launch.handle)
+            })
         });
         if can_finish && self.block_current(frame, TaskState::WaitingForEvent) {
             WaitResult::Blocked
@@ -575,7 +580,7 @@ impl Scheduler {
         match wait_for {
             Some((handle, state)) if state.waits_for_pipe(handle) => ReceiveResult::Error,
             Some((handle, state))
-                if state.can_finish()
+                if state.can_finish(handle)
                     && self.block_current(frame, TaskState::WaitingForMessage(handle)) =>
             {
                 ReceiveResult::Blocked
@@ -642,6 +647,13 @@ impl Scheduler {
                 let state = &mut self.tasks[parent].state;
                 if state.waits_for_result(handle) || state.waits_for_pipe(handle) {
                     *state = TaskState::Runnable;
+                }
+            }
+            for task in &mut self.tasks {
+                if let Some(launch) = &mut task.launch
+                    && launch.parent == LaunchParent::Agent(handle)
+                {
+                    launch.close_parent_pipes(&mut task.state);
                 }
             }
         }

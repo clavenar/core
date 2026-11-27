@@ -1,5 +1,8 @@
 use crate::{Program, ReplyKind};
 
+/// Selects stdin and stdout pipes in `a5` for `agent_invoke_file_tool`.
+pub const FILE_TOOL_STDIO: usize = 1;
+
 /// RV64 wire identity. The high 32 bits identify the tool and the low 32 its revision.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ToolId(pub u64);

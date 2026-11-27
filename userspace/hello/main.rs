@@ -54,7 +54,7 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, extra: usi
             kind: kind @ (RequestKind::PlanIntent | RequestKind::PlanDefinition),
             bytes,
             ..
-        }) => supervise_helper(launch_planned_helper(kind, bytes)),
+        }) => run_plan(kind, bytes),
         _ if grant_kind == GrantKind::File as usize && extra != 0 => {
             let status = copy_file(handle, |bytes| pipe::write(extra, bytes));
             pipe::close(extra);
@@ -97,27 +97,42 @@ fn delegate_file(bytes: &[u8]) -> Option<usize> {
     agent::delegate_from_current(&agent::FileDelegation::decode(bytes)?)
 }
 
-fn launch_planned_helper(kind: RequestKind, bytes: &[u8]) -> Option<usize> {
-    match agent::DefinitionId::from_request(kind, bytes)? {
-        agent::FIND_GREETING_V1 => delegate_file(include_bytes!(concat!(
-            env!("OUT_DIR"),
-            "/find-greeting-v1.action"
-        ))),
-        agent::FIND_GREETING_V2 => {
+fn run_plan(kind: RequestKind, bytes: &[u8]) -> usize {
+    match agent::DefinitionId::from_request(kind, bytes) {
+        Some(agent::FIND_GREETING_V1) => {
+            let action = include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v1.action"));
+            supervise_helper(delegate_file(action))
+        }
+        Some(agent::FIND_GREETING_V2) => {
             let request = agent::FileToolInvocation::decode(include_bytes!(concat!(
                 env!("OUT_DIR"),
                 "/find-greeting-v2.action"
-            )))?;
-            agent::invoke_file_tool(agent::CURRENT_AGENT, &request)
+            )));
+            let helper =
+                request.and_then(|request| agent::invoke_file_tool(agent::CURRENT_AGENT, &request));
+            supervise_helper(helper)
         }
-        _ => None,
+        Some(agent::FIND_GREETING_V3) => {
+            let Some(request) = agent::FileToolInvocation::decode(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/find-greeting-v3.action"
+            ))) else {
+                return delegation_failed();
+            };
+            supervise_stdio_tool(&request)
+        }
+        _ => delegation_failed(),
     }
+}
+
+fn delegation_failed() -> usize {
+    clv::send_reply(ReplyKind::DelegationFailed, &[]);
+    1
 }
 
 fn supervise_helper(helper: Option<usize>) -> usize {
     let Some(helper) = helper else {
-        clv::send_reply(ReplyKind::DelegationFailed, &[]);
-        return 1;
+        return delegation_failed();
     };
     // Finish the helper and return its unused reservation before forwarding the reply.
     let status = clv::wait(helper);
@@ -129,6 +144,42 @@ fn supervise_helper(helper: Option<usize>) -> usize {
             code
         }
         _ => 2,
+    }
+}
+
+fn supervise_stdio_tool(request: &agent::FileToolInvocation<'_>) -> usize {
+    let Some(helper) = agent::invoke_file_tool_stdio(agent::CURRENT_AGENT, request) else {
+        return delegation_failed();
+    };
+    let mut input = [0; MESSAGE_MAX_BYTES];
+    let input = &mut input[..request.argument.len()];
+    input.copy_from_slice(request.argument);
+    let sent = pipe::write_all(helper, input).is_some();
+    let stdin_closed = pipe::close_stdin(helper);
+
+    let mut output = [0; MESSAGE_MAX_BYTES];
+    let bytes = if sent && stdin_closed {
+        pipe::read_to_end(helper, &mut output)
+    } else {
+        None
+    };
+    pipe::close(helper);
+    let status = clv::wait(helper);
+    let (Some(ChildStatus::Exited(code @ 0..=1)), Some(bytes)) = (status, bytes) else {
+        let kind = match clv::receive_reply(helper, &mut []) {
+            Some(ChildReply::Received {
+                kind: kind @ (ReplyKind::ReadFailed | ReplyKind::ResultTooLarge),
+                ..
+            }) => kind,
+            _ => ReplyKind::ReadFailed,
+        };
+        clv::send_reply(kind, &[]);
+        return 2;
+    };
+    if clv::send_reply(ReplyKind::Matches, bytes) {
+        code
+    } else {
+        2
     }
 }
 

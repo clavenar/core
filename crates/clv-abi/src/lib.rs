@@ -129,6 +129,8 @@ pub enum RequestKind {
     /// Empty assignment to review the rename bound to this launch.
     ReviewRename = 10,
     StageRenamePair = 11,
+    /// The approved literal for a registered tool launched with stdio pipes.
+    FileToolStdio = 12,
 }
 
 impl RequestKind {
@@ -145,6 +147,7 @@ impl RequestKind {
             value if value == Self::ResumeAgent as usize => Some(Self::ResumeAgent),
             value if value == Self::ReviewRename as usize => Some(Self::ReviewRename),
             value if value == Self::StageRenamePair as usize => Some(Self::StageRenamePair),
+            value if value == Self::FileToolStdio as usize => Some(Self::FileToolStdio),
             _ => None,
         }
     }

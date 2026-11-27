@@ -6,7 +6,7 @@ use clv_abi::audit::{DelegationDenial, PublicationAuditView, ReadAuditView};
 use clv_abi::goal::{
     EncodedGoalCreate, FileRecipient, GoalCreateRequest, RENAME_DIFF_HEADER_BYTES, ReviewToken,
 };
-use clv_abi::tool::ToolId;
+use clv_abi::tool::{FILE_TOOL_STDIO, ToolId};
 use clv_abi::{
     ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE,
     PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, PipeStream, Program, ReplyKind, RequestKind,
@@ -343,7 +343,8 @@ pub(crate) fn dispatch(
         | SYS_AGENT_DELEGATE_WITH_FILE
         | SYS_AGENT_DELEGATE_WITH_FILE_ARG
         | SYS_AGENT_INVOKE_FILE_TOOL => {
-            let target = if number == SYS_AGENT_INVOKE_FILE_TOOL {
+            let file_tool = number == SYS_AGENT_INVOKE_FILE_TOOL;
+            let target = if file_tool {
                 DelegationTarget::FileTool(ToolId(a1 as u64))
             } else {
                 DelegationTarget::Program {
@@ -351,18 +352,19 @@ pub(crate) fn dispatch(
                     with_file: number != SYS_AGENT_DELEGATE,
                 }
             };
-            let argument = if matches!(
-                number,
-                SYS_AGENT_DELEGATE_WITH_FILE_ARG | SYS_AGENT_INVOKE_FILE_TOOL
-            ) {
-                copy_request(
-                    scheduler,
-                    RequestKind::Argument,
-                    a3,
-                    frame.registers[REG_A4],
-                )
-                .map(Some)
-                .ok_or(DelegationDenial::InvalidArgument)
+            let argument = if file_tool || number == SYS_AGENT_DELEGATE_WITH_FILE_ARG {
+                let kind = if file_tool {
+                    match frame.registers[REG_A5] {
+                        0 => Some(RequestKind::Argument),
+                        FILE_TOOL_STDIO => Some(RequestKind::FileToolStdio),
+                        _ => None,
+                    }
+                } else {
+                    Some(RequestKind::Argument)
+                };
+                kind.and_then(|kind| copy_request(scheduler, kind, a3, frame.registers[REG_A4]))
+                    .map(Some)
+                    .ok_or(DelegationDenial::InvalidArgument)
             } else {
                 Ok(None)
             };

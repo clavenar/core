@@ -1064,7 +1064,7 @@ completion or cancellation, until the owner closes the goal. [Definition source]
 ```text
 goal create --children 2 --allow-helper grep --read-bytes 18 --reply-bytes 36
 goal grant-file --delegate-to grep --argument Hello /hello.txt
-agent run hello --mock find-greeting@3
+agent run hello --mock find-greeting@4
 goal status
 goal budget
 agent run --suspended hello --mock find-greeting@1
@@ -1077,7 +1077,7 @@ goal audit
 goal close
 ```
 
-Revision 3 prints `cannot start agent`. The goal remains `Ready` with
+Revision 4 prints `cannot start agent`. The goal remains `Ready` with
 `available=36 reserved=0 spent=0`. Revision 1 starts in the same goal.
 Both status snapshots show `definition=find-greeting@1 sha256=` followed
 by the same 64 hex digits. Compare those digits on the build host with
@@ -1127,6 +1127,39 @@ The audit identifies the same tool and image and reports
 The only reply is the agent's zero-byte failure, and all 36 reply bytes are
 available when the agent exits. The shorthand `find-greeting` still selects
 revision 1, whose ordinary program delegation has no tool identity.
+
+### Invoke a registered file tool over stdio
+
+`find-greeting@3` invokes the same `text.search@1` tool with two pipes.
+The agent sends the approved literal and closes stdin. `grep` checks the
+complete input against the launch literal before reading the file. The
+agent drains stdout, collects the helper's exit status and forwards the
+result. [Revision 3 definition](../userspace/hello/definitions/find-greeting-v3.toml)
+
+```text
+goal create --children 2 --allow-tool text.search@1 --read-bytes 18 --reply-bytes 36
+goal grant-file --delegate-to grep --argument Hello /hello.txt
+agent run hello --mock find-greeting@3
+wait hello
+recv hello
+goal audit
+goal audit --reads
+goal audit --replies
+goal budget
+goal close
+```
+
+The shell prints `Hello from RamFS`. The read audit reports `read_bytes=18`.
+The reply audit attributes 18 bytes to the helper's stdout and 18 to the
+agent's forwarded reply. The final balance is `available=0 reserved=0
+spent=36`.
+
+To exercise a denied stdout write, first run
+`write /long.txt Hello from a longer line`. Repeat with `--read-bytes 64`
+and grant `/long.txt`. The result exceeds the pinned 18-byte helper
+reservation. The helper's reply audit reports
+`denied=insufficient-reply-bytes`, the shell prints
+`cannot read requested file` and the final balance reports `spent=0`.
 
 ### Require an exact tool revision for a goal
 

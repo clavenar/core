@@ -27,7 +27,7 @@ impl MessageKind {
         match self {
             Self::Request(RequestKind::Echo | RequestKind::ReadFile)
             | Self::Reply(ReplyKind::Echo) => (1..=MESSAGE_MAX_BYTES).contains(&length),
-            Self::Request(RequestKind::Argument)
+            Self::Request(RequestKind::Argument | RequestKind::FileToolStdio)
             | Self::Reply(ReplyKind::FileData | ReplyKind::Matches) => length <= MESSAGE_MAX_BYTES,
             Self::Request(RequestKind::DelegateWithFile) => {
                 (DELEGATION_HEADER_BYTES..=DELEGATION_REQUEST_MAX_BYTES).contains(&length)

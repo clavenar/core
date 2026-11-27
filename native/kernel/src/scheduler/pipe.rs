@@ -11,6 +11,13 @@ pub(super) struct LaunchPipes {
 }
 
 impl LaunchPipes {
+    pub(super) fn stdio() -> Self {
+        Self {
+            stdin: Some(Pipe::new()),
+            stdout: Some(Pipe::new()),
+        }
+    }
+
     fn get_mut(&mut self, stream: PipeStream) -> Option<&mut Pipe> {
         match stream {
             PipeStream::Stdin => self.stdin.as_mut(),
@@ -102,10 +109,19 @@ impl Scheduler {
         } else {
             PipeStream::Stdout
         };
-        let Some(pipe) = self.pipes(access.child).get_mut(stream) else {
+        let launch = self.tasks[access.child].launch.as_mut().unwrap();
+        let Some(pipe) = launch.pipes.get_mut(stream) else {
             return PipeResult::Error;
         };
-        let result = pipe.write(length, copy);
+        let goal = &mut self.goal;
+        // The copied prefix becomes visible only after the budget check succeeds.
+        let result = pipe.write(length, |bytes| {
+            copy(bytes)
+                && (access.is_parent
+                    || goal
+                        .as_mut()
+                        .is_none_or(|goal| goal.charge_reply(handle, bytes.len()).is_some()))
+        });
         match result {
             PipeResult::Ready(count) if count > 0 => {
                 self.wake_pipe_peer(access.peer, TaskState::WaitingForPipeData(handle));

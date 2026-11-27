@@ -4,12 +4,12 @@ use clv_abi::audit::{
     DelegationRequest, RequestedTool, UNRESOLVED_TOOL_PROGRAM,
 };
 use clv_abi::tool::ToolId;
-use clv_abi::{LaunchParent, Program};
+use clv_abi::{LaunchParent, Program, RequestKind};
 
 use super::{DelegationTarget, Goal, MemberRole};
 use crate::fs::ramfs::{RamFs, TaskFs};
-use crate::ipc::Message;
-use crate::scheduler::{PreparedLaunch, Scheduler, Task, TaskState};
+use crate::ipc::{Message, MessageKind};
+use crate::scheduler::{LaunchPipes, PreparedLaunch, Scheduler, Task, TaskState};
 
 impl Scheduler {
     pub(crate) fn delegate(
@@ -68,13 +68,15 @@ impl Scheduler {
             .encode(),
         );
         let (launch, child_fs, argument) = admission.ok()?;
-        Some(self.install_child(
-            launch,
-            child_fs,
-            argument,
-            Default::default(),
-            TaskState::Runnable,
-        ))
+        let pipes = if argument
+            .as_ref()
+            .is_some_and(|message| message.kind == MessageKind::Request(RequestKind::FileToolStdio))
+        {
+            LaunchPipes::stdio()
+        } else {
+            LaunchPipes::default()
+        };
+        Some(self.install_child(launch, child_fs, argument, pipes, TaskState::Runnable))
     }
 }
 

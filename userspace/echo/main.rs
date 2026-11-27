@@ -50,17 +50,11 @@ extern "C" fn _start(_task: usize, _file: usize, grant_kind: usize, io: usize) -
 fn echo_stdio(handle: usize) -> Option<()> {
     let mut buffer = [0; PIPE_CAPACITY];
     loop {
-        let mut bytes = pipe::read(handle, &mut buffer)?;
+        let bytes = pipe::read(handle, &mut buffer)?;
         if bytes.is_empty() {
             return Some(());
         }
-        while !bytes.is_empty() {
-            let count = pipe::write(handle, bytes)?;
-            if count == 0 {
-                return None;
-            }
-            bytes = bytes.get(count..)?;
-        }
+        pipe::write_all(handle, bytes)?;
     }
 }
 

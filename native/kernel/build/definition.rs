@@ -1,7 +1,7 @@
 use clv_abi::Program;
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, DefinitionId, DefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2,
-    FileDelegation, FileToolInvocation,
+    FIND_GREETING_V3, FileDelegation, FileToolInvocation,
 };
 use clv_abi::tool::FileTool;
 use serde::Deserialize;
@@ -24,6 +24,8 @@ struct Delegation {
     tool: Option<String>,
     argument: String,
     reply_bytes: usize,
+    #[serde(default)]
+    stdio: bool,
 }
 
 pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
@@ -37,6 +39,11 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
     assert_eq!(definition.agent, id.intent.program().name());
 
     let step = definition.delegate_with_file;
+    assert_eq!(
+        step.stdio,
+        id == FIND_GREETING_V3,
+        "wrong transport for {stem}"
+    );
     let argument = step.argument.as_bytes();
     let reply_bytes = step.reply_bytes;
     let mut buffer = [0; DELEGATION_REQUEST_MAX_BYTES];
@@ -47,7 +54,7 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
             reply_bytes,
         }
         .encode(&mut buffer),
-        (FIND_GREETING_V2, None, Some(name)) => FileToolInvocation {
+        (FIND_GREETING_V2 | FIND_GREETING_V3, None, Some(name)) => FileToolInvocation {
             tool: FileTool::named(name.as_bytes())
                 .expect("unknown file tool revision")
                 .id,

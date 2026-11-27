@@ -506,7 +506,7 @@ impl Scheduler {
         let child = member.handle;
         let index = self.launch_index(child)?;
         let state = self.tasks[index].state;
-        if state != TaskState::Suspended && !state.can_finish() {
+        if state != TaskState::Suspended && !state.can_finish(child) {
             return None;
         }
         if suspended {
