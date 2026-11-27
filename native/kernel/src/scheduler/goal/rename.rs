@@ -1,9 +1,10 @@
-use clv_abi::audit::{PublicationOutcome, RenameDenial, RenameRecord};
+use clv_abi::audit::{PublicationOutcome, PublicationReviewer, RenameDenial, RenameRecord};
 use clv_abi::goal::{
     CommitResult, DiscardResult, GoalDeadline, GoalStatus, PublicationError, RenameReviewReceipt,
     ReviewToken, TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::{LaunchParent, PATH_MAX_BYTES, ReplyKind};
+use core::num::NonZeroUsize;
 
 use super::{Goal, Scheduler};
 use crate::arch::monotonic_nanos;
@@ -18,17 +19,9 @@ fn review_is_live(review: TimedReviewToken, now_ns: u64) -> bool {
 }
 
 #[derive(Clone, Copy)]
-enum RenameApproval {
-    Owner(TimedReviewToken),
-    Supervisor(TimedReviewToken),
-}
-
-impl RenameApproval {
-    fn review(self) -> TimedReviewToken {
-        match self {
-            Self::Owner(review) | Self::Supervisor(review) => review,
-        }
-    }
+struct RenameApproval {
+    review: TimedReviewToken,
+    reviewer: PublicationReviewer,
 }
 
 pub(super) struct PendingRename {
@@ -49,7 +42,7 @@ impl PendingRename {
         let now_ns = monotonic_nanos();
         if let Some(review) = self
             .approval
-            .map(RenameApproval::review)
+            .map(|approval| approval.review)
             .filter(|&review| review_is_live(review, now_ns))
         {
             return Ok(review);
@@ -134,7 +127,8 @@ impl Goal {
             return DiscardResult::Empty;
         };
         if let Some(outcome) = outcome {
-            self.publication_audit.record(fs, &rename.change, outcome);
+            self.publication_audit
+                .record(fs, &rename.change, outcome, None);
         }
         rename.change.discard(fs);
         DiscardResult::Discarded
@@ -238,7 +232,10 @@ impl Scheduler {
             TimedRenameReview::SupervisorRequired
         } else if can_review {
             let checked = pending.check_review(fs, &goal.rename_policy, &mut self.next_handle);
-            pending.approval = checked.ok().map(RenameApproval::Owner);
+            pending.approval = checked.ok().map(|review| RenameApproval {
+                review,
+                reviewer: PublicationReviewer::Owner,
+            });
             review_with_goal_deadline(checked, goal.deadline)
         } else {
             TimedRenameReview::Preview
@@ -256,11 +253,12 @@ impl Scheduler {
             return None;
         }
         self.live_parent(launch.parent)?;
+        let reviewer = NonZeroUsize::new(launch.handle)?;
         let goal = self.goal.as_ref()?;
         let pending = goal
             .rename
             .as_ref()
-            .filter(|pending| pending.reviewer == Some(launch.handle))?;
+            .filter(|pending| pending.reviewer == Some(reviewer.get()))?;
         let (names, source_len) = pending.change.diff();
         let count = names.len();
         if !deliver(names) {
@@ -271,7 +269,7 @@ impl Scheduler {
         let mut next_handle = self.next_handle;
         let checked = pending.check_review(fs, &goal.rename_policy, &mut next_handle);
         let receipt = RenameReviewReceipt {
-            reviewer: launch.handle,
+            reviewer: reviewer.get(),
             goal: goal.handle,
             base_revision: pending.change.base_revision(),
             review: review_with_goal_deadline(checked, goal.deadline),
@@ -283,7 +281,10 @@ impl Scheduler {
             true
         })?;
         let pending = self.goal.as_mut()?.rename.as_mut()?;
-        pending.approval = checked.ok().map(RenameApproval::Supervisor);
+        pending.approval = checked.ok().map(|review| RenameApproval {
+            review,
+            reviewer: PublicationReviewer::Supervisor(reviewer),
+        });
         pending.reviewer = None;
         self.next_handle = next_handle;
         self.tasks[self.current].launch.as_mut()?.grant = None;
@@ -315,12 +316,11 @@ impl Scheduler {
         let goal = self.goal.as_mut()?;
         let pending = goal.rename.as_mut()?;
         let approval = pending.approval.take_if(|approval| {
-            approval.review().token == token
+            approval.review.token == token
                 && (!goal.require_rename_review
-                    || matches!(approval, RenameApproval::Supervisor(_)))
+                    || matches!(approval.reviewer, PublicationReviewer::Supervisor(_)))
         })?;
-        let review = approval.review();
-        let result = if review_is_live(review, monotonic_nanos()) {
+        let result = if review_is_live(approval.review, monotonic_nanos()) {
             match pending.change.publish(fs, &goal.rename_policy) {
                 Ok(()) => Some(CommitResult::Committed),
                 Err(PublicationError::Conflict) => Some(CommitResult::Conflict),
@@ -333,7 +333,8 @@ impl Scheduler {
             Some(CommitResult::ReviewExpired)
         };
         let outcome = result.map_or(PublicationOutcome::Unavailable, PublicationOutcome::Commit);
-        goal.publication_audit.record(fs, &pending.change, outcome);
+        goal.publication_audit
+            .record(fs, &pending.change, outcome, Some(approval.reviewer));
         if result == Some(CommitResult::Committed) {
             goal.release_transaction(fs, None);
         }

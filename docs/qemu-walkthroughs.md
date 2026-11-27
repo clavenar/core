@@ -12,6 +12,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
 - [Reviewed renames](#reviewed-renames)
   - [Review a staged rename through echo](#review-a-staged-rename-through-echo)
   - [Require a supervisor review before commit](#require-a-supervisor-review-before-commit)
+  - [Trace a rename commit to its reviewer](#trace-a-rename-commit-to-its-reviewer)
 - [Helper accounting and revocation](#helper-accounting-and-revocation)
 
 ## Boot and shell
@@ -1578,7 +1579,8 @@ decisions, oldest first. These include commits, explicit discards and renames
 discarded by cancellation, file grant revocation or goal expiry. Each row gives
 the absolute source path and destination basename captured at staging. `base`
 is the RamFS revision at staging. `revision` is the public revision when the
-kernel made the decision.
+kernel made the decision. When a commit consumes an approval, the decision
+also includes the goal handle and the reviewer.
 Only the owner can read the history. Closing the goal releases it.
 
 At a fresh QEMU prompt, edit the source after reviewing its rename.
@@ -1602,7 +1604,7 @@ The commit reports `commit conflict`, and `cat` prints `revised`. The audit
 shows two decisions for the same proposal.
 
 ```text
-source="/draft.txt" new_name="final.txt" base=2 revision=4 outcome=conflict
+source="/draft.txt" new_name="final.txt" base=2 revision=4 outcome=conflict goal=0x0000000000000001 reviewer=owner
 source="/draft.txt" new_name="final.txt" base=2 revision=4 outcome=discarded
 ```
 
@@ -1620,9 +1622,40 @@ cat /final.txt
 goal close
 ```
 
-The new goal shows one row with `base=4 revision=5 outcome=published`, and
-`final.txt` contains `revised`. To see `outcome=review-expired`, leave QEMU
-running for at least 61 seconds between `goal diff` and `goal commit`.
+The new goal shows one row with `base=4 revision=5 outcome=published` and
+`reviewer=owner`. The file `final.txt` contains `revised`. To see
+`outcome=review-expired`, leave QEMU running for at least 61 seconds between
+`goal diff` and `goal commit`.
+
+### Trace a rename commit to its reviewer
+
+At a fresh `clsh>` prompt, require supervisor review and compare the review
+receipt with the publication audit.
+
+```text
+write /draft.txt keep
+goal create --preserve-file /draft.txt --require-rename-review echo
+goal grant-file --stage-rename /draft.txt
+agent run hello --stage-rename final.txt
+wait hello
+goal diff --via echo
+goal commit
+goal audit --publication
+cat /final.txt
+goal close
+```
+
+The `outcome=published` row contains the same goal and reviewer handles as
+the receipt printed by `goal diff --via echo`. Reading `/final.txt` prints
+`keep`.
+
+For a conflict, start again on a fresh boot and insert
+`write /draft.txt revised` just before `goal commit`. The audit shows
+`outcome=conflict` with that review's handle. Before closing the goal,
+`cat /draft.txt` prints `revised` and `cat /final.txt` reports `cannot open path`.
+To check token expiry, repeat from a fresh boot and wait at least 61 seconds
+between the review and commit. The audit shows `outcome=review-expired`
+with the original reviewer.
 
 ## Helper accounting and revocation
 

@@ -1,4 +1,6 @@
-use clv_abi::audit::{AUDIT_CAPACITY, EncodedPublicationRecord, PublicationOutcome};
+use clv_abi::audit::{
+    AUDIT_CAPACITY, EncodedPublicationRecord, PublicationOutcome, PublicationReviewer,
+};
 
 use super::DelegationAudit;
 use crate::fs::ramfs::{RamFs, StagedRename};
@@ -48,13 +50,16 @@ impl<const WORDS: usize> AuditHistory<[[u8; 8]; WORDS]> {
     }
 }
 
+// Keep the publication row prefix intact for callers of every audit view.
+type PublicationEntry = [[u8; 8]; size_of::<EncodedPublicationRecord>() / 8 + 1];
+
 #[derive(Default)]
 pub(super) struct PublicationHistory {
-    explicit: AuditHistory<EncodedPublicationRecord>,
+    explicit: AuditHistory<PublicationEntry>,
     // A revocation can precede later owner decisions. Older readers retain their own four rows.
-    with_revocations: AuditHistory<EncodedPublicationRecord>,
+    with_revocations: AuditHistory<PublicationEntry>,
     // Cancellation or expiry can remove the final proposal only once.
-    terminal: Option<(PublicationOutcome, EncodedPublicationRecord)>,
+    terminal: Option<(PublicationOutcome, PublicationEntry)>,
 }
 
 pub(crate) enum PublicationAudit {
@@ -70,8 +75,14 @@ impl PublicationHistory {
         fs: &RamFs,
         change: &StagedRename,
         outcome: PublicationOutcome,
+        reviewer: Option<PublicationReviewer>,
     ) {
-        let row = change.publication_record(fs, outcome);
+        let mut row: PublicationEntry = [[0; 8]; _];
+        let [record @ .., approval] = &mut row;
+        *record = change.publication_record(fs, outcome);
+        *approval = reviewer
+            .map_or(0, PublicationReviewer::register)
+            .to_le_bytes();
         match outcome {
             PublicationOutcome::DiscardedByCancel | PublicationOutcome::DiscardedByExpiry => {
                 self.terminal = Some((outcome, row));
@@ -91,7 +102,7 @@ impl PublicationHistory {
         index: usize,
         view: PublicationAudit,
         copy: impl FnOnce(&[u8]) -> bool,
-    ) -> Option<(usize, usize)> {
+    ) -> Option<(usize, usize, usize)> {
         let terminal = self.terminal.as_ref();
         let cancellation =
             terminal.filter(|(outcome, _)| *outcome == PublicationOutcome::DiscardedByCancel);
@@ -104,16 +115,16 @@ impl PublicationHistory {
         let total = history.len + usize::from(tail.is_some());
         let skipped = total.saturating_sub(AUDIT_CAPACITY);
         let count = total - skipped;
-        let bytes = if index == 0 && count == 0 {
-            &[][..]
+        let (bytes, reviewer) = if index == 0 && count == 0 {
+            (&[][..], 0)
         } else {
-            history.entries[skipped..history.len]
+            let [record @ .., approval] = history.entries[skipped..history.len]
                 .iter()
                 .chain(tail.map(|(_, row)| row))
-                .nth(index)?
-                .as_flattened()
+                .nth(index)?;
+            (record.as_flattened(), usize::from_le_bytes(*approval))
         };
-        copy(bytes).then_some((count, history.overwritten.saturating_add(skipped)))
+        copy(bytes).then_some((count, history.overwritten.saturating_add(skipped), reviewer))
     }
 }
 
@@ -158,7 +169,7 @@ impl Scheduler {
         index: usize,
         view: PublicationAudit,
         copy: impl FnOnce(&[u8]) -> bool,
-    ) -> Option<(usize, usize)> {
+    ) -> Option<(usize, usize, usize)> {
         self.shell_goal(handle)?
             .publication_audit
             .read_row(index, view, copy)

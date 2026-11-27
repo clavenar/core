@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements calls 0–90. The caller places the call number in
+The RV64 prototype implements calls 0–91. The caller places the call number in
 `a7`, passes up to six arguments in `a0`–`a5`, and executes `ecall`.
 The per-call descriptions give the result registers and error values.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -333,6 +333,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 88 `goal_launch_finish_monitor` | `a0` open goal handle | Fresh shell-owned monitor launch handle, or -1 on rejection |
 | 89 `goal_launch_rename_reviewer` | `a0` completed goal handle | Fresh shell-owned `echo` launch handle bound to the pending rename, or -1 on rejection |
 | 90 `goal_review_granted` | `a0` reviewer's stack destination, `a1` capacity in bytes | Total diff length in `a0`, source path length in `a1`, verdict (1–4) in `a2`. Failure to deliver returns -1 in `a0`. |
+| 91 `goal_publication_decisions_with_reviewer` | Same arguments as call 76, plus `a4` = 0 for the call 81 view or 1 for the call 83 view | Same row and counts as the selected view, with reviewer in `a2` and the audited goal handle in `a3`, or -1 in `a0` on failure |
 
 ### Goal deadlines
 
@@ -813,18 +814,26 @@ bytes. A published rename advances the revision by one.
 | 3 | `review-expired` |
 | 4 | `unavailable` |
 | 5 | `discarded` |
-| 6 | `discarded-by-cancel` (calls 80, 81 and 83) |
-| 7 | `discarded-by-revoke` (calls 81 and 83) |
-| 8 | `discarded-by-expiry` (call 83) |
+| 6 | `discarded-by-cancel` (calls 80, 81, 83 and 91) |
+| 7 | `discarded-by-revoke` (calls 81, 83 and 91) |
+| 8 | `discarded-by-expiry` (call 83 and call 91 with `a4` = 1) |
+
+Call 91 copies the same 552-byte row as the selected view. Register `a2`
+contains the supervisor's launch handle for a delegated approval, all ones
+for an owner's direct approval, or zero for a discard or an empty history.
+Register `a3` returns the goal handle on success. The identity comes from
+the approval the kernel consumed at commit, including commits that failed
+because of a conflict or an expired review. A passing review replaces the
+stored reviewer even when it reuses a live token. Another launch in the same
+task slot leaves earlier attribution intact. The shell prints the goal
+handle and reviewer on commit rows, using `reviewer=owner` for a direct review.
 
 The owner can reuse a single stack buffer to read indices zero through
-`count - 1`. Goal expiry can append a row to call 83 between reads. To read a
-consistent set of rows, the shell first checks call 35. If the goal has
-expired it reads call 83. Otherwise it uses call 81, whose rows and
-overwritten count remain stable across expiry. Index zero on an empty
-history returns zero and accepts zero capacity.
-An invalid index, a short buffer for a retained row, or an invalid destination
-range fails before copying any bytes.
+`count - 1`. To read a consistent set of rows, the shell first checks
+call 35 and uses call 91 with `a4` = 1 only if the goal has expired. The
+call 81 view selected by `a4` = 0 stays stable across expiry. Index zero
+on an empty history returns zero and accepts zero capacity. An invalid
+view, index, destination range or short buffer fails before copying any bytes.
 
 Calls 52, 53, 57, 59, 61, 65, 73 and 79 each copy up to four retained entries, oldest
 first. A short buffer or an invalid destination range returns -1 before copying

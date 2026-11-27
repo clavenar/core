@@ -1,8 +1,35 @@
+use core::num::NonZeroUsize;
+
 use crate::PATH_MAX_BYTES;
 use crate::goal::{CommitResult, RENAME_DIFF_MAX_BYTES};
 
 /// Decision, base and observed revisions, source and basename lengths, then the frozen diff.
 pub type EncodedPublicationRecord = [[u8; 8]; 5 + RENAME_DIFF_MAX_BYTES.div_ceil(8)];
+
+/// The reviewer whose approval was consumed by a publication attempt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PublicationReviewer {
+    Owner,
+    Supervisor(NonZeroUsize),
+}
+
+impl PublicationReviewer {
+    /// Call 91 reports zero for rows without a review. The all-ones value denotes
+    /// the owner and is reserved from launch handles by the kernel's handle allocator.
+    pub const fn register(self) -> usize {
+        match self {
+            Self::Owner => usize::MAX,
+            Self::Supervisor(launch) => launch.get(),
+        }
+    }
+
+    pub fn from_register(value: usize) -> Option<Self> {
+        if value == usize::MAX {
+            return Some(Self::Owner);
+        }
+        Some(Self::Supervisor(NonZeroUsize::new(value)?))
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PublicationOutcome {

@@ -1,7 +1,7 @@
 use clv_abi::audit::{
     AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, EncodedPublicationRecord,
     EncodedReadDecision, EncodedReadRecordWithLimit, EncodedRecordWithTool, EncodedRenameRecord,
-    EncodedReplyRecord, ReadRecord, ReadRecordWithLimit, ReplyRecord,
+    EncodedReplyRecord, PublicationReviewer, ReadRecord, ReadRecordWithLimit, ReplyRecord,
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
@@ -22,10 +22,11 @@ use clv_abi::{
     SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER,
     SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
     SYS_GOAL_PUBLICATION_DECISIONS, SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
-    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS,
-    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_GRANTED,
-    SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
+    SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
+    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_GRANTED, SYS_GOAL_REVIEW_WITH_DEADLINE,
+    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
+    SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -460,6 +461,30 @@ pub fn publication_decision_row_with_expiry(
         index,
         record,
     )
+}
+
+/// Reads an indexed publication decision and the reviewer whose approval it used.
+pub fn publication_decision_row_with_reviewer(
+    goal: usize,
+    index: usize,
+    include_expiry: bool,
+    record: &mut EncodedPublicationRecord,
+) -> Option<(usize, usize, Option<PublicationReviewer>)> {
+    let (count, overwritten, reviewer, audited_goal) = ecall(
+        SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER,
+        goal,
+        record.as_mut_ptr().expose_provenance(),
+        size_of_val(record),
+        index,
+        usize::from(include_expiry),
+    );
+    (count <= AUDIT_CAPACITY && audited_goal == goal).then(|| {
+        (
+            count,
+            overwritten,
+            PublicationReviewer::from_register(reviewer),
+        )
+    })
 }
 
 fn read_publication_row(

@@ -25,16 +25,16 @@ use clv_abi::{
     SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER,
     SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
     SYS_GOAL_PUBLICATION_DECISIONS, SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
-    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS,
-    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_GRANTED,
-    SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
-    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
-    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
-    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
-    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
-    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
-    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
+    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_GRANTED, SYS_GOAL_REVIEW_WITH_DEADLINE,
+    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
+    SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT,
+    SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE,
+    SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN,
+    SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
+    SYS_SPAWN_WITH_FILE_ARG, SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
+    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -288,19 +288,35 @@ pub(crate) fn dispatch(
         SYS_GOAL_PUBLICATION_AUDIT
         | SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION
         | SYS_GOAL_PUBLICATION_DECISIONS
-        | SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY => {
-            let view = match number {
-                SYS_GOAL_PUBLICATION_AUDIT => PublicationAudit::Explicit,
-                SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION => PublicationAudit::WithCancellation,
-                SYS_GOAL_PUBLICATION_DECISIONS => PublicationAudit::Decisions,
-                _ => PublicationAudit::WithExpiry,
+        | SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY
+        | SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER => {
+            let view = match (number, frame.registers[REG_A4]) {
+                (SYS_GOAL_PUBLICATION_AUDIT, _) => Some(PublicationAudit::Explicit),
+                (SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION, _) => {
+                    Some(PublicationAudit::WithCancellation)
+                }
+                (SYS_GOAL_PUBLICATION_DECISIONS, _)
+                | (SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, 0) => {
+                    Some(PublicationAudit::Decisions)
+                }
+                (SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY, _)
+                | (SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, 1) => {
+                    Some(PublicationAudit::WithExpiry)
+                }
+                _ => None,
             };
-            write_audit_result(
-                frame,
-                scheduler.goal_publication_audit(a0, a3, view, |bytes| {
-                    stack.copy_to_user(bytes, a1, a2)
-                }),
-            )
+            view.and_then(|view| {
+                scheduler
+                    .goal_publication_audit(a0, a3, view, |bytes| stack.copy_to_user(bytes, a1, a2))
+            })
+            .map_or(SYSCALL_ERROR, |(count, overwritten, reviewer)| {
+                frame.registers[REG_A1] = overwritten;
+                if number == SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER {
+                    frame.registers[REG_A2] = reviewer;
+                    frame.registers[REG_A3] = a0;
+                }
+                count
+            })
         }
         SYS_GOAL_READ_AUDIT | SYS_GOAL_READ_AUDIT_WITH_LIMIT | SYS_GOAL_READ_DECISIONS => {
             let view = match number {

@@ -2,7 +2,8 @@ use crate::{ConsoleLine, help::Entry};
 use clv::goal;
 use clv_abi::audit::{
     AUDIT_CAPACITY, DelegationDenial, DelegationRecordWithTool, PublicationOutcome,
-    PublicationRecord, ReadDecision, ReadLimitScope, RenameDenial, RenameRecord, ReplyRecord,
+    PublicationRecord, PublicationReviewer, ReadDecision, ReadLimitScope, RenameDenial,
+    RenameRecord, ReplyRecord,
 };
 use clv_abi::tool::FILE_TOOLS;
 use clv_abi::{LaunchParent, Program};
@@ -39,18 +40,19 @@ fn show_rows(handle: usize, view: View) -> Option<()> {
         View::Publication => {
             // Expiry may append a terminal row between syscalls. Pick a stable view
             // before streaming the rows through the shell's single stack buffer.
-            let read_row = match goal::status_with_deadline(handle)?.1 {
-                goal::GoalDeadline::Expired => goal::publication_decision_row_with_expiry,
-                _ => goal::publication_decision_row,
+            let include_expiry =
+                goal::status_with_deadline(handle)?.1 == goal::GoalDeadline::Expired;
+            let read_row = |index, record: &mut _| {
+                goal::publication_decision_row_with_reviewer(handle, index, include_expiry, record)
             };
             let mut record = [[0; 8]; _];
-            let (count, overwritten) = read_row(handle, 0, &mut record)?;
+            let (count, overwritten, mut reviewer) = read_row(0, &mut record)?;
             print_header(handle, count, overwritten);
             for index in 0..count {
                 if index != 0 {
-                    read_row(handle, index, &mut record)?;
+                    (_, _, reviewer) = read_row(index, &mut record)?;
                 }
-                print_publication(PublicationRecord::decode(&record)?);
+                print_publication(handle, PublicationRecord::decode(&record)?, reviewer);
             }
             Some(())
         }
@@ -214,7 +216,11 @@ fn print_rename(entry: RenameRecord<'_>) {
     line.finish(&[decision, caller, identity]);
 }
 
-fn print_publication(entry: PublicationRecord<'_>) {
+fn print_publication(
+    goal: usize,
+    entry: PublicationRecord<'_>,
+    reviewer: Option<PublicationReviewer>,
+) {
     use goal::CommitResult;
 
     let outcome: &[u8] = match entry.outcome {
@@ -233,14 +239,28 @@ fn print_publication(entry: PublicationRecord<'_>) {
     line.quoted(entry.source);
     line.write(b" new_name=");
     line.quoted(entry.new_name);
-    line.finish(&[
+    let mut base = [0; DIGITS];
+    let mut revision = [0; DIGITS];
+    for part in [
         b" base=",
-        decimal(entry.base_revision as usize, &mut [0; DIGITS]),
+        decimal(entry.base_revision as usize, &mut base),
         b" revision=",
-        decimal(entry.revision as usize, &mut [0; DIGITS]),
+        decimal(entry.revision as usize, &mut revision),
         b" outcome=",
         outcome,
-    ]);
+    ] {
+        line.write(part);
+    }
+    if let Some(reviewer) = reviewer {
+        line.write(b" goal=");
+        line.write(&hex(goal));
+        line.write(b" reviewer=");
+        match reviewer {
+            PublicationReviewer::Owner => line.write(b"owner"),
+            PublicationReviewer::Supervisor(launch) => line.write(&hex(launch.get())),
+        }
+    }
+    line.finish(&[]);
 }
 
 fn print_reply(entry: ReplyRecord) {
