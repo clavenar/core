@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements calls 0–83. The caller places the call number in
+The RV64 prototype implements calls 0–85. The caller places the call number in
 `a7`, passes up to six arguments in `a0`–`a5`, and executes `ecall`.
 The per-call descriptions give the result registers and error values.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -11,6 +11,7 @@ The per-call descriptions give the result registers and error values.
 - [Pipes and completion events](#pipes-and-completion-events)
 - [Goal and agent calls](#goal-and-agent-calls)
   - [Goal deadlines](#goal-deadlines)
+  - [Read-only goal observers](#read-only-goal-observers)
 - [Rename review and publication](#rename-review-and-publication)
 - [Goal membership and delegated authority](#goal-membership-and-delegated-authority)
 - [Audit records](#audit-records)
@@ -193,6 +194,7 @@ queued reply.
 | 5 `Matches` | 0–64 bytes | All selected lines, or zero bytes for no matches |
 | 6 `ResultTooLarge` | Empty | The matched lines exceed the reply capacity |
 | 7 `DelegationFailed` | Empty | The agent could not start the requested helper |
+| 8 `GoalObservation` | 64 bytes | Kernel snapshot requested by the observer through call 85. Call 26 rejects this tag. |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -318,6 +320,8 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 81 `goal_publication_decisions` | Same arguments as call 76 | Same row format and result registers as call 76. Includes renames discarded by calls 37 and 60. |
 | 82 `goal_create_with_timeout` | `a0` optional read-directory handle, `a1` address and `a2` length of the 48-byte call 48 option block, `a3` optional preserved-file handle, `a4` optional rename-directory handle, `a5` positive timeout in milliseconds | Fresh goal handle, or -1 on rejection |
 | 83 `goal_publication_decisions_with_expiry` | Same arguments as call 76 | Same row format and result registers as call 81. Also includes a rename discarded on goal expiry. |
+| 84 `goal_launch_observer` | `a0` open goal handle, `a1` program selector | Fresh shell-owned child handle, or -1 on rejection |
+| 85 `goal_observe` | `a0` observer's stack destination, `a1` capacity in bytes | 64 after copying the snapshot and queuing the same record for the parent, or -1 on failure |
 
 ### Goal deadlines
 
@@ -341,6 +345,35 @@ child results and close the goal. A child that already exited or faulted
 keeps its result. A previously published rename stays visible. Call 35
 continues to report the deadline until close, including after cancellation
 or successful publication.
+
+### Read-only goal observers
+
+The goal owner uses call 84 to start an ordinary child in a separate address
+space. The kernel binds a one-use inspection grant to the new launch and the
+open goal. Only call 84 queues the zero-byte `ObserveGoal` request (kind 8).
+Reading this assignment through call 25 leaves the inspection grant live.
+
+An observer starts with an empty RamFS handle table. It runs outside the
+goal's membership and budgets. The grant works in every state of an open
+goal, including after expiry. The observer occupies the selected program's
+normal slot. A failed launch preserves the previous child and its results.
+
+Call 85 takes one atomic sample from the goal bound to the calling launch.
+The record contains eight little-endian RV64 words. The first four encode
+the state tag, representative child, exit status or fault detail and deadline
+as in call 35. The next four encode the budget flags, available reply bytes,
+reserved reply bytes and spent reply bytes as in call 44.
+The kernel copies the record to the observer and queues identical bytes as a
+typed reply under its launch handle. Call 27 reads that reply. The report
+uses the observer's mailbox and leaves the goal's reply balance and audit
+unchanged.
+
+A successful sample consumes the grant. A short buffer, invalid destination
+range or occupied reply mailbox returns -1 before delivery and allows a
+retry. Closing the goal, owner exit or observer exit invalidates an unused
+grant. A later goal or launch in the same slot gets a fresh identity.
+Goal control, audit, review and publication calls retain their existing
+caller checks.
 
 ## Rename review and publication
 

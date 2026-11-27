@@ -1,3 +1,4 @@
+use crate::budget::ReplyBudget;
 use crate::tool::ToolId;
 use crate::{CompletionKind, NO_CHILD_HANDLE, Program};
 
@@ -405,6 +406,56 @@ impl GoalStatus {
             CANCELLED if child == NO_CHILD_HANDLE => Self::Cancelled { child: None },
             CANCELLED => Self::Cancelled { child: Some(child) },
             _ => return None,
+        })
+    }
+}
+
+/// Call 35's four status words followed by call 44's four reply-budget words.
+pub type EncodedGoalObservation = [[u8; 8]; 8];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct GoalObservation {
+    pub status: GoalStatus,
+    pub deadline: GoalDeadline,
+    pub budget: ReplyBudget,
+}
+
+impl GoalObservation {
+    pub fn encode(self) -> EncodedGoalObservation {
+        let (state, child, detail) = self.status.registers();
+        let (flags, available, reserved, spent) = self.budget.registers();
+        [
+            state,
+            child,
+            detail,
+            self.deadline.register(),
+            flags,
+            available,
+            reserved,
+            spent,
+        ]
+        .map(|word| (word as u64).to_le_bytes())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let (words, []) = bytes.as_chunks::<8>() else {
+            return None;
+        };
+        let words: &EncodedGoalObservation = words.try_into().ok()?;
+        let [
+            state,
+            child,
+            detail,
+            deadline,
+            flags,
+            available,
+            reserved,
+            spent,
+        ] = words.map(|word| u64::from_le_bytes(word) as usize);
+        Some(Self {
+            status: GoalStatus::from_registers(state, child, detail)?,
+            deadline: GoalDeadline::from_register(deadline),
+            budget: ReplyBudget::from_registers(flags, available, reserved, spent)?,
         })
     }
 }

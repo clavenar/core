@@ -522,6 +522,35 @@ repeat the setup on a fresh boot and enter `goal commit` immediately after
 `goal diff`. Once the deadline passes, the audit still shows one
 `outcome=published` and `cat /final.txt` prints `keep`.
 
+### Observe a goal from a separate process
+
+Paste these commands at a fresh `clsh>` prompt. The shell starts `echo`
+as a read-only observer and prints the snapshot it collected.
+
+```text
+goal create --timeout-ms 15000 --reply-bytes 24
+agent run --suspended --reply-bytes 12 hello
+goal observe echo
+```
+
+The first report shows `Running` with the original `hello` child handle,
+an absolute `deadline_ns`, and `available=12 reserved=12 spent=0`. The
+observer runs outside the goal even though its only member slot is occupied.
+Leave QEMU running for 15 seconds, then enter
+
+```text
+goal observe echo
+goal audit --replies
+wait hello
+goal close
+```
+
+The second report shows `Cancelled` for the same child, `deadline=expired`
+and `available=24 reserved=0 spent=0`. The reply audit shows `entries=0`
+and `wait hello` reports `hello cancelled`. Each observation launches a
+fresh `echo` and collects its reply and exit status. If `echo` is already
+running, the command reports `cannot start goal observer`.
+
 ## Requests, replies and file streams
 
 `ask hello hello from shell` launches `hello` with an `Echo` request and prints the

@@ -1,6 +1,7 @@
 pub(crate) mod pipe;
 
 use clv_abi::agent::{DELEGATION_HEADER_BYTES, DELEGATION_REQUEST_MAX_BYTES};
+use clv_abi::goal::EncodedGoalObservation;
 use clv_abi::{
     FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, PATH_MAX_BYTES, ReplyKind, RequestKind,
 };
@@ -31,6 +32,10 @@ impl MessageKind {
             Self::Request(RequestKind::PlanIntent) => length == 1,
             Self::Request(RequestKind::PlanDefinition) => length == 2,
             Self::Request(RequestKind::StageRename) => (1..=PATH_MAX_BYTES).contains(&length),
+            Self::Request(RequestKind::ObserveGoal) => length == 0,
+            Self::Reply(ReplyKind::GoalObservation) => {
+                length == size_of::<EncodedGoalObservation>()
+            }
             Self::Reply(
                 ReplyKind::Denied
                 | ReplyKind::ReadFailed

@@ -70,6 +70,8 @@ struct PendingEvent {
 struct ChildLaunch {
     handle: usize,
     parent: LaunchParent,
+    /// One snapshot of this boot-unique goal, granted only to this launch.
+    observed_goal: Option<usize>,
     request: Option<Message>,
     reply: Option<Message>,
     legacy_file_reply: bool,
@@ -83,6 +85,7 @@ struct PreparedLaunch {
     handle: usize,
     next_handle: usize,
     parent: LaunchParent,
+    observed_goal: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -91,6 +94,7 @@ pub(crate) enum LaunchScope {
     Directory(usize),
     File(usize),
     FileWithPipe(usize),
+    GoalObserver(usize),
     Goal {
         handle: usize,
         reply_bytes: Option<usize>,
@@ -285,6 +289,7 @@ impl Scheduler {
             handle,
             next_handle,
             parent,
+            observed_goal: None,
         })
     }
 
@@ -300,7 +305,7 @@ impl Scheduler {
         if self.current != SHELL_TASK_INDEX {
             return None;
         }
-        let launch = self
+        let mut launch = self
             .prepare_launch(
                 Program::from_raw(program)?,
                 agent.map(|binding| binding.handle),
@@ -309,6 +314,11 @@ impl Scheduler {
             .ok()?;
         let task_fs = match scope {
             LaunchScope::Plain => TaskFs::empty(),
+            LaunchScope::GoalObserver(handle) => {
+                self.shell_goal(handle)?;
+                launch.observed_goal = Some(handle);
+                TaskFs::empty()
+            }
             LaunchScope::Goal {
                 handle: goal,
                 reply_bytes,
@@ -342,6 +352,7 @@ impl Scheduler {
             handle,
             next_handle,
             parent,
+            observed_goal,
         } = launch;
         let index = task_index(program);
         let task = &mut self.tasks[index];
@@ -370,6 +381,7 @@ impl Scheduler {
         task.launch = Some(ChildLaunch {
             handle,
             parent,
+            observed_goal,
             request,
             reply: None,
             legacy_file_reply,
@@ -543,6 +555,7 @@ impl Scheduler {
         task.state = TaskState::Stopped;
         task.fs.close_all(fs);
         if let Some(launch) = &mut task.launch {
+            launch.observed_goal = None;
             launch.request = None;
             launch.completion = Some(completion);
             if let Some(goal) = &mut self.goal {

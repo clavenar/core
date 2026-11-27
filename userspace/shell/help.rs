@@ -74,6 +74,7 @@ entries! {
     },
     RevokeFile { "goal revoke-file" => "Revoke the grant and discard its staged rename" },
     GoalRun { "goal run [--reply-bytes N] <program>" => "Start a child in the goal" },
+    GoalObserve { "goal observe echo" => "Read goal state, deadline and reply budget through echo" },
     StageRename { "goal stage-rename <source> <new-name>" => "Stage a file rename" },
     GoalActions {
         "goal diff" => "Preview or review a staged rename",
@@ -143,6 +144,7 @@ pub(super) fn goals() {
             GrantFile,
             RevokeFile,
             GoalRun,
+            GoalObserve,
             StageRename,
             GoalActions,
             Audit,

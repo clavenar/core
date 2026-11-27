@@ -13,6 +13,10 @@ extern "C" fn _start() -> ! {
     let reply: &[u8] = match clv::receive_request(&mut buffer) {
         Some(LaunchRequest::Empty) => b"echo ready",
         Some(LaunchRequest::Received {
+            kind: RequestKind::ObserveGoal,
+            ..
+        }) => clv::exit(usize::from(clv::goal::observe().is_none())),
+        Some(LaunchRequest::Received {
             kind: RequestKind::Echo,
             bytes,
             ..

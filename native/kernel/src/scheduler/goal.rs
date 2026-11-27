@@ -10,7 +10,6 @@ use self::budget::ReplyReservation;
 use self::reads::GoalReads;
 pub(crate) use self::reads::ReadAudit;
 use self::rename::PendingRename;
-use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin};
 use clv_abi::audit::{
     EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationOutcome, ReplyRecord,
@@ -18,9 +17,10 @@ use clv_abi::audit::{
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CreateOptions, DiscardResult, FileOptions,
-    GoalDeadline, GoalStatus, MAX_CHILDREN, ReadLimits,
+    GoalDeadline, GoalObservation, GoalStatus, MAX_CHILDREN, ReadLimits,
 };
 use clv_abi::tool::ToolId;
+use clv_abi::{ReplyKind, TaskCompletion};
 
 use super::{AgentBinding, SHELL_TASK_INDEX, Scheduler, TaskState};
 use crate::arch::monotonic_nanos;
@@ -288,7 +288,7 @@ impl Scheduler {
         Some(handle)
     }
 
-    fn shell_goal(&self, handle: usize) -> Option<&Goal> {
+    pub(super) fn shell_goal(&self, handle: usize) -> Option<&Goal> {
         if self.current != SHELL_TASK_INDEX {
             return None;
         }
@@ -302,6 +302,26 @@ impl Scheduler {
 
     pub(crate) fn goal_budget(&self, handle: usize) -> Option<ReplyBudget> {
         Some(self.shell_goal(handle)?.budget())
+    }
+
+    pub(crate) fn observe_goal(&mut self, deliver: impl FnOnce(&[u8]) -> bool) -> Option<usize> {
+        let handle = self.tasks[self.current].launch.as_ref()?.observed_goal?;
+        let goal = self.goal.as_ref().filter(|goal| goal.handle == handle)?;
+        let record = GoalObservation {
+            status: goal.status(),
+            deadline: goal.deadline,
+            budget: goal.budget(),
+        }
+        .encode();
+        let bytes = record.as_flattened();
+        // The observer and its parent see the same kernel sample. A failed copy or
+        // occupied mailbox leaves the grant available for a retry.
+        let count = self.send_reply(Some(ReplyKind::GoalObservation), bytes.len(), |reply| {
+            reply.copy_from_slice(bytes);
+            deliver(reply)
+        })?;
+        self.tasks[self.current].launch.as_mut()?.observed_goal = None;
+        Some(count)
     }
 
     pub(crate) fn grant_goal_file(

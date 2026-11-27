@@ -53,6 +53,7 @@ keywords!(Subcommand {
     RevokeFile => "revoke-file",
     Run => "run",
     Audit => "audit",
+    Observe => "observe",
     Budget => "budget",
     Status => "status",
     Cancel => "cancel",

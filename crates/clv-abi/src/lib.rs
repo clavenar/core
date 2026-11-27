@@ -94,6 +94,8 @@ pub const SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION: usize = 80;
 pub const SYS_GOAL_PUBLICATION_DECISIONS: usize = 81;
 pub const SYS_GOAL_CREATE_WITH_TIMEOUT: usize = 82;
 pub const SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY: usize = 83;
+pub const SYS_GOAL_LAUNCH_OBSERVER: usize = 84;
+pub const SYS_GOAL_OBSERVE: usize = 85;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_RAMFS_HANDLE: usize = usize::MAX;
@@ -109,6 +111,8 @@ pub enum RequestKind {
     PlanIntent = 5,
     PlanDefinition = 6,
     StageRename = 7,
+    /// Empty assignment queued by the owner through `goal_launch_observer`.
+    ObserveGoal = 8,
 }
 
 impl RequestKind {
@@ -121,6 +125,7 @@ impl RequestKind {
             value if value == Self::PlanIntent as usize => Some(Self::PlanIntent),
             value if value == Self::PlanDefinition as usize => Some(Self::PlanDefinition),
             value if value == Self::StageRename as usize => Some(Self::StageRename),
+            value if value == Self::ObserveGoal as usize => Some(Self::ObserveGoal),
             _ => None,
         }
     }
@@ -137,6 +142,8 @@ pub enum ReplyKind {
     Matches = 5,
     ResultTooLarge = 6,
     DelegationFailed = 7,
+    /// Only `goal_observe` can queue this kernel-generated report.
+    GoalObservation = 8,
 }
 
 impl ReplyKind {
@@ -149,6 +156,7 @@ impl ReplyKind {
             value if value == Self::Matches as usize => Some(Self::Matches),
             value if value == Self::ResultTooLarge as usize => Some(Self::ResultTooLarge),
             value if value == Self::DelegationFailed as usize => Some(Self::DelegationFailed),
+            value if value == Self::GoalObservation as usize => Some(Self::GoalObservation),
             _ => None,
         }
     }

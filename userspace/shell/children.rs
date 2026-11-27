@@ -109,6 +109,25 @@ impl Children {
         }
     }
 
+    pub(super) fn observe_goal(&mut self, goal: usize) {
+        let Some(handle) = clv::goal::launch_observer(goal, Program::Echo) else {
+            return print(b"cannot start goal observer\r\n");
+        };
+        self.handles[Program::Echo as usize] = handle;
+        let mut buffer = [0; MESSAGE_MAX_BYTES];
+        if matches!(clv::wait(handle), Some(ChildStatus::Exited(0)))
+            && let Some(ChildReply::Received {
+                kind: ReplyKind::GoalObservation,
+                bytes,
+                ..
+            }) = clv::receive_reply(handle, &mut buffer)
+        {
+            super::goal::print_observation(bytes);
+        } else {
+            print(b"goal observation unavailable\r\n");
+        }
+    }
+
     pub(super) fn run_agent(
         &mut self,
         goal: usize,
@@ -365,6 +384,7 @@ fn print_reply(handle: usize) {
             ReplyKind::ReadFailed => print(b"cannot read requested file\r\n"),
             ReplyKind::ResultTooLarge => print(b"grep result exceeds 64 bytes\r\n"),
             ReplyKind::DelegationFailed => print(b"cannot delegate child\r\n"),
+            ReplyKind::GoalObservation => super::goal::print_observation(bytes),
         },
         None => print(b"recv failed\r\n"),
     }

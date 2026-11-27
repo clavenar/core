@@ -6,8 +6,9 @@ use clv_abi::audit::{
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CommitResult, CreateOptions, DiscardResult,
-    FileOptions, FileRecipient, GoalDeadline, GoalDiff, GoalStatus, PublicationError, ReadLimits,
-    RenameOptions, RenameReview, ReviewToken, TimedRenameReview, TimedReviewToken,
+    EncodedGoalObservation, FileOptions, FileRecipient, GoalDeadline, GoalDiff, GoalObservation,
+    GoalStatus, PublicationError, ReadLimits, RenameOptions, RenameReview, ReviewToken,
+    TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -18,12 +19,12 @@ use clv_abi::{
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_CREATE_WITH_TIMEOUT, SYS_GOAL_DIFF,
     SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
     SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
-    SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
-    SYS_GOAL_PUBLICATION_DECISIONS, SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
-    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS,
-    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS,
+    SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_AUDIT,
+    SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION, SYS_GOAL_PUBLICATION_DECISIONS,
+    SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
+    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -510,6 +511,23 @@ pub fn run_with_reply_budget(goal: usize, program: usize, bytes: usize) -> Optio
 
 pub fn status(goal: usize) -> Option<GoalStatus> {
     status_with_deadline(goal).map(|(status, _)| status)
+}
+
+/// Starts a shell-owned child with a one-use observation grant for this open goal.
+pub fn launch_observer(goal: usize, program: Program) -> Option<usize> {
+    syscall_result(syscall(SYS_GOAL_LAUNCH_OBSERVER, goal, program as usize, 0))
+}
+
+/// Takes one snapshot and queues the same kernel-generated record for the parent.
+pub fn observe() -> Option<GoalObservation> {
+    let mut bytes = [0; size_of::<EncodedGoalObservation>()];
+    let count = syscall(
+        SYS_GOAL_OBSERVE,
+        bytes.as_mut_ptr().expose_provenance(),
+        bytes.len(),
+        0,
+    );
+    GoalObservation::decode(bytes.get(..count)?)
 }
 
 /// Reads member completion and the independent goal deadline in a single syscall.

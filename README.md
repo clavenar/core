@@ -57,7 +57,7 @@ tries to read it, `hello` exits with status 1 and `recv hello` prints
 
 ## Documentation
 
-- [QEMU walkthroughs](docs/qemu-walkthroughs.md) give commands and expected results for child programs, goal budgets, tool delegation, auditing and reviewed renames.
+- [QEMU walkthroughs](docs/qemu-walkthroughs.md) give commands and expected results for child programs, goal budgets, read-only observers, tool delegation, auditing and reviewed renames.
 - [Native syscall ABI](docs/native-syscall-abi.md) documents registers, wire formats and error handling.
 - [Roadmap](ROADMAP.md) links the current prototype to the native release criteria and the file-organizer demonstration.
 - [Repository layout](https://github.com/clavenar/specifications/blob/main/engineering/repository-layout.md) maps the native source and the planned Hosted and Virtual components.

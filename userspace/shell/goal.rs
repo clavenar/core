@@ -5,7 +5,7 @@ use super::color;
 use super::command::{GoalFlag, Subcommand};
 use clv::goal::{
     self, CancelResult, CloseResult, CommitResult, DiscardResult, FileRecipient, GoalDeadline,
-    GoalStatus, PublicationError, ReplyBudget, ReviewToken, TimedRenameReview,
+    GoalObservation, GoalStatus, PublicationError, ReplyBudget, ReviewToken, TimedRenameReview,
 };
 use clv::{agent, print};
 use clv_abi::agent::{NO_DEFINITION, SHA256_BYTES};
@@ -53,6 +53,11 @@ pub(super) fn command(
             (_, None) => print(b"no current goal\r\n"),
         },
         (Subcommand::Run, arguments) => children.run_in_goal(handle, arguments),
+        (Subcommand::Observe, b"echo") => match handle {
+            Some(handle) => children.observe_goal(handle),
+            None => print(b"no current goal\r\n"),
+        },
+        (Subcommand::Observe, _) => Entry::GoalObserve.usage(),
         (Subcommand::Audit, option) => audit::show(handle, option),
         (Subcommand::Budget, b"") => match handle.and_then(goal::budget) {
             Some(budget) => print_budget(budget),
@@ -61,12 +66,8 @@ pub(super) fn command(
         (Subcommand::Status, b"") => match handle.and_then(goal::status_with_deadline) {
             Some((status, deadline)) => {
                 print_status(status);
-                match deadline {
-                    GoalDeadline::Unlimited => {}
-                    GoalDeadline::At(ns) => {
-                        print_line(&[b"deadline_ns=", decimal(ns as usize, &mut [0; DIGITS])])
-                    }
-                    GoalDeadline::Expired => print(b"deadline=expired\r\n"),
+                if deadline != GoalDeadline::Unlimited {
+                    print_deadline(deadline);
                 }
             }
             None => print(b"no current goal\r\n"),
@@ -352,6 +353,26 @@ fn print_budget(budget: ReplyBudget) {
         b" spent=",
         decimal(budget.spent, &mut [0; DIGITS]),
     ]);
+}
+
+fn print_deadline(deadline: GoalDeadline) {
+    match deadline {
+        GoalDeadline::Unlimited => print(b"deadline=unlimited\r\n"),
+        GoalDeadline::At(ns) => {
+            print_line(&[b"deadline_ns=", decimal(ns as usize, &mut [0; DIGITS])])
+        }
+        GoalDeadline::Expired => print(b"deadline=expired\r\n"),
+    }
+}
+
+pub(super) fn print_observation(bytes: &[u8]) {
+    if let Some(snapshot) = GoalObservation::decode(bytes) {
+        print_status(snapshot.status);
+        print_deadline(snapshot.deadline);
+        print_budget(snapshot.budget);
+    } else {
+        print(b"invalid goal observation\r\n");
+    }
 }
 
 pub(super) fn agent_command(
