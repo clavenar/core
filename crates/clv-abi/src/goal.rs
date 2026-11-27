@@ -7,6 +7,39 @@ pub const MAX_CHILDREN: usize = 3;
 /// Maximum combined byte length of a canonical source path and a destination basename.
 pub const RENAME_DIFF_MAX_BYTES: usize = 512;
 
+/// Goal lifetime, independent of member completion and the lifetime of a review token.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum GoalDeadline {
+    Unlimited,
+    At(u64),
+    Expired,
+}
+
+impl GoalDeadline {
+    pub fn after_millis(now_ns: u64, timeout_ms: usize) -> Option<Self> {
+        let duration = (timeout_ms as u64).checked_mul(1_000_000)?;
+        let at = now_ns.checked_add(duration)?;
+        (duration != 0 && at != u64::MAX).then_some(Self::At(at))
+    }
+
+    /// Call 35 returns the absolute guest time in nanoseconds, with two reserved values.
+    pub const fn register(self) -> usize {
+        match self {
+            Self::Unlimited => 0,
+            Self::At(ns) => ns as usize,
+            Self::Expired => usize::MAX,
+        }
+    }
+
+    pub const fn from_register(value: usize) -> Self {
+        match value {
+            0 => Self::Unlimited,
+            usize::MAX => Self::Expired,
+            ns => Self::At(ns as u64),
+        }
+    }
+}
+
 /// A boot-local handle for one reviewed change. Zero denotes the absence of a token.
 pub type ReviewToken = core::num::NonZeroUsize;
 

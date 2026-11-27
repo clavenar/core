@@ -16,8 +16,8 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
 
 In an ANSI terminal, the shell displays the `clsh>` prompt and help headings
 in green. `goal commit` prints `rename committed` in green, `review expired`
-in yellow, and `commit conflict` in red. The shell resets the color after
-each prompt, heading, or message.
+or `goal deadline expired` in yellow, and `commit conflict` in red. The shell
+resets the color after each prompt, heading, or message.
 
 Type `help` for the full command reference. It groups commands by task, shows
 their arguments beside short descriptions, and lists options under the command
@@ -462,6 +462,65 @@ goal close
 
 The audit contains one row with `base=2 revision=3 outcome=published`.
 Cancellation prints only `goal already finished`, and `/final.txt` contains `keep`.
+
+### Give a goal a deadline
+
+Paste this block at a fresh `clsh>` prompt. The 15 seconds start at
+`goal create`. The first status shows `Running` and the absolute deadline
+in guest nanoseconds.
+
+```text
+write /draft.txt keep
+goal create --timeout-ms 15000
+goal stage-rename /draft.txt final.txt
+agent run --suspended hello
+goal status
+```
+
+Leave QEMU running for 15 seconds, then enter
+
+```text
+wait hello
+goal status
+goal diff
+goal audit --publication
+cat /draft.txt
+goal close
+```
+
+`wait hello` prints `hello cancelled`. The goal status shows `Cancelled`
+and `deadline=expired`. The diff is empty and the audit contains one row
+with `base=2 revision=2 outcome=discarded-by-expiry`. The source still
+contains `keep`.
+
+To see how the deadline applies after a child finishes, start a fresh boot
+and paste this block.
+
+```text
+write /draft.txt keep
+goal create --timeout-ms 15000 --preserve-file /draft.txt
+goal grant-file --stage-rename /draft.txt
+agent run hello --stage-rename final.txt
+wait hello
+goal diff
+```
+
+The child exits successfully and the diff reports `ready to commit`.
+Leave QEMU running for 15 seconds, then enter
+
+```text
+goal commit
+goal status
+goal audit --publication
+cat /draft.txt
+goal close
+```
+
+Commit prints `goal deadline expired`. The goal still reports `Completed`,
+and the audit records `discarded-by-expiry`. To try the other ordering,
+repeat the setup on a fresh boot and enter `goal commit` immediately after
+`goal diff`. Once the deadline passes, the audit still shows one
+`outcome=published` and `cat /final.txt` prints `keep`.
 
 ## Requests, replies and file streams
 
@@ -1319,9 +1378,10 @@ history available until the owner closes the goal.
 
 `goal audit --publication` shows the current goal's last four publication
 decisions, oldest first. These include commits, explicit discards and renames
-discarded by cancellation or file grant revocation. Each row gives the absolute
-source path and destination basename captured at staging. `base` is the RamFS
-revision at staging. `revision` is the public revision when the kernel made the decision.
+discarded by cancellation, file grant revocation or goal expiry. Each row gives
+the absolute source path and destination basename captured at staging. `base`
+is the RamFS revision at staging. `revision` is the public revision when the
+kernel made the decision.
 Only the owner can read the history. Closing the goal releases it.
 
 At a fresh QEMU prompt, edit the source after reviewing its rename.

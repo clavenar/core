@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements calls 0–81. The caller places the call number in
+The RV64 prototype implements calls 0–83. The caller places the call number in
 `a7`, passes up to six arguments in `a0`–`a5`, and executes `ecall`.
 The per-call descriptions give the result registers and error values.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -10,6 +10,7 @@ The per-call descriptions give the result registers and error values.
 - [Typed requests and replies](#typed-requests-and-replies)
 - [Pipes and completion events](#pipes-and-completion-events)
 - [Goal and agent calls](#goal-and-agent-calls)
+  - [Goal deadlines](#goal-deadlines)
 - [Rename review and publication](#rename-review-and-publication)
 - [Goal membership and delegated authority](#goal-membership-and-delegated-authority)
 - [Audit records](#audit-records)
@@ -268,7 +269,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | --- | --- | --- |
 | 33 `goal_create` | None | Fresh goal handle, or -1 if the slot is occupied or handles are exhausted |
 | 34 `goal_run` | `a0` goal handle, `a1` program selector | Fresh child launch handle, or -1 on failure |
-| 35 `goal_status` | `a0` goal handle | State tag, with the member reporting that state in `a1` and detail in `a2` |
+| 35 `goal_status` | `a0` goal handle | State tag, member in `a1`, detail in `a2`, and goal deadline in `a3` (0 for unlimited, absolute guest nanoseconds while armed, all ones for expired) |
 | 36 `goal_close` | `a0` goal handle | 0 on release, 1 while running |
 | 37 `goal_cancel` | `a0` goal handle | `a0` is 0 for a new or repeated cancellation, 1 for already completed or failed, or -1 on error. On success, `a1` is 1 if this call discarded a staged rename, 0 otherwise. |
 | 38 `agent_run` | `a0` goal handle, `a1` program selector | Fresh agent handle, with its child launch handle in `a1` |
@@ -315,6 +316,31 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 79 `goal_read_decisions` | Same arguments as call 57 | Retained read decision count (0–4), overwritten count in `a1` and lifetime bytes delivered in `a2`, or -1 on failure |
 | 80 `goal_publication_audit_with_cancellation` | Same arguments as call 76 | Same row format and result registers as call 76. Includes a pending rename discarded by call 37. |
 | 81 `goal_publication_decisions` | Same arguments as call 76 | Same row format and result registers as call 76. Includes renames discarded by calls 37 and 60. |
+| 82 `goal_create_with_timeout` | `a0` optional read-directory handle, `a1` address and `a2` length of the 48-byte call 48 option block, `a3` optional preserved-file handle, `a4` optional rename-directory handle, `a5` positive timeout in milliseconds | Fresh goal handle, or -1 on rejection |
+| 83 `goal_publication_decisions_with_expiry` | Same arguments as call 76 | Same row format and result registers as call 81. Also includes a rename discarded on goal expiry. |
+
+### Goal deadlines
+
+Call 82 reads the six call 48 option words in little-endian order from the
+owner's stack. The timeout starts at goal creation on the guest monotonic
+clock. Time spent ready, running, suspended or awaiting publication counts
+toward the same deadline. Omit an optional handle with
+`NO_RAMFS_HANDLE` (all ones). A supplied handle follows the same ownership,
+scope and preservation rules as call 78. Zero milliseconds, an invalid
+option or descriptor, or a duration that cannot be represented as an
+absolute nanosecond value below `u64::MAX` returns -1 without consuming a
+goal handle or retaining a file. Earlier creation calls create untimed goals.
+
+The kernel checks the clock on user trap entry. At or after the deadline,
+it processes expiry before dispatching a syscall or resuming a task on a
+timer interrupt. A syscall admitted before the deadline runs to completion.
+Expiry stops all live goal members, closes their descriptors, releases unused
+reply reservations and drops the goal's file grant, preserved input and
+staged rename. The owner can still read status and audit records, collect
+child results and close the goal. A child that already exited or faulted
+keeps its result. A previously published rename stays visible. Call 35
+continues to report the deadline until close, including after cancellation
+or successful publication.
 
 ## Rename review and publication
 
@@ -346,22 +372,24 @@ preview or blocked review and returns the deadline for a passing review.
 | 3 | Postcondition failed. The source falls outside the rename scope or differs from the preserved input. | 0 |
 | 4 | Review unavailable. The kernel cannot prepare publication, represent the deadline or allocate a token. | 0 |
 
-The first passing review starts a 60-second lifetime on the kernel's monotonic
+The first passing review starts a 60-second token lifetime on the kernel's monotonic
 clock. QEMU `virt` provides a 10 MHz RISC-V time counter, so each tick is
-100 nanoseconds. Both review calls reuse the token and deadline while the
-token is live. A passing review at or after the deadline issues a fresh token
-with a new deadline. A rejected review clears the token and leaves the frozen
+100 nanoseconds. Both review calls reuse a live token. For a timed goal,
+call 75 reports the earlier of the token and goal deadlines. If only the
+token has expired, a passing review issues a fresh token. The goal deadline
+stays fixed. A rejected review clears the token and leaves the frozen
 diff available. A failed copy returns -1 before checking the change or
 altering its token. Call 67 reads the diff without changing review state.
-Discard, cancellation, successful close and owner exit invalidate the token.
+Discard, cancellation, goal expiry, successful close and owner exit invalidate the token.
 Revoking a file grant invalidates the token for a rename staged through that grant.
 
 Call 69 checks the caller, goal state and token. It consumes a matching token
-and returns 3 if the deadline has been reached. The rename remains staged for
-review or discard. With a live token, it repeats the RamFS checks in the
-same syscall that publishes the rename.
-A rejection preserves the public files and staged diff. Success updates only
-the file's name, advances the revision and clears the diff.
+and returns 3 if only the token has expired. The rename remains staged for
+review or discard. Once the goal expires, call 69 returns -1 for the former
+token and the diff is empty. With a live token, it repeats the RamFS checks
+in the syscall that publishes the rename. A failed RamFS check preserves the
+public files and staged diff. Success updates the file's name, advances the
+revision and clears the diff.
 Public file and directory creation or removal, truncating opens, nonempty
 writes to linked files and publication advance the revision. A mutation
 requiring a new revision fails if the counter is exhausted.
@@ -370,7 +398,7 @@ Call 70 uses call 48's option flags, budgets and selector validation. It
 requires a descriptor for a linked writable RamFS file. Creation retains
 the file and snapshots all its bytes (0–256), independently of the descriptor
 cursor. A rejected creation consumes no goal handle or pin. The owner can
-close the descriptor immediately. Successful publication, cancellation,
+close the descriptor immediately. Successful publication, cancellation, goal expiry,
 successful close or owner exit releases the retained input.
 
 Call 77 uses the same 48-byte option block as call 70. It binds the directory
@@ -618,19 +646,21 @@ bytes and displays `<unavailable>` when the field could not be copied.
 Each row reports the first failed check. The kernel copies the bounded
 input, checks the goal state and staging slot, then resolves the file
 descriptor and validates the source and destination. A failed launch or
-shell path open ends before a staging call. Revocation, cancellation and
-publication preserve earlier decisions. Closing the goal releases its history.
+shell path open ends before a staging call. Revocation, cancellation, goal
+expiry and publication preserve earlier decisions. Closing the goal releases
+its history.
 
 Call 76 reads commit decisions made by call 69 with a matching review token
 and explicit discards made by call 74. Call 80 also includes a rename
 discarded by cancellation (call 37). Call 81 includes all decisions from
-call 80 plus any rename discarded by file grant revocation (call 60). Later
-decisions can follow a revocation. A cancellation discard is always the
+call 80 plus any rename discarded by file grant revocation (call 60). Call 83
+also includes a rename discarded at the goal deadline. Later decisions can
+follow a revocation. A discard caused by cancellation or goal expiry is the
 final row. Each view reports its own last four decisions, oldest first,
 and its own overwritten count, which saturates at the largest RV64 unsigned
-value. A discard, cancellation or revocation adds a row only when it removes a
-proposal. Previews, reviews, invalid or replayed tokens and goal teardown add
-no rows.
+value. A discard, cancellation, revocation or goal expiry adds a row only
+when it removes a proposal. Previews, reviews, invalid or replayed tokens
+and goal teardown add no rows.
 
 Each 552-byte row starts with five little-endian 64-bit words giving the
 outcome, base revision, observed revision, source path length and destination
@@ -646,14 +676,16 @@ bytes. A published rename advances the revision by one.
 | 3 | `review-expired` |
 | 4 | `unavailable` |
 | 5 | `discarded` |
-| 6 | `discarded-by-cancel` (calls 80 and 81) |
-| 7 | `discarded-by-revoke` (call 81) |
+| 6 | `discarded-by-cancel` (calls 80, 81 and 83) |
+| 7 | `discarded-by-revoke` (calls 81 and 83) |
+| 8 | `discarded-by-expiry` (call 83) |
 
 The owner can reuse a single stack buffer to read indices zero through
-`count - 1`. Only the owner can cause a publication decision, so consecutive
-reads see the same history until the owner commits, discards, revokes a file
-grant, cancels or closes the goal. Index zero on an empty history returns zero
-and accepts zero capacity.
+`count - 1`. Goal expiry can append a row to call 83 between reads. To read a
+consistent set of rows, the shell first checks call 35. If the goal has
+expired it reads call 83. Otherwise it uses call 81, whose rows and
+overwritten count remain stable across expiry. Index zero on an empty
+history returns zero and accepts zero capacity.
 An invalid index, a short buffer for a retained row, or an invalid destination
 range fails before copying any bytes.
 
@@ -682,6 +714,11 @@ have stopped, it reports a cancelled member first, then a member that failed,
 then a successful member.
 Launch order breaks ties. `agent_status` always reports the agent's own
 child, including after that child stops while a sibling runs.
+
+Call 35 reports the deadline in `a3` independently of the execution state
+in `a0`–`a2`. Expiry before the first launch produces `Cancelled` with no
+child. A goal whose members had already finished can report `Completed` or
+`Failed` together with an expired deadline.
 
 If an agent exits or faults, the kernel records its completion and cancels
 all its live helpers in launch order before scheduling another task. Each

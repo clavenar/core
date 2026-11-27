@@ -14,6 +14,7 @@ pub(crate) enum GoalCommand {
 #[derive(Default)]
 pub(crate) struct GoalOptions<'a> {
     pub children: Option<usize>,
+    pub timeout_ms: Option<usize>,
     pub reply_bytes: Option<usize>,
     pub read_limits: ReadLimits,
     pub read_under: Option<&'a [u8]>,
@@ -38,6 +39,9 @@ impl<'a> GoalOptions<'a> {
                 GoalFlag::ReplyBytes => parse_count(rest, &mut options.reply_bytes)?,
                 GoalFlag::Children if matches!(command, GoalCommand::Create) => {
                     parse_count(rest, &mut options.children)?
+                }
+                GoalFlag::TimeoutMs if matches!(command, GoalCommand::Create) => {
+                    parse_count(rest, &mut options.timeout_ms)?
                 }
                 GoalFlag::ReadBytes if matches!(command, GoalCommand::Create) => {
                     parse_count(rest, &mut options.read_limits.goal)?
@@ -82,9 +86,10 @@ impl<'a> GoalOptions<'a> {
                 _ => return None,
             };
         }
-        if options
-            .children
-            .is_some_and(|n| !(1..=MAX_CHILDREN).contains(&n))
+        if options.timeout_ms == Some(0)
+            || options
+                .children
+                .is_some_and(|n| !(1..=MAX_CHILDREN).contains(&n))
         {
             return None;
         }

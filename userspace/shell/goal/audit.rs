@@ -37,13 +37,18 @@ pub(super) fn show(handle: Option<usize>, option: &[u8]) {
 fn show_rows(handle: usize, view: View) -> Option<()> {
     match view {
         View::Publication => {
-            // Only this owner changes publication history. Reuse one row on its 4 KiB stack.
+            // Expiry may append a terminal row between syscalls. Pick a stable view
+            // before streaming the rows through the shell's single stack buffer.
+            let read_row = match goal::status_with_deadline(handle)?.1 {
+                goal::GoalDeadline::Expired => goal::publication_decision_row_with_expiry,
+                _ => goal::publication_decision_row,
+            };
             let mut record = [[0; 8]; _];
-            let (count, overwritten) = goal::publication_decision_row(handle, 0, &mut record)?;
+            let (count, overwritten) = read_row(handle, 0, &mut record)?;
             print_header(handle, count, overwritten);
             for index in 0..count {
                 if index != 0 {
-                    goal::publication_decision_row(handle, index, &mut record)?;
+                    read_row(handle, index, &mut record)?;
                 }
                 print_publication(PublicationRecord::decode(&record)?);
             }
@@ -221,6 +226,7 @@ fn print_publication(entry: PublicationRecord<'_>) {
         PublicationOutcome::Discarded => b"discarded",
         PublicationOutcome::DiscardedByCancel => b"discarded-by-cancel",
         PublicationOutcome::DiscardedByRevoke => b"discarded-by-revoke",
+        PublicationOutcome::DiscardedByExpiry => b"discarded-by-expiry",
     };
     let mut line = ConsoleLine::new();
     line.write(b"source=");

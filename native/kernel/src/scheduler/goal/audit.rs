@@ -53,14 +53,15 @@ pub(super) struct PublicationHistory {
     explicit: AuditHistory<EncodedPublicationRecord>,
     // A revocation can precede later owner decisions. Older readers retain their own four rows.
     with_revocations: AuditHistory<EncodedPublicationRecord>,
-    // Cancellation is terminal, so both views that include it can share its final row.
-    cancellation: Option<EncodedPublicationRecord>,
+    // Cancellation or expiry can remove the final proposal only once.
+    terminal: Option<(PublicationOutcome, EncodedPublicationRecord)>,
 }
 
 pub(crate) enum PublicationAudit {
     Explicit,
     WithCancellation,
     Decisions,
+    WithExpiry,
 }
 
 impl PublicationHistory {
@@ -72,7 +73,9 @@ impl PublicationHistory {
     ) {
         let row = change.publication_record(fs, outcome);
         match outcome {
-            PublicationOutcome::DiscardedByCancel => self.cancellation = Some(row),
+            PublicationOutcome::DiscardedByCancel | PublicationOutcome::DiscardedByExpiry => {
+                self.terminal = Some((outcome, row));
+            }
             PublicationOutcome::DiscardedByRevoke => self.with_revocations.record(row),
             PublicationOutcome::Commit(_)
             | PublicationOutcome::Unavailable
@@ -89,12 +92,16 @@ impl PublicationHistory {
         view: PublicationAudit,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize)> {
-        let (history, cancellation) = match view {
-            PublicationAudit::Explicit => (&self.explicit, &[][..]),
-            PublicationAudit::WithCancellation => (&self.explicit, self.cancellation.as_slice()),
-            PublicationAudit::Decisions => (&self.with_revocations, self.cancellation.as_slice()),
+        let terminal = self.terminal.as_ref();
+        let cancellation =
+            terminal.filter(|(outcome, _)| *outcome == PublicationOutcome::DiscardedByCancel);
+        let (history, tail) = match view {
+            PublicationAudit::Explicit => (&self.explicit, None),
+            PublicationAudit::WithCancellation => (&self.explicit, cancellation),
+            PublicationAudit::Decisions => (&self.with_revocations, cancellation),
+            PublicationAudit::WithExpiry => (&self.with_revocations, terminal),
         };
-        let total = history.len + cancellation.len();
+        let total = history.len + usize::from(tail.is_some());
         let skipped = total.saturating_sub(AUDIT_CAPACITY);
         let count = total - skipped;
         let bytes = if index == 0 && count == 0 {
@@ -102,7 +109,7 @@ impl PublicationHistory {
         } else {
             history.entries[skipped..history.len]
                 .iter()
-                .chain(cancellation)
+                .chain(tail.map(|(_, row)| row))
                 .nth(index)?
                 .as_flattened()
         };

@@ -55,6 +55,7 @@ entries! {
     GoalCreate {
         "goal create [options]" => "Open a goal",
         "  --children 1|2|3" => "Limit child launches",
+        "  --timeout-ms N" => "Expire the goal after N milliseconds",
         "  --reply-bytes N" => "Limit reply bytes",
         "  --read-bytes N" => "Limit all file reads in bytes",
         "  --read-under <dir>" => "Limit file reads to this directory tree",

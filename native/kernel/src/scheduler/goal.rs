@@ -18,11 +18,12 @@ use clv_abi::audit::{
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CreateOptions, DiscardResult, FileOptions,
-    GoalStatus, MAX_CHILDREN, ReadLimits,
+    GoalDeadline, GoalStatus, MAX_CHILDREN, ReadLimits,
 };
 use clv_abi::tool::ToolId;
 
 use super::{AgentBinding, SHELL_TASK_INDEX, Scheduler, TaskState};
+use crate::arch::monotonic_nanos;
 use crate::fs::ramfs::{
     DirectoryId, FileGrant, FileGrantMode, GrantArgument, RamFs, RenamePolicy, TaskFs,
 };
@@ -77,6 +78,7 @@ impl Member {
 pub(super) struct Goal {
     handle: usize,
     options: CreateOptions,
+    deadline: GoalDeadline,
     allowed_tool: Option<ToolId>,
     reads: GoalReads,
     members: [Option<Member>; MAX_CHILDREN],
@@ -242,6 +244,7 @@ impl Scheduler {
         read_limits: ReadLimits,
         allowed_tool: Option<ToolId>,
         files: FileOptions,
+        timeout_ms: Option<usize>,
         fs: &mut RamFs,
     ) -> Option<usize> {
         if self.current != SHELL_TASK_INDEX
@@ -260,11 +263,16 @@ impl Scheduler {
             Some(fd) => Some(caller.directory_for_handle(fd)?),
             None => None,
         };
+        let deadline = match timeout_ms {
+            Some(ms) => GoalDeadline::after_millis(monotonic_nanos(), ms)?,
+            None => GoalDeadline::Unlimited,
+        };
         let rename_policy = RenamePolicy::capture(caller, fs, files.rename)?;
         self.next_handle = next_handle;
         self.goal = Some(Goal {
             handle,
             options,
+            deadline,
             allowed_tool,
             reads: GoalReads::new(read_limits, read_directory),
             members: [const { None }; MAX_CHILDREN],
@@ -287,8 +295,9 @@ impl Scheduler {
         self.goal.as_ref().filter(|goal| goal.handle == handle)
     }
 
-    pub(crate) fn goal_status(&self, handle: usize) -> Option<GoalStatus> {
-        Some(self.shell_goal(handle)?.status())
+    pub(crate) fn goal_status(&self, handle: usize) -> Option<(GoalStatus, GoalDeadline)> {
+        let goal = self.shell_goal(handle)?;
+        Some((goal.status(), goal.deadline))
     }
 
     pub(crate) fn goal_budget(&self, handle: usize) -> Option<ReplyBudget> {
@@ -303,7 +312,7 @@ impl Scheduler {
         argument: Option<GrantArgument>,
         fs: &mut RamFs,
     ) -> Option<()> {
-        if self.goal_status(handle)? != GoalStatus::Ready {
+        if self.shell_goal(handle)?.status() != GoalStatus::Ready {
             return None;
         }
         let goal = self.goal.as_mut()?;
@@ -390,7 +399,10 @@ impl Scheduler {
     }
 
     pub(crate) fn close_goal(&mut self, handle: usize, fs: &mut RamFs) -> Option<CloseResult> {
-        if matches!(self.goal_status(handle)?, GoalStatus::Running { .. }) {
+        if matches!(
+            self.shell_goal(handle)?.status(),
+            GoalStatus::Running { .. }
+        ) {
             return Some(CloseResult::Busy);
         }
         self.drop_goal(fs);
@@ -398,10 +410,36 @@ impl Scheduler {
     }
 
     pub(crate) fn cancel_goal(&mut self, handle: usize, fs: &mut RamFs) -> Option<CancelOutcome> {
-        let execution = match self.goal_status(handle)? {
+        self.shell_goal(handle)?;
+        self.stop_goal_work(fs, PublicationOutcome::DiscardedByCancel)
+    }
+
+    /// Check on trap entry, before admitting a syscall or scheduling more user work.
+    /// Returns true when the interrupted task was itself stopped by the deadline.
+    pub(crate) fn expire_goal_if_due(&mut self, fs: &mut RamFs) -> bool {
+        let Some(goal) = &mut self.goal else {
+            return false;
+        };
+        let GoalDeadline::At(at) = goal.deadline else {
+            return false;
+        };
+        if monotonic_nanos() < at {
+            return false;
+        }
+        goal.deadline = GoalDeadline::Expired;
+        self.stop_goal_work(fs, PublicationOutcome::DiscardedByExpiry)
+            .expect("every live goal member has its original task slot");
+        self.tasks[self.current].state == TaskState::Stopped
+    }
+
+    fn stop_goal_work(
+        &mut self,
+        fs: &mut RamFs,
+        outcome: PublicationOutcome,
+    ) -> Option<CancelOutcome> {
+        let goal = self.goal.as_mut()?;
+        let execution = match goal.status() {
             GoalStatus::Ready => {
-                let goal = self.goal.as_mut()?;
-                goal.release_file(fs);
                 goal.cancelled_before_launch = true;
                 CancelResult::Cancelled
             }
@@ -414,10 +452,10 @@ impl Scheduler {
                 CancelResult::AlreadyFinished
             }
         };
-        let discarded = self
-            .goal
-            .as_mut()?
-            .release_transaction(fs, Some(PublicationOutcome::DiscardedByCancel));
+        let goal = self.goal.as_mut()?;
+        // Stopping the members closed their issued descriptors. A ready goal can still hold its pin.
+        goal.release_file(fs);
+        let discarded = goal.release_transaction(fs, Some(outcome));
         Some(CancelOutcome {
             execution,
             rename_discarded: discarded == DiscardResult::Discarded,

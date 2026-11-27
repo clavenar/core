@@ -4,8 +4,8 @@ mod options;
 use super::color;
 use super::command::{GoalFlag, Subcommand};
 use clv::goal::{
-    self, CancelResult, CloseResult, CommitResult, DiscardResult, FileRecipient, GoalStatus,
-    PublicationError, ReplyBudget, ReviewToken, TimedRenameReview,
+    self, CancelResult, CloseResult, CommitResult, DiscardResult, FileRecipient, GoalDeadline,
+    GoalStatus, PublicationError, ReplyBudget, ReviewToken, TimedRenameReview,
 };
 use clv::{agent, print};
 use clv_abi::agent::{NO_DEFINITION, SHA256_BYTES};
@@ -58,8 +58,17 @@ pub(super) fn command(
             Some(budget) => print_budget(budget),
             None => print(b"no current goal\r\n"),
         },
-        (Subcommand::Status, b"") => match handle.and_then(goal::status) {
-            Some(status) => print_status(status),
+        (Subcommand::Status, b"") => match handle.and_then(goal::status_with_deadline) {
+            Some((status, deadline)) => {
+                print_status(status);
+                match deadline {
+                    GoalDeadline::Unlimited => {}
+                    GoalDeadline::At(ns) => {
+                        print_line(&[b"deadline_ns=", decimal(ns as usize, &mut [0; DIGITS])])
+                    }
+                    GoalDeadline::Expired => print(b"deadline=expired\r\n"),
+                }
+            }
             None => print(b"no current goal\r\n"),
         },
         (Subcommand::Close, b"") => match handle.and_then(goal::close) {
@@ -216,15 +225,24 @@ fn print_review_deadline(deadline_ns: u64) {
 }
 
 fn commit(goal: &mut CurrentGoal) {
-    let Some(token) = goal.review.take() else {
-        return print(b"goal commit requires a passing goal diff after completion\r\n");
-    };
-    match goal::commit(goal.handle, token) {
+    let token = goal.review.take();
+    match token.and_then(|token| goal::commit(goal.handle, token)) {
         Some(CommitResult::Committed) => color::print_line(color::GREEN, b"rename committed"),
         Some(CommitResult::Conflict) => color::print_line(color::RED, b"commit conflict"),
         Some(CommitResult::ReviewExpired) => color::print_line(color::YELLOW, b"review expired"),
         Some(CommitResult::PostconditionFailed) => print(b"postcondition failed\r\n"),
-        None => print(b"cannot commit goal\r\n"),
+        None => {
+            if matches!(
+                goal::status_with_deadline(goal.handle),
+                Some((_, GoalDeadline::Expired))
+            ) {
+                color::print_line(color::YELLOW, b"goal deadline expired");
+            } else if token.is_none() {
+                print(b"goal commit requires a passing goal diff after completion\r\n");
+            } else {
+                print(b"cannot commit goal\r\n");
+            }
+        }
     }
 }
 
@@ -281,7 +299,7 @@ fn create_goal(options: GoalOptions<'_>) -> Option<usize> {
     let read_directory = open_policy_handle(options.read_under)?;
     let rename_directory = open_policy_handle(options.rename_under)?;
     let preserve_file = open_policy_handle(options.preserve_file)?;
-    goal::create_with_file_options(
+    goal::create_with_timeout(
         create,
         options.read_limits,
         options.allowed_tool,
@@ -292,6 +310,7 @@ fn create_goal(options: GoalOptions<'_>) -> Option<usize> {
                 preserve_file: preserve_file.as_ref().map(OpenHandle::id),
             },
         },
+        options.timeout_ms,
     )
 }
 

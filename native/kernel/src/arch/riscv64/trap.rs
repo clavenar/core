@@ -110,6 +110,14 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         .expect("scheduler is initialized before user entry");
     let fs = &mut state.ramfs;
     let current = scheduler.current_id();
+    if scause & INTERRUPT_FLAG != 0 && scause != timer::INTERRUPT_CAUSE {
+        supervisor_trap_fatal(scause, frame.sepc, stval);
+    }
+    if scheduler.expire_goal_if_due(fs) {
+        // The frame belongs to a cancelled member. Skip its pending syscall or interrupted PC.
+        resume_after_stop(scheduler, frame, SwitchReason::Expiry);
+        return;
+    }
     if scause == timer::INTERRUPT_CAUSE {
         if scheduler.preempt(frame) {
             switch_task(scheduler, current, SwitchReason::Timer);
@@ -119,19 +127,11 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         return;
     }
     if scause != USER_ECALL {
-        if scause & INTERRUPT_FLAG != 0 {
-            supervisor_trap_fatal(scause, frame.sepc, stval);
-        }
         write_task(current);
         uart::write(b" fault");
         write_trap_registers(scause, frame.sepc, stval);
-        finish_task(
-            scheduler,
-            fs,
-            frame,
-            TaskCompletion::Faulted(scause),
-            SwitchReason::Fault,
-        );
+        scheduler.stop_current(fs, TaskCompletion::Faulted(scause));
+        resume_after_stop(scheduler, frame, SwitchReason::Fault);
         return;
     }
 
@@ -144,13 +144,8 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
                 write_hex(status);
                 uart::write(b"\r\n");
             }
-            finish_task(
-                scheduler,
-                fs,
-                frame,
-                TaskCompletion::Exited(status),
-                SwitchReason::Exit,
-            );
+            scheduler.stop_current(fs, TaskCompletion::Exited(status));
+            resume_after_stop(scheduler, frame, SwitchReason::Exit);
         }
         syscall::Outcome::Wait => {
             switch_task(scheduler, current, SwitchReason::Wait);
@@ -159,15 +154,9 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
     }
 }
 
-fn finish_task(
-    scheduler: &mut Scheduler,
-    fs: &mut RamFs,
-    frame: &mut TrapFrame,
-    completion: TaskCompletion,
-    reason: SwitchReason,
-) {
+fn resume_after_stop(scheduler: &mut Scheduler, frame: &mut TrapFrame, reason: SwitchReason) {
     let previous = scheduler.current_id();
-    if !scheduler.stop_current(fs, frame, completion) {
+    if !scheduler.switch(frame) {
         uart::write(b"all tasks exited\r\n");
         idle();
     }
@@ -180,6 +169,7 @@ enum SwitchReason {
     Wait,
     Exit,
     Fault,
+    Expiry,
 }
 
 fn switch_task(scheduler: &Scheduler, previous: usize, reason: SwitchReason) {
@@ -190,6 +180,7 @@ fn switch_task(scheduler: &Scheduler, previous: usize, reason: SwitchReason) {
     // Routine switch traces share the shell's UART with the bytes it is draining.
     let trace: &[u8] = match reason {
         SwitchReason::Fault => b"fault switch ",
+        SwitchReason::Expiry => return,
         _ if scheduler.has_active_pipe_reader() => return,
         SwitchReason::Timer => b"timer switch ",
         SwitchReason::Wait => b"wait switch ",

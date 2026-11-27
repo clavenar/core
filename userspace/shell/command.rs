@@ -63,6 +63,7 @@ keywords!(Subcommand {
 });
 
 keywords!(GoalFlag {
+    TimeoutMs => "--timeout-ms",
     ReplyBytes => "--reply-bytes",
     Children => "--children",
     ReadBytes => "--read-bytes",

@@ -18,17 +18,18 @@ use clv_abi::{
     SYS_GOAL_AUDIT_WITH_CALLER, SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL,
     SYS_GOAL_CLOSE, SYS_GOAL_COMMIT, SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE,
     SYS_GOAL_CREATE_WITH_OPTIONS, SYS_GOAL_CREATE_WITH_READ_SCOPE,
-    SYS_GOAL_CREATE_WITH_RENAME_SCOPE, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF,
-    SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
-    SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
-    SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
-    SYS_GOAL_PUBLICATION_DECISIONS, SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT,
-    SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW,
-    SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
-    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
-    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
-    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_GOAL_CREATE_WITH_RENAME_SCOPE, SYS_GOAL_CREATE_WITH_REPLY_BUDGET,
+    SYS_GOAL_CREATE_WITH_TIMEOUT, SYS_GOAL_DIFF, SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO,
+    SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_PUBLICATION_AUDIT,
+    SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION, SYS_GOAL_PUBLICATION_DECISIONS,
+    SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
+    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
+    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE,
+    SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR,
+    SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
     SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
     SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
     SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
@@ -143,13 +144,15 @@ pub(crate) fn dispatch(
                 ReadLimits::default(),
                 None,
                 FileOptions::default(),
+                None,
                 fs,
             )
             .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_CREATE_WITH_OPTIONS
         | SYS_GOAL_CREATE_PRESERVING_FILE
         | SYS_GOAL_CREATE_WITH_RENAME_SCOPE
-        | SYS_GOAL_CREATE_WITH_READ_SCOPE => {
+        | SYS_GOAL_CREATE_WITH_READ_SCOPE
+        | SYS_GOAL_CREATE_WITH_TIMEOUT => {
             let a4 = frame.registers[REG_A4];
             let words = if number == SYS_GOAL_CREATE_WITH_OPTIONS {
                 Some([a0, a1, a2, a3, a4, frame.registers[REG_A5]])
@@ -158,6 +161,11 @@ pub(crate) fn dispatch(
             };
             let optional_handle = |fd| (fd != NO_RAMFS_HANDLE).then_some(fd);
             let (read_directory, rename_directory, preserve_file) = match number {
+                SYS_GOAL_CREATE_WITH_TIMEOUT => (
+                    optional_handle(a0),
+                    optional_handle(a4),
+                    optional_handle(a3),
+                ),
                 SYS_GOAL_CREATE_WITH_READ_SCOPE => {
                     (Some(a0), optional_handle(a4), optional_handle(a3))
                 }
@@ -172,10 +180,12 @@ pub(crate) fn dispatch(
                     preserve_file,
                 },
             };
+            let timeout_ms =
+                (number == SYS_GOAL_CREATE_WITH_TIMEOUT).then_some(frame.registers[REG_A5]);
             words
                 .and_then(CreateOptions::from_registers_with_allowed_tool)
                 .and_then(|(options, limits, tool)| {
-                    scheduler.create_goal(options, limits, tool, files, fs)
+                    scheduler.create_goal(options, limits, tool, files, timeout_ms, fs)
                 })
                 .unwrap_or(SYSCALL_ERROR)
         }
@@ -241,11 +251,13 @@ pub(crate) fn dispatch(
         ),
         SYS_GOAL_PUBLICATION_AUDIT
         | SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION
-        | SYS_GOAL_PUBLICATION_DECISIONS => {
+        | SYS_GOAL_PUBLICATION_DECISIONS
+        | SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY => {
             let view = match number {
                 SYS_GOAL_PUBLICATION_AUDIT => PublicationAudit::Explicit,
                 SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION => PublicationAudit::WithCancellation,
-                _ => PublicationAudit::Decisions,
+                SYS_GOAL_PUBLICATION_DECISIONS => PublicationAudit::Decisions,
+                _ => PublicationAudit::WithExpiry,
             };
             write_audit_result(
                 frame,
@@ -305,9 +317,12 @@ pub(crate) fn dispatch(
                     0
                 })
         }
-        SYS_GOAL_STATUS => scheduler.goal_status(a0).map_or(SYSCALL_ERROR, |status| {
-            write_status(frame, status.registers())
-        }),
+        SYS_GOAL_STATUS => scheduler
+            .goal_status(a0)
+            .map_or(SYSCALL_ERROR, |(status, deadline)| {
+                frame.registers[REG_A3] = deadline.register();
+                write_status(frame, status.registers())
+            }),
         SYS_GOAL_CLOSE => scheduler
             .close_goal(a0, fs)
             .map_or(SYSCALL_ERROR, |result| result as usize),

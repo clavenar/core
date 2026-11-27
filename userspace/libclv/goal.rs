@@ -6,8 +6,8 @@ use clv_abi::audit::{
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CommitResult, CreateOptions, DiscardResult,
-    FileOptions, FileRecipient, GoalDiff, GoalStatus, PublicationError, ReadLimits, RenameOptions,
-    RenameReview, ReviewToken, TimedRenameReview, TimedReviewToken,
+    FileOptions, FileRecipient, GoalDeadline, GoalDiff, GoalStatus, PublicationError, ReadLimits,
+    RenameOptions, RenameReview, ReviewToken, TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -15,10 +15,11 @@ use clv_abi::{
     SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
     SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE, SYS_GOAL_CREATE_WITH_OPTIONS,
     SYS_GOAL_CREATE_WITH_READ_SCOPE, SYS_GOAL_CREATE_WITH_RENAME_SCOPE,
-    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_DISCARD,
-    SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
-    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_PUBLICATION_AUDIT,
-    SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION, SYS_GOAL_PUBLICATION_DECISIONS,
+    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_CREATE_WITH_TIMEOUT, SYS_GOAL_DIFF,
+    SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
+    SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
+    SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
+    SYS_GOAL_PUBLICATION_DECISIONS, SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
     SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS,
     SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE,
     SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
@@ -127,16 +128,36 @@ pub fn create_with_file_options(
     allowed_tool: Option<ToolId>,
     files: FileOptions,
 ) -> Option<usize> {
+    create_with_timeout(options, limits, allowed_tool, files, None)
+}
+
+/// An optional positive timeout in milliseconds applies to both execution and pending publication.
+pub fn create_with_timeout(
+    options: CreateOptions,
+    limits: ReadLimits,
+    allowed_tool: Option<ToolId>,
+    files: FileOptions,
+    timeout_ms: Option<usize>,
+) -> Option<usize> {
     let words = options.registers_with_allowed_tool(limits, allowed_tool)?;
     let rename = files.rename;
-    if rename.directory == Some(NO_RAMFS_HANDLE) || rename.preserve_file == Some(NO_RAMFS_HANDLE) {
+    if files.read_directory == Some(NO_RAMFS_HANDLE)
+        || rename.directory == Some(NO_RAMFS_HANDLE)
+        || rename.preserve_file == Some(NO_RAMFS_HANDLE)
+    {
         return None;
     }
-    let (call, descriptor) = match (files.read_directory, rename.directory, rename.preserve_file) {
-        (Some(dir), _, _) => (SYS_GOAL_CREATE_WITH_READ_SCOPE, dir),
-        (None, Some(dir), _) => (SYS_GOAL_CREATE_WITH_RENAME_SCOPE, dir),
-        (None, None, Some(file)) => (SYS_GOAL_CREATE_PRESERVING_FILE, file),
-        (None, None, None) => {
+    let (call, descriptor) = match (
+        timeout_ms,
+        files.read_directory,
+        rename.directory,
+        rename.preserve_file,
+    ) {
+        (Some(_), dir, _, _) => (SYS_GOAL_CREATE_WITH_TIMEOUT, dir.unwrap_or(NO_RAMFS_HANDLE)),
+        (None, Some(dir), _, _) => (SYS_GOAL_CREATE_WITH_READ_SCOPE, dir),
+        (None, None, Some(dir), _) => (SYS_GOAL_CREATE_WITH_RENAME_SCOPE, dir),
+        (None, None, None, Some(file)) => (SYS_GOAL_CREATE_PRESERVING_FILE, file),
+        (None, None, None, None) => {
             let [children, flags, replies, helper, reads, helper_reads] = words;
             let (handle, ..) = ecall6(
                 SYS_GOAL_CREATE_WITH_OPTIONS,
@@ -152,13 +173,14 @@ pub fn create_with_file_options(
     };
     let encoded = words.map(usize::to_le_bytes);
     let bytes = encoded.as_flattened();
-    let (handle, ..) = ecall(
+    let (handle, ..) = ecall6(
         call,
         descriptor,
         bytes.as_ptr().expose_provenance(),
         bytes.len(),
         rename.preserve_file.unwrap_or(NO_RAMFS_HANDLE),
         rename.directory.unwrap_or(NO_RAMFS_HANDLE),
+        timeout_ms.unwrap_or(0),
     );
     syscall_result(handle)
 }
@@ -376,6 +398,20 @@ pub fn publication_decision_row(
     read_publication_row(SYS_GOAL_PUBLICATION_DECISIONS, goal, index, record)
 }
 
+/// Includes the terminal discard of a rename when a timed goal expires.
+pub fn publication_decision_row_with_expiry(
+    goal: usize,
+    index: usize,
+    record: &mut EncodedPublicationRecord,
+) -> Option<(usize, usize)> {
+    read_publication_row(
+        SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
+        goal,
+        index,
+        record,
+    )
+}
+
 fn read_publication_row(
     number: usize,
     goal: usize,
@@ -473,8 +509,16 @@ pub fn run_with_reply_budget(goal: usize, program: usize, bytes: usize) -> Optio
 }
 
 pub fn status(goal: usize) -> Option<GoalStatus> {
-    let (state, child, value, _) = ecall(SYS_GOAL_STATUS, goal, 0, 0, 0, 0);
-    GoalStatus::from_registers(state, child, value)
+    status_with_deadline(goal).map(|(status, _)| status)
+}
+
+/// Reads member completion and the independent goal deadline in a single syscall.
+pub fn status_with_deadline(goal: usize) -> Option<(GoalStatus, GoalDeadline)> {
+    let (state, child, value, deadline) = ecall(SYS_GOAL_STATUS, goal, 0, 0, 0, 0);
+    Some((
+        GoalStatus::from_registers(state, child, value)?,
+        GoalDeadline::from_register(deadline),
+    ))
 }
 
 pub fn close(goal: usize) -> Option<CloseResult> {

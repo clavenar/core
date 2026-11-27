@@ -1,7 +1,7 @@
 use clv_abi::audit::{PublicationOutcome, RenameDenial, RenameRecord};
 use clv_abi::goal::{
-    CommitResult, DiscardResult, GoalStatus, PublicationError, ReviewToken, TimedRenameReview,
-    TimedReviewToken,
+    CommitResult, DiscardResult, GoalDeadline, GoalStatus, PublicationError, ReviewToken,
+    TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::{LaunchParent, PATH_MAX_BYTES};
 
@@ -196,7 +196,12 @@ impl Scheduler {
         }
         let result = if can_review {
             match pending.review(fs, &goal.rename_policy, &mut self.next_handle) {
-                Ok(review) => TimedRenameReview::Ready(review),
+                Ok(mut review) => {
+                    if let GoalDeadline::At(at) = goal.deadline {
+                        review.deadline_ns = review.deadline_ns.min(at);
+                    }
+                    TimedRenameReview::Ready(review)
+                }
                 Err(reason) => TimedRenameReview::Blocked(reason),
             }
         } else {
@@ -221,7 +226,10 @@ impl Scheduler {
         token: ReviewToken,
         fs: &mut RamFs,
     ) -> Option<CommitResult> {
-        if !matches!(self.goal_status(handle)?, GoalStatus::Completed { .. }) {
+        if !matches!(
+            self.shell_goal(handle)?.status(),
+            GoalStatus::Completed { .. }
+        ) {
             return None;
         }
         let goal = self.goal.as_mut()?;

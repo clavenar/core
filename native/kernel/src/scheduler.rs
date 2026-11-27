@@ -521,12 +521,7 @@ impl Scheduler {
         self.switch(frame)
     }
 
-    pub(crate) fn stop_current(
-        &mut self,
-        fs: &mut RamFs,
-        frame: &mut TrapFrame,
-        completion: TaskCompletion,
-    ) -> bool {
+    pub(crate) fn stop_current(&mut self, fs: &mut RamFs, completion: TaskCompletion) {
         self.stop_task(self.current, fs, completion);
         if self.current == SHELL_TASK_INDEX {
             self.release_shell_goal(fs);
@@ -540,7 +535,6 @@ impl Scheduler {
         } else if let Some(launch) = &self.tasks[self.current].launch {
             self.cancel_delegated_helpers(launch.handle, fs);
         }
-        self.switch(frame)
     }
 
     fn stop_task(&mut self, index: usize, fs: &mut RamFs, completion: TaskCompletion) {
@@ -609,7 +603,7 @@ impl Scheduler {
         true
     }
 
-    fn switch(&mut self, frame: &mut TrapFrame) -> bool {
+    pub(crate) fn switch(&mut self, frame: &mut TrapFrame) -> bool {
         let Some(next) = (1..TASK_COUNT)
             .map(|offset| (self.current + offset) % TASK_COUNT)
             .find(|&index| self.tasks[index].state == TaskState::Runnable)
