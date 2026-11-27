@@ -291,7 +291,7 @@ impl Scheduler {
                 && !self
                     .durable_disk
                     .as_ref()
-                    .is_some_and(|disk| disk.is_writable()))
+                    .is_some_and(|disk| disk.supports_renames(rename_limit)))
         {
             return None;
         }
@@ -311,7 +311,8 @@ impl Scheduler {
             Some(ms) => GoalDeadline::after_millis(monotonic_nanos(), ms)?,
             None => GoalDeadline::Unlimited,
         };
-        let rename_policy = RenamePolicy::capture(caller, fs, files.rename, durable)?;
+        let rename_policy =
+            RenamePolicy::capture(caller, fs, files.rename, durable.then_some(rename_limit))?;
         self.next_handle = next_handle;
         self.goal = Some(Goal {
             handle,

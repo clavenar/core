@@ -3,7 +3,7 @@ use clv_abi::audit::{
 };
 use clv_abi::goal::{MAX_GOAL_RENAMES, PublicationError, RENAME_DIFF_MAX_BYTES, RenameOptions};
 
-use super::durable::EncodedFile;
+use super::durable::EncodedFiles;
 use super::{
     CWD_PATH_CAPACITY, DirectoryId, NAME_LIMIT, Name, Node, RamFs, Revision, TaskFs,
     WRITABLE_FILE_CAPACITY, WritableFile,
@@ -16,7 +16,7 @@ pub(crate) struct RenamePolicy {
     // RamFS refuses rmdir on this directory for the lifetime of the owning goal.
     pub(crate) directory: DirectoryId,
     preserved_files: [Option<PreservedFile>; MAX_GOAL_RENAMES],
-    durable: bool,
+    durable_renames: Option<usize>,
 }
 
 impl RenamePolicy {
@@ -24,13 +24,13 @@ impl RenamePolicy {
         caller: &TaskFs,
         fs: &mut RamFs,
         options: RenameOptions,
-        durable: bool,
+        durable_renames: Option<usize>,
     ) -> Option<Self> {
         let directory = match options.directory {
             None => DirectoryId::Root,
             Some(fd) => caller.directory_for_handle(fd)?,
         };
-        if durable && directory != DirectoryId::Root {
+        if durable_renames.is_some() && directory != DirectoryId::Root {
             return None;
         }
         let mut preserved_files = [const { None }; MAX_GOAL_RENAMES];
@@ -51,12 +51,13 @@ impl RenamePolicy {
         Some(Self {
             directory,
             preserved_files,
-            durable,
+            durable_renames,
         })
     }
 
     fn allows(&self, fs: &RamFs, index: usize, parent: DirectoryId) -> bool {
-        self.directory.contains(fs, parent) && (!self.durable || fs.can_save_file(index, parent))
+        self.directory.contains(fs, parent)
+            && (self.durable_renames.is_none() || fs.can_save_file(index, parent))
     }
 
     pub(crate) fn release_inputs(&mut self, fs: &mut RamFs) {
@@ -161,21 +162,19 @@ pub(crate) struct StagedRenames {
 pub(crate) struct PreparedRenames {
     names: [Option<(usize, Name)>; MAX_GOAL_RENAMES],
     revision: Revision,
-    durable: bool,
+    durable_renames: Option<usize>,
 }
 
 impl PreparedRenames {
-    pub(crate) fn durable_file(&self, fs: &RamFs) -> Option<EncodedFile> {
-        if !self.durable {
-            return None;
-        }
-        let (index, name) = self.names[0]
-            .as_ref()
-            .expect("prepared rename has a source");
-        let file = fs.writable[*index]
-            .as_ref()
-            .expect("validated rename source");
-        Some(EncodedFile::new(name, file))
+    pub(crate) fn durable_files(&self, fs: &RamFs) -> Option<EncodedFiles> {
+        let count = self.durable_renames?;
+        let files = self.names.iter().flatten().map(|(index, name)| {
+            let file = fs.writable[*index]
+                .as_ref()
+                .expect("validated rename source");
+            (name, file)
+        });
+        Some(EncodedFiles::new(files, count))
     }
 
     pub(crate) fn publish(self, fs: &mut RamFs) {
@@ -185,7 +184,7 @@ impl PreparedRenames {
                 .as_mut()
                 .expect("validated rename source")
                 .name = name;
-            if self.durable {
+            if self.durable_renames.is_some() {
                 fs.pin_durable_file(index);
             }
         }
@@ -258,9 +257,12 @@ impl StagedRenames {
         for (slot, rename) in names.iter_mut().zip(self.iter()) {
             *slot = Some((rename.file_index, rename.checked_target(fs)?));
         }
-        if self
-            .iter()
-            .any(|rename| !policy.allows(fs, rename.file_index, rename.parent))
+        if policy
+            .durable_renames
+            .is_some_and(|count| self.len() != count)
+            || self
+                .iter()
+                .any(|rename| !policy.allows(fs, rename.file_index, rename.parent))
         {
             return Err(PublicationError::PostconditionFailed);
         }
@@ -277,7 +279,7 @@ impl StagedRenames {
         Ok(PreparedRenames {
             names,
             revision,
-            durable: policy.durable,
+            durable_renames: policy.durable_renames,
         })
     }
 

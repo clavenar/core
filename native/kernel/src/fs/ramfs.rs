@@ -2,7 +2,9 @@ mod durable;
 mod handles;
 mod rename;
 
-pub(crate) use durable::SavedFile;
+use clv_abi::goal::MAX_GOAL_RENAMES;
+
+pub(crate) use durable::SavedFiles;
 pub(crate) use handles::{FileGrant, FileGrantMode, GrantArgument, TaskFs};
 pub(crate) use rename::{RenamePolicy, StagedRename, StagedRenames};
 
@@ -137,7 +139,7 @@ impl Revision {
 pub(crate) struct RamFs {
     directories: [Option<Directory>; DIRECTORY_COUNT],
     writable: [Option<WritableFile>; WRITABLE_FILE_COUNT],
-    durable_file: Option<usize>,
+    durable_files: [Option<usize>; MAX_GOAL_RENAMES],
     next_handle_id: usize,
     revision: Revision,
 }
@@ -147,7 +149,7 @@ impl RamFs {
         Self {
             directories: [const { None }; DIRECTORY_COUNT],
             writable: [const { None }; WRITABLE_FILE_COUNT],
-            durable_file: None,
+            durable_files: [None; MAX_GOAL_RENAMES],
             next_handle_id: 0,
             revision: Revision(0),
         }

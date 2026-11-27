@@ -1,7 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.74 adds optional durable rename publication to the goal calls.
+Kernel 0.0.75 extends durable rename publication to two-file batches.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -54,7 +54,7 @@ to remove the empty directory. Use `exit` to stop the shell.
 RamFS starts with read-only `/hello.txt` and `/about.txt` and holds up to four
 directories besides the root and four writable files of 256 bytes each.
 Ordinary writes, unlinks and directory changes live for one boot. A durable
-rename journal can restore one of the writable files. In the shell, absolute
+rename journal can restore one or two writable files. In the shell, absolute
 paths start at `/` and relative paths start at its current directory.
 Within a path, `.` keeps the directory reached so far and `..` moves to its
 parent, staying at `/` when already there. Creating a file or directory
@@ -457,9 +457,10 @@ distinct registered IDs. A host tool always requires an exact grant. Each
 budget word applies only when its
 flag is set, and zero then means a zero-byte budget. Bit 5 requires a
 supervisor rename review. Bit 6 allows two staged renames. Bit 7 makes the
-rename durable and requires supervisor review. With bit 7 set, bit 6 must
-be clear, the rename directory must be the root if supplied, and a writable
-rename journal with flush support must be available.
+rename batch durable and requires supervisor review. A durable goal requires
+a writable journal with flush support. Use the single-file format
+(`CLVRNM01`) for bit 7 alone or the pair format (`CLVRNM02`) for bits 6 and 7.
+A supplied rename directory must be the root for either format.
 
 An omitted descriptor is `NO_RAMFS_HANDLE` (all ones). Zero is a valid
 descriptor. A read or rename directory must be open in the owner's handle
@@ -654,9 +655,10 @@ destination and the goal's rename scope. The batch must include a rename
 of every preserved file with the bytes captured at goal creation. A
 conflict takes precedence over a failed postcondition.
 
-The durable scope permits one root-level file. After the journal binds to a
-file at the first durable commit or boot recovery, subsequent durable goals
-can stage renames only of that file's identity.
+A durable batch must stage exactly the journal's file count, and each file
+must be at the root. The first durable commit or boot recovery binds the
+journal to the saved file identities. Review requires subsequent durable
+batches to include the full set of those files.
 
 An approved owner review returns a nonzero, single-use token in `a2` and an
 absolute guest deadline in nanoseconds in `a3`. With a zero token, `a3`
@@ -666,7 +668,7 @@ contains one of these verdicts.
 | --- | --- |
 | 0 | Preview. Also returned for an empty diff or a goal that allows owner review and has yet to complete successfully. |
 | 2 | Conflict. The base revision, original source or destination has changed. |
-| 3 | Postcondition failed. A source falls outside the rename scope, or a preserved file is missing from the batch or has different contents. |
+| 3 | Postcondition failed. A source falls outside the rename scope, the durable batch is incomplete, or a preserved file is missing from the batch or has different contents. |
 | 4 | Review unavailable. The kernel cannot prepare publication, represent the deadline or allocate a token. |
 | 5 | Supervisor review required. A passing delegated review issues or renews approval. |
 
@@ -693,14 +695,14 @@ before updating any names. A failed check preserves the public files and
 staged diff. Success updates all names in the same syscall, advances the
 revision once and clears the diff.
 
-For a durable goal, call 62 validates the approval and prepares the rename
-before writing the new basename and current file bytes to the alternate
-journal sector. It waits for the write and flush within one 500 ms guest
-deadline. After both complete, it publishes the prepared rename and
-returns 0. A storage failure returns 9, consumes the approval, keeps the
-original name public and leaves the diff staged. A write or flush error
-disables further journal writes for that boot.
-[Durable rename walkthrough](qemu-walkthroughs.md#persist-a-reviewed-rename)
+For a durable goal, call 62 validates the approval and prepares the batch
+before writing the new basenames and current file bytes to the alternate
+journal slot. All sector writes and the flush share a 500 ms guest deadline.
+After the flush completes, the call publishes the entire batch and returns 0.
+A storage failure returns 9, consumes the approval, keeps the original
+names public and leaves the diff staged. A write or flush error disables
+further journal writes for that boot.
+[Single-file walkthrough](qemu-walkthroughs.md#persist-a-reviewed-rename) · [Pair walkthrough](qemu-walkthroughs.md#persist-two-renames-in-one-commit)
 
 Public file and directory creation or removal, truncating opens, nonempty
 writes to linked files and publication advance the revision. A mutation

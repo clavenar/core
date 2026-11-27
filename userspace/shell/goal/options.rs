@@ -127,7 +127,6 @@ impl<'a> GoalOptions<'a> {
             || options
                 .rename_limit
                 .is_some_and(|n| !(1..=MAX_GOAL_RENAMES).contains(&n))
-            || (options.durable && options.rename_limit == Some(MAX_GOAL_RENAMES))
         {
             return None;
         }

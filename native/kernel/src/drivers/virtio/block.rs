@@ -4,7 +4,7 @@ use super::mmio::Device;
 use super::queue::{DEVICE_WRITES, Descriptor, NEXT, Ring, RingMemory};
 use crate::arch::monotonic_nanos;
 
-use journal::Journal;
+use journal::{Format, Journal};
 pub(crate) use journal::{JournalLoadError, JournalProbe, JournalRecord, JournalUpdate};
 
 const BLOCK_DEVICE: u32 = 2;
@@ -26,6 +26,7 @@ const BLANK_SECTOR: Sector = [0; SECTOR_BYTES];
 const DEMO_HEADER: Sector = padded_sector(b"CLVDEMO1");
 const DEMO_MARKER: Sector = padded_sector(b"CLVSAVE1");
 const DURABLE_HEADER: Sector = padded_sector(b"CLVRNM01");
+const DURABLE_PAIR_HEADER: Sector = padded_sector(b"CLVRNM02");
 
 const fn padded_sector(prefix: &[u8; 8]) -> Sector {
     let mut sector = BLANK_SECTOR;
@@ -81,7 +82,7 @@ pub(crate) struct Probe {
     pub(crate) sectors: u64,
     pub(crate) prefix: [u8; 8],
     pub(crate) scratch: Option<ScratchProbe>,
-    pub(crate) durable_disk: Option<Block>,
+    pub(crate) durable_disk: Option<JournalDevice>,
 }
 
 pub(crate) enum ScratchProbe {
@@ -112,13 +113,50 @@ pub(crate) enum ProbeError {
     Timeout,
 }
 
-pub(crate) struct Block {
+struct Block {
     device: Device,
     queue: Ring<4>,
     request: *mut RequestMemory,
     sectors: u64,
     features: u32,
     deadline: u64,
+}
+
+pub(crate) struct JournalDevice {
+    block: Block,
+    format: Format,
+}
+
+impl JournalDevice {
+    pub(crate) fn base(&self) -> usize {
+        self.block.device.base()
+    }
+
+    pub(crate) fn file_count(&self) -> usize {
+        self.format.file_count()
+    }
+
+    pub(crate) fn open_journal<T>(
+        mut self,
+        decode: impl Fn(&[u8]) -> Option<T>,
+    ) -> Result<(JournalDisk, Option<T>), JournalLoadError> {
+        self.block.deadline = io_deadline();
+        let (journal, recovered) = match Journal::load(&mut self.block, self.format, decode) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.block.device.reset(self.block.deadline);
+                return Err(error);
+            }
+        };
+        Ok((
+            JournalDisk {
+                block: self.block,
+                journal,
+                failed: false,
+            },
+            recovered,
+        ))
+    }
 }
 
 pub(crate) struct JournalDisk {
@@ -132,8 +170,12 @@ impl JournalDisk {
         !self.failed && self.block.write_restriction().is_none() && self.journal.can_append()
     }
 
+    pub(crate) fn supports_renames(&self, count: usize) -> bool {
+        count == self.journal.format.file_count() && self.is_writable()
+    }
+
     pub(crate) fn save(&mut self, payload: &[u8]) -> bool {
-        if !self.is_writable() || payload.len() > journal::MAX_PAYLOAD_BYTES {
+        if !self.is_writable() || payload.len() > self.journal.format.payload_capacity() {
             return false;
         }
         self.block.deadline = io_deadline();
@@ -180,8 +222,8 @@ pub(crate) unsafe fn probe() -> Option<Result<Probe, ProbeError>> {
     };
     let result = block.start().and_then(|()| block.inspect());
     Some(match result {
-        Ok((mut probe, true)) => {
-            probe.durable_disk = Some(block);
+        Ok((mut probe, Some(format))) => {
+            probe.durable_disk = Some(JournalDevice { block, format });
             Ok(probe)
         }
         result if block.device.reset(deadline) => result.map(|(probe, _)| probe),
@@ -207,7 +249,7 @@ impl Block {
         Ok(())
     }
 
-    fn inspect(&mut self) -> Result<(Probe, bool), ProbeError> {
+    fn inspect(&mut self) -> Result<(Probe, Option<Format>), ProbeError> {
         let first = self.read_sector(0)?;
         let scratch = match first {
             DEMO_HEADER => Some(ScratchProbe::Marker(self.persist_marker())),
@@ -221,33 +263,11 @@ impl Block {
                 scratch,
                 durable_disk: None,
             },
-            first == DURABLE_HEADER,
-        ))
-    }
-
-    pub(crate) fn base(&self) -> usize {
-        self.device.base()
-    }
-
-    pub(crate) fn open_journal<T>(
-        mut self,
-        decode: impl Fn(&[u8]) -> Option<T>,
-    ) -> Result<(JournalDisk, Option<T>), JournalLoadError> {
-        self.deadline = io_deadline();
-        let (journal, recovered) = match Journal::load(&mut self, decode) {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                self.device.reset(self.deadline);
-                return Err(error);
-            }
-        };
-        Ok((
-            JournalDisk {
-                block: self,
-                journal,
-                failed: false,
+            match first {
+                DURABLE_HEADER => Some(Format::Single),
+                DURABLE_PAIR_HEADER => Some(Format::Pair),
+                _ => None,
             },
-            recovered,
         ))
     }
 
@@ -272,7 +292,7 @@ impl Block {
             return Ok(DemoOutcome::Blocked(restriction));
         }
 
-        self.write_and_flush(DEMO_SECTOR, &DEMO_MARKER)?;
+        self.write_and_flush(DEMO_SECTOR, core::slice::from_ref(&DEMO_MARKER))?;
         Ok(DemoOutcome::Flushed)
     }
 
@@ -286,8 +306,10 @@ impl Block {
         }
     }
 
-    fn write_and_flush(&mut self, sector: u64, data: &Sector) -> Result<(), ProbeError> {
-        self.transfer(Request::Write(sector, data))?;
+    fn write_and_flush(&mut self, first_sector: u64, data: &[Sector]) -> Result<(), ProbeError> {
+        for (offset, bytes) in data.iter().enumerate() {
+            self.transfer(Request::Write(first_sector + offset as u64, bytes))?;
+        }
         self.transfer(Request::Flush)
     }
 

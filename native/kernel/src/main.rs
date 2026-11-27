@@ -18,7 +18,7 @@ use core::panic::PanicInfo;
 use drivers::uart;
 use drivers::virtio::block;
 use drivers::virtio::console::{Console, Port, ProbeError};
-use fs::ramfs::{RamFs, SavedFile};
+use fs::ramfs::{RamFs, SavedFiles};
 use memory::frame::FrameAllocator;
 use memory::sv39;
 use memory::user_image;
@@ -51,7 +51,7 @@ extern "C" fn kernel_main() -> ! {
         uart::BASE,
         [
             bridge.as_ref().map(Console::base),
-            durable_disk.as_ref().map(block::Block::base),
+            durable_disk.as_ref().map(block::JournalDevice::base),
         ]
         .into_iter()
         .flatten(),
@@ -92,12 +92,16 @@ fn probe_bridge(bridge: Console) -> Option<Port> {
     }
 }
 
-fn recover_durable_disk(disk: block::Block, fs: &mut RamFs) -> Option<block::JournalDisk> {
+fn recover_durable_disk(disk: block::JournalDevice, fs: &mut RamFs) -> Option<block::JournalDisk> {
     use block::JournalLoadError;
-    let (journal, saved) = match disk.open_journal(SavedFile::decode) {
+    let count = disk.file_count();
+    let (journal, saved) = match disk.open_journal(|payload| SavedFiles::decode(payload, count)) {
         Ok(recovered) => recovered,
         Err(error) => {
             uart::write(match error {
+                JournalLoadError::TooSmall if count == 2 => {
+                    b"durable rename journal needs five sectors\r\n"
+                }
                 JournalLoadError::TooSmall => b"durable rename journal needs three sectors\r\n",
                 JournalLoadError::InvalidSlots => b"durable rename journal invalid slots\r\n",
                 JournalLoadError::Io(error) => block_error_message(error),
@@ -105,8 +109,8 @@ fn recover_durable_disk(disk: block::Block, fs: &mut RamFs) -> Option<block::Jou
             return None;
         }
     };
-    if let Some(file) = saved {
-        fs.restore_durable_file(file);
+    if let Some(files) = saved {
+        fs.restore_durable_files(files);
         uart::write(b"durable rename recovered\r\n");
     }
     uart::write(if journal.is_writable() {
@@ -117,7 +121,7 @@ fn recover_durable_disk(disk: block::Block, fs: &mut RamFs) -> Option<block::Jou
     Some(journal)
 }
 
-fn probe_block() -> Option<block::Block> {
+fn probe_block() -> Option<block::JournalDevice> {
     // SAFETY: This is called once on the boot hart, before enabling paging.
     let result = unsafe { block::probe() }?;
     match result {

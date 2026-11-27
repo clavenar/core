@@ -394,7 +394,7 @@ pub struct CreatePolicy {
     /// Only the bound echo supervisor can approve publication of a rename.
     pub require_rename_review: bool,
     pub rename_limit: usize,
-    /// Flush one root-level rename to the journal before publishing it.
+    /// Flush the root-level batch to a journal that supports the requested rename count.
     pub durable: bool,
 }
 
@@ -417,7 +417,7 @@ impl CreatePolicy {
         }
         match self.rename_limit {
             1 => {}
-            MAX_GOAL_RENAMES if !self.durable => words[1] |= Self::ALLOW_TWO_RENAMES,
+            MAX_GOAL_RENAMES => words[1] |= Self::ALLOW_TWO_RENAMES,
             _ => return None,
         }
         if self.durable {
@@ -430,9 +430,6 @@ impl CreatePolicy {
         let require_rename_review = words[1] & Self::REQUIRE_RENAME_REVIEW != 0;
         let durable = words[1] & Self::DURABLE != 0;
         let rename_limit = if words[1] & Self::ALLOW_TWO_RENAMES != 0 {
-            if durable {
-                return None;
-            }
             MAX_GOAL_RENAMES
         } else {
             1

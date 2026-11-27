@@ -6,9 +6,9 @@ QEMU `virt` with OpenSBI. It runs isolated ELF programs, a shell and RamFS.
 The goal owner can grant a file, set a deadline and limit reads and replies.
 At goal creation the owner can require a separate supervisor to review a
 staged rename. The owner decides whether to publish it.
-A durable goal can save the resulting root-level file to a dedicated VirtIO
-block journal and restore it at boot.
-[Try a required supervisor review](docs/qemu-walkthroughs.md#require-a-supervisor-review-before-commit) · [Persist a reviewed rename](docs/qemu-walkthroughs.md#persist-a-reviewed-rename)
+A durable goal can save one or two root-level files to a dedicated VirtIO
+block journal and restore them at boot.
+[Try a required supervisor review](docs/qemu-walkthroughs.md#require-a-supervisor-review-before-commit) · [Persist a reviewed rename](docs/qemu-walkthroughs.md#persist-a-reviewed-rename) · [Persist a two-file batch](docs/qemu-walkthroughs.md#persist-two-renames-in-one-commit)
 
 ## Build and run the RV64 kernel
 

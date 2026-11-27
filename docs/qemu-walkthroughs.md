@@ -24,6 +24,7 @@ handles and ordinary RamFS changes live for one boot.
   - [Review a staged rename through echo](#review-a-staged-rename-through-echo)
   - [Require a supervisor review before commit](#require-a-supervisor-review-before-commit)
   - [Persist a reviewed rename](#persist-a-reviewed-rename)
+  - [Persist two renames in one commit](#persist-two-renames-in-one-commit)
   - [Trace a rename commit to its reviewer](#trace-a-rename-commit-to-its-reviewer)
   - [Publish two renames in one commit](#publish-two-renames-in-one-commit)
   - [Observe a reviewed publication](#observe-a-reviewed-publication)
@@ -2225,6 +2226,101 @@ failure, the next boot still recovers `/final.txt`. A flush failure can
 happen after the new bytes reach the disk. In that case, the running guest
 keeps the original name, and recovery selects whichever valid record has
 the highest generation.
+
+### Persist two renames in one commit
+
+From the Linux prompt in `core`, build the kernel and prepare a raw
+pair journal. Sector 0 holds `CLVRNM02` followed by zeros. The slots cover
+sectors 1–2 and 3–4. Each slot holds both files under one generation and
+one CRC-32.
+
+```sh
+pair_disk="$(mktemp -t clavenar-rename-pair.XXXXXX)"
+truncate -s 1M "$pair_disk"
+printf 'CLVRNM02' | dd of="$pair_disk" conv=notrunc status=none
+
+boot_pair() {
+  qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
+    -kernel target/riscv64gc-unknown-none-elf/release/clavenar-kernel \
+    -global virtio-mmio.force-legacy=off \
+    -drive "file=${2:-$pair_disk},format=raw,if=none,id=pair,cache=writeback,readonly=$1,rerror=report,werror=report" \
+    -device virtio-blk-device,drive=pair
+}
+
+boot_pair off
+```
+
+At `clsh>`, stage both root-level renames and review them together.
+
+```text
+write /draft-a.txt alpha
+write /draft-b.txt beta
+goal create --durable --rename-limit 2 --preserve-file /draft-a.txt --preserve-file /draft-b.txt
+goal grant-file --stage-rename /draft-a.txt
+goal grant-file --stage-rename /draft-b.txt
+agent run hello --stage-rename final-a.txt --stage-rename final-b.txt
+wait hello
+goal diff --via echo
+goal commit
+cat /final-a.txt
+cat /final-b.txt
+goal close
+```
+
+The review lists both renames. Commit writes both sectors and flushes
+before it publishes both names. Later durable commits must include the
+same two file identities.
+
+Quit QEMU with `Ctrl+a`, then `x`, and run `boot_pair on` in the same
+Linux terminal. Expect `durable rename recovered` before `clsh>`. Run
+`cat /final-a.txt` and `cat /final-b.txt` again to see `alpha` and `beta`.
+
+To fail the second sector write of the next commit, quit QEMU and run
+this block in the same Linux terminal. Sector 4 is the second sector of
+the slot that follows the first successful commit.
+[QEMU block I/O fault injection](https://www.qemu.org/docs/master/devel/testing/blkdebug.html)
+
+```sh
+pair_fault="$(mktemp -t clavenar-pair-fault.XXXXXX)"
+printf '%s\n' '[inject-error]' 'event = "write_aio"' 'sector = "4"' 'errno = "5"' > "$pair_fault"
+boot_pair off "blkdebug:$pair_fault:$pair_disk"
+```
+
+At `clsh>`, stage and review a new name for each file.
+
+```text
+goal create --durable --rename-limit 2 --preserve-file /final-a.txt --preserve-file /final-b.txt
+goal grant-file --stage-rename /final-a.txt
+goal grant-file --stage-rename /final-b.txt
+agent run hello --stage-rename next-a.txt --stage-rename next-b.txt
+wait hello
+goal diff --via echo
+goal commit
+ls /
+goal audit --publication
+```
+
+Expect `durable commit storage failed`, both `final-*.txt` names in the
+listing and two `storage-failed` audit rows. Quit and run `boot_pair on`
+again. Both `final-*.txt` files are recovered from the complete slot.
+A flush error can leave a complete newer slot on disk. Recovery selects
+the highest valid generation.
+
+Integers in the 1,024-byte slot are little-endian.
+
+| Offset | Field |
+| --- | --- |
+| 0 | 32-bit format version, 2 |
+| 4 | 32-bit payload length |
+| 8 | 64-bit nonzero generation |
+| 16 | Two file entries followed by zero padding |
+| 1012 | 64-bit copy of the generation |
+| 1020 | CRC-32 over bytes 0 through 1019 |
+
+Each file entry contains a 16-bit basename length, a 16-bit content
+length, the basename bytes (1–64 bytes) and the file bytes (0–256 bytes).
+The basenames must be distinct. Recovery validates the entire slot before
+loading either file.
 
 ### Revoke a rename grant after review
 

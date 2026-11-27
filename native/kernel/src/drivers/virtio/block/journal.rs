@@ -1,15 +1,62 @@
-use super::{
-    BLANK_SECTOR, Block, ProbeError, SECTOR_BYTES, Sector, WriteRestriction, padded_sector,
-};
+use super::{Block, ProbeError, SECTOR_BYTES, Sector, WriteRestriction, padded_sector};
 
 pub(super) const HEADER: Sector = padded_sector(b"CLVJNL01");
-const SLOT_SECTORS: [u64; 2] = [1, 2];
 const DEMO_PAYLOADS: [&[u8]; 2] = [b"CLVSLOT1", b"CLVSLOT2"];
 
-const VERSION: u32 = 1;
 const RECORD_HEADER_BYTES: usize = 16;
-const CHECKSUM_OFFSET: usize = SECTOR_BYTES - size_of::<u32>();
-pub(super) const MAX_PAYLOAD_BYTES: usize = CHECKSUM_OFFSET - RECORD_HEADER_BYTES;
+const MAX_SLOT_BYTES: usize = 2 * SECTOR_BYTES;
+type Slot = [u8; MAX_SLOT_BYTES];
+
+#[derive(Clone, Copy)]
+#[repr(u32)]
+pub(super) enum Format {
+    Single = 1,
+    Pair = 2,
+}
+
+impl Format {
+    // The single-file and pair formats use slots of one and two sectors.
+    pub(super) const fn file_count(self) -> usize {
+        match self {
+            Self::Single => 1,
+            Self::Pair => 2,
+        }
+    }
+
+    fn slot_bytes(self) -> usize {
+        self.file_count() * SECTOR_BYTES
+    }
+
+    fn slot_start(self, slot: usize) -> u64 {
+        1 + (slot * self.file_count()) as u64
+    }
+
+    fn checksum_offset(self) -> usize {
+        self.slot_bytes() - size_of::<u32>()
+    }
+
+    fn payload_end(self) -> usize {
+        match self {
+            Self::Single => self.checksum_offset(),
+            Self::Pair => self.checksum_offset() - size_of::<u64>(),
+        }
+    }
+
+    pub(super) fn payload_capacity(self) -> usize {
+        self.payload_end() - RECORD_HEADER_BYTES
+    }
+
+    fn read_slot(self, block: &mut Block, slot: usize) -> Result<Slot, JournalLoadError> {
+        let mut bytes = [0; MAX_SLOT_BYTES];
+        let (sectors, _) = bytes[..self.slot_bytes()].as_chunks_mut::<SECTOR_BYTES>();
+        for (offset, sector) in sectors.iter_mut().enumerate() {
+            *sector = block
+                .read_sector(self.slot_start(slot) + offset as u64)
+                .map_err(JournalLoadError::Io)?;
+        }
+        Ok(bytes)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Record<'a> {
@@ -18,14 +65,16 @@ struct Record<'a> {
 }
 
 impl<'a> Record<'a> {
-    fn decode(sector: &'a Sector) -> Option<Self> {
-        let (record, checksum) = sector.split_at(CHECKSUM_OFFSET);
+    fn decode(slot: &'a Slot, format: Format) -> Option<Self> {
+        let (record, checksum) = slot[..format.slot_bytes()].split_at(format.checksum_offset());
         let version = u32::from_le_bytes(record[..4].try_into().ok()?);
         let length = u32::from_le_bytes(record[4..8].try_into().ok()?) as usize;
         let generation = u64::from_le_bytes(record[8..16].try_into().ok()?);
-        let (payload, padding) = record[RECORD_HEADER_BYTES..].split_at_checked(length)?;
-        if version != VERSION
+        let (body, footer) = record.split_at(format.payload_end());
+        let (payload, padding) = body[RECORD_HEADER_BYTES..].split_at_checked(length)?;
+        if version != format as u32
             || generation == 0
+            || (matches!(format, Format::Pair) && footer != generation.to_le_bytes())
             || padding.iter().any(|&byte| byte != 0)
             || crc32(record) != u32::from_le_bytes(checksum.try_into().ok()?)
         {
@@ -37,18 +86,22 @@ impl<'a> Record<'a> {
         })
     }
 
-    fn encode(self) -> Option<Sector> {
-        if self.generation == 0 || self.payload.len() > MAX_PAYLOAD_BYTES {
+    fn encode(self, format: Format) -> Option<Slot> {
+        if self.generation == 0 || self.payload.len() > format.payload_capacity() {
             return None;
         }
-        let mut sector = BLANK_SECTOR;
-        let (record, checksum) = sector.split_at_mut(CHECKSUM_OFFSET);
-        record[..4].copy_from_slice(&VERSION.to_le_bytes());
+        let mut slot = [0; MAX_SLOT_BYTES];
+        let (record, checksum) = slot[..format.slot_bytes()].split_at_mut(format.checksum_offset());
+        record[..4].copy_from_slice(&(format as u32).to_le_bytes());
         record[4..8].copy_from_slice(&(self.payload.len() as u32).to_le_bytes());
         record[8..16].copy_from_slice(&self.generation.to_le_bytes());
         record[RECORD_HEADER_BYTES..][..self.payload.len()].copy_from_slice(self.payload);
+        if matches!(format, Format::Pair) {
+            // Reject two sectors from different generations before checking the slot CRC.
+            record[format.payload_end()..].copy_from_slice(&self.generation.to_le_bytes());
+        }
         checksum.copy_from_slice(&crc32(record).to_le_bytes());
-        Some(sector)
+        Some(slot)
     }
 
     fn report(self, sector: u64) -> JournalRecord {
@@ -104,27 +157,22 @@ pub(crate) enum JournalLoadError {
 }
 
 pub(super) struct Journal {
+    pub(super) format: Format,
     latest: Option<JournalRecord>,
 }
 
 impl Journal {
     pub(super) fn load<T>(
         block: &mut Block,
+        format: Format,
         decode: impl Fn(&[u8]) -> Option<T>,
     ) -> Result<(Self, Option<T>), JournalLoadError> {
-        if block.sectors <= SLOT_SECTORS[1] {
+        if block.sectors < 1 + 2 * format.file_count() as u64 {
             return Err(JournalLoadError::TooSmall);
         }
-        let slots = [
-            block
-                .read_sector(SLOT_SECTORS[0])
-                .map_err(JournalLoadError::Io)?,
-            block
-                .read_sector(SLOT_SECTORS[1])
-                .map_err(JournalLoadError::Io)?,
-        ];
-        let records = slots.each_ref().map(|sector| {
-            let record = Record::decode(sector)?;
+        let slots = [format.read_slot(block, 0)?, format.read_slot(block, 1)?];
+        let records = slots.each_ref().map(|slot| {
+            let record = Record::decode(slot, format)?;
             Some((record, decode(record.payload)?))
         });
         if matches!(&records, [Some((first, _)), Some((second, _))]
@@ -140,12 +188,19 @@ impl Journal {
         if let Some((slot, record, value)) = latest {
             Ok((
                 Self {
-                    latest: Some(record.report(SLOT_SECTORS[slot])),
+                    format,
+                    latest: Some(record.report(format.slot_start(slot))),
                 },
                 Some(value),
             ))
-        } else if slots == [BLANK_SECTOR; 2] {
-            Ok((Self { latest: None }, None))
+        } else if slots == [[0; MAX_SLOT_BYTES]; 2] {
+            Ok((
+                Self {
+                    format,
+                    latest: None,
+                },
+                None,
+            ))
         } else {
             Err(JournalLoadError::InvalidSlots)
         }
@@ -160,7 +215,7 @@ impl Journal {
         // Keep the latest record intact while writing its replacement.
         usize::from(
             self.latest
-                .is_some_and(|record| record.sector == SLOT_SECTORS[0]),
+                .is_some_and(|record| record.sector == self.format.slot_start(0)),
         )
     }
 
@@ -177,10 +232,11 @@ impl Journal {
             payload,
         };
         let bytes = record
-            .encode()
+            .encode(self.format)
             .expect("the journal caller bounds the payload");
-        let sector = SLOT_SECTORS[self.next_slot()];
-        if let Err(error) = block.write_and_flush(sector, &bytes) {
+        let sector = self.format.slot_start(self.next_slot());
+        let (sectors, _) = bytes[..self.format.slot_bytes()].as_chunks::<SECTOR_BYTES>();
+        if let Err(error) = block.write_and_flush(sector, sectors) {
             return JournalUpdate::Failed(error);
         }
         let record = record.report(sector);
@@ -190,7 +246,7 @@ impl Journal {
 }
 
 pub(super) fn run(block: &mut Block) -> Result<JournalProbe, JournalLoadError> {
-    let (mut journal, _) = Journal::load(block, |_| Some(()))?;
+    let (mut journal, _) = Journal::load(block, Format::Single, |_| Some(()))?;
     let recovered = journal.latest;
     let payload = DEMO_PAYLOADS[journal.next_slot()];
     let update = journal.append(block, payload);

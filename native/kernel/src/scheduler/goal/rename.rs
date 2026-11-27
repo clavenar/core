@@ -361,10 +361,10 @@ impl Scheduler {
         let result = if review_is_live(approval.review, monotonic_nanos()) {
             match pending.changes.prepare(fs, &goal.rename_policy) {
                 Ok(prepared) => {
-                    let saved = prepared.durable_file(fs).is_none_or(|file| {
+                    let saved = prepared.durable_files(fs).is_none_or(|files| {
                         self.durable_disk
                             .as_mut()
-                            .is_some_and(|disk| disk.save(file.payload()))
+                            .is_some_and(|disk| disk.save(files.payload()))
                     });
                     if saved {
                         prepared.publish(fs);
