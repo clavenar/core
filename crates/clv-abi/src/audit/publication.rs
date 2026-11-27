@@ -6,6 +6,28 @@ use crate::goal::{CommitResult, RENAME_DIFF_MAX_BYTES};
 /// Decision, base and observed revisions, source and basename lengths, then the frozen diff.
 pub type EncodedPublicationRecord = [[u8; 8]; 5 + RENAME_DIFF_MAX_BYTES.div_ceil(8)];
 
+/// Call 91 selects a publication history in a4.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub enum PublicationAuditView {
+    Decisions = 0,
+    WithExpiry = 1,
+    Explicit = 2,
+    WithCancellation = 3,
+}
+
+impl PublicationAuditView {
+    pub const fn from_register(value: usize) -> Option<Self> {
+        Some(match value {
+            0 => Self::Decisions,
+            1 => Self::WithExpiry,
+            2 => Self::Explicit,
+            3 => Self::WithCancellation,
+            _ => return None,
+        })
+    }
+}
+
 /// The reviewer whose approval was consumed by a publication attempt.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PublicationReviewer {

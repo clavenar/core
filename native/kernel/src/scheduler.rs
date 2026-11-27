@@ -4,7 +4,7 @@ mod pipe;
 
 use self::definition::AgentBinding;
 use self::goal::Goal;
-pub(crate) use self::goal::{DelegationAudit, DelegationTarget, PublicationAudit, ReadAudit};
+pub(crate) use self::goal::{DelegationAudit, DelegationTarget, ReadAudit};
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
 use clv_abi::goal::GoalObservation;

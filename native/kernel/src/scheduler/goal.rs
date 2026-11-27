@@ -4,7 +4,6 @@ mod delegation;
 mod reads;
 mod rename;
 
-pub(crate) use self::audit::PublicationAudit;
 use self::audit::{AuditHistory, PublicationHistory};
 use self::budget::ReplyReservation;
 use self::reads::GoalReads;

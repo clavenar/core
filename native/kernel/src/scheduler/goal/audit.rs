@@ -1,5 +1,6 @@
 use clv_abi::audit::{
-    AUDIT_CAPACITY, EncodedPublicationRecord, PublicationOutcome, PublicationReviewer,
+    AUDIT_CAPACITY, EncodedPublicationRecord, PublicationAuditView, PublicationOutcome,
+    PublicationReviewer,
 };
 use clv_abi::goal::MAX_GOAL_RENAMES;
 
@@ -59,18 +60,11 @@ type PublicationEntry = [[u8; 8]; size_of::<EncodedPublicationRecord>() / 8 + 1]
 #[derive(Default)]
 pub(super) struct PublicationHistory {
     explicit: AuditHistory<PublicationEntry>,
-    // A revocation can precede later owner decisions. Older readers retain their own four rows.
+    // Revocations and explicit decisions can interleave. Each view keeps its own last four rows.
     with_revocations: AuditHistory<PublicationEntry>,
     // Cancellation or expiry can remove the final batch only once.
     terminal: AuditHistory<PublicationEntry, MAX_GOAL_RENAMES>,
     terminal_outcome: Option<PublicationOutcome>,
-}
-
-pub(crate) enum PublicationAudit {
-    Explicit,
-    WithCancellation,
-    Decisions,
-    WithExpiry,
 }
 
 impl PublicationHistory {
@@ -105,7 +99,7 @@ impl PublicationHistory {
     fn read_row(
         &self,
         index: usize,
-        view: PublicationAudit,
+        view: PublicationAuditView,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize, usize)> {
         let terminal = &self.terminal.entries[..self.terminal.len];
@@ -115,10 +109,10 @@ impl PublicationHistory {
             &[]
         };
         let (history, tail) = match view {
-            PublicationAudit::Explicit => (&self.explicit, &[][..]),
-            PublicationAudit::WithCancellation => (&self.explicit, cancellation),
-            PublicationAudit::Decisions => (&self.with_revocations, cancellation),
-            PublicationAudit::WithExpiry => (&self.with_revocations, terminal),
+            PublicationAuditView::Explicit => (&self.explicit, &[][..]),
+            PublicationAuditView::WithCancellation => (&self.explicit, cancellation),
+            PublicationAuditView::Decisions => (&self.with_revocations, cancellation),
+            PublicationAuditView::WithExpiry => (&self.with_revocations, terminal),
         };
         let total = history.len + tail.len();
         let skipped = total.saturating_sub(AUDIT_CAPACITY);
@@ -175,7 +169,7 @@ impl Scheduler {
         &self,
         handle: usize,
         index: usize,
-        view: PublicationAudit,
+        view: PublicationAuditView,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize, usize)> {
         self.shell_goal(handle)?

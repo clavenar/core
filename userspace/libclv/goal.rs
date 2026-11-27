@@ -1,7 +1,8 @@
 use clv_abi::audit::{
     AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, EncodedPublicationRecord,
     EncodedReadDecision, EncodedReadRecordWithLimit, EncodedRecordWithTool, EncodedRenameRecord,
-    EncodedReplyRecord, PublicationReviewer, ReadRecord, ReadRecordWithLimit, ReplyRecord,
+    EncodedReplyRecord, PublicationAuditView, PublicationReviewer, ReadRecord, ReadRecordWithLimit,
+    ReplyRecord,
 };
 pub use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::decode_rename_batch;
@@ -21,9 +22,7 @@ use clv_abi::{
     SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
     SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
     SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER,
-    SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
-    SYS_GOAL_PUBLICATION_DECISIONS, SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
-    SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
     SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
     SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_BATCH_GRANTED,
     SYS_GOAL_REVIEW_GRANTED, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
@@ -466,7 +465,7 @@ pub fn publication_audit_row(
     index: usize,
     record: &mut EncodedPublicationRecord,
 ) -> Option<(usize, usize)> {
-    read_publication_row(SYS_GOAL_PUBLICATION_AUDIT, goal, index, record)
+    read_publication_counts(goal, index, PublicationAuditView::Explicit, record)
 }
 
 /// Includes a rename discarded by cancellation among the last four publication decisions.
@@ -475,12 +474,7 @@ pub fn publication_audit_row_with_cancellation(
     index: usize,
     record: &mut EncodedPublicationRecord,
 ) -> Option<(usize, usize)> {
-    read_publication_row(
-        SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
-        goal,
-        index,
-        record,
-    )
+    read_publication_counts(goal, index, PublicationAuditView::WithCancellation, record)
 }
 
 /// Reads a publication decision, including a rename discarded by file grant revocation.
@@ -489,7 +483,7 @@ pub fn publication_decision_row(
     index: usize,
     record: &mut EncodedPublicationRecord,
 ) -> Option<(usize, usize)> {
-    read_publication_row(SYS_GOAL_PUBLICATION_DECISIONS, goal, index, record)
+    read_publication_counts(goal, index, PublicationAuditView::Decisions, record)
 }
 
 /// Includes the terminal discard of a rename when a timed goal expires.
@@ -498,12 +492,7 @@ pub fn publication_decision_row_with_expiry(
     index: usize,
     record: &mut EncodedPublicationRecord,
 ) -> Option<(usize, usize)> {
-    read_publication_row(
-        SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
-        goal,
-        index,
-        record,
-    )
+    read_publication_counts(goal, index, PublicationAuditView::WithExpiry, record)
 }
 
 /// Reads an indexed publication decision and the reviewer whose approval it used.
@@ -513,13 +502,37 @@ pub fn publication_decision_row_with_reviewer(
     include_expiry: bool,
     record: &mut EncodedPublicationRecord,
 ) -> Option<(usize, usize, Option<PublicationReviewer>)> {
+    let view = if include_expiry {
+        PublicationAuditView::WithExpiry
+    } else {
+        PublicationAuditView::Decisions
+    };
+    read_publication_row(goal, index, view, record)
+}
+
+fn read_publication_counts(
+    goal: usize,
+    index: usize,
+    view: PublicationAuditView,
+    record: &mut EncodedPublicationRecord,
+) -> Option<(usize, usize)> {
+    let (count, overwritten, _) = read_publication_row(goal, index, view, record)?;
+    Some((count, overwritten))
+}
+
+fn read_publication_row(
+    goal: usize,
+    index: usize,
+    view: PublicationAuditView,
+    record: &mut EncodedPublicationRecord,
+) -> Option<(usize, usize, Option<PublicationReviewer>)> {
     let (count, overwritten, reviewer, audited_goal) = ecall(
         SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER,
         goal,
         record.as_mut_ptr().expose_provenance(),
         size_of_val(record),
         index,
-        usize::from(include_expiry),
+        view as usize,
     );
     (count <= AUDIT_CAPACITY && audited_goal == goal).then(|| {
         (
@@ -528,23 +541,6 @@ pub fn publication_decision_row_with_reviewer(
             PublicationReviewer::from_register(reviewer),
         )
     })
-}
-
-fn read_publication_row(
-    number: usize,
-    goal: usize,
-    index: usize,
-    record: &mut EncodedPublicationRecord,
-) -> Option<(usize, usize)> {
-    let (count, overwritten, _, _) = ecall(
-        number,
-        goal,
-        record.as_mut_ptr().expose_provenance(),
-        size_of_val(record),
-        index,
-        0,
-    );
-    (count <= AUDIT_CAPACITY).then_some((count, overwritten))
 }
 
 /// Returns the retained RamFS read decisions and the total bytes delivered over the goal's lifetime.

@@ -1,6 +1,7 @@
 #![no_std]
 
 //! Syscall numbers and register values for the Clavenar boot user ABI.
+//! Numbers 76, 80, 81 and 83 are reserved after publication audit moved to call 91.
 
 pub mod agent;
 pub mod audit;
@@ -86,14 +87,10 @@ pub const SYS_AGENT_STAGE_RENAME: usize = 72;
 pub const SYS_GOAL_RENAME_AUDIT: usize = 73;
 pub const SYS_GOAL_DISCARD: usize = 74;
 pub const SYS_GOAL_REVIEW_WITH_DEADLINE: usize = 75;
-pub const SYS_GOAL_PUBLICATION_AUDIT: usize = 76;
 pub const SYS_GOAL_CREATE_WITH_RENAME_SCOPE: usize = 77;
 pub const SYS_GOAL_CREATE_WITH_READ_SCOPE: usize = 78;
 pub const SYS_GOAL_READ_DECISIONS: usize = 79;
-pub const SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION: usize = 80;
-pub const SYS_GOAL_PUBLICATION_DECISIONS: usize = 81;
 pub const SYS_GOAL_CREATE_WITH_TIMEOUT: usize = 82;
-pub const SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY: usize = 83;
 pub const SYS_GOAL_LAUNCH_OBSERVER: usize = 84;
 pub const SYS_GOAL_OBSERVE: usize = 85;
 pub const SYS_AGENT_LAUNCH_SUPERVISOR: usize = 86;

@@ -2,7 +2,7 @@ use clv_abi::agent::{
     AgentLaunch, NO_DEFINITION, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
     RUN_STAGE_RENAME, RUN_SUSPENDED,
 };
-use clv_abi::audit::DelegationDenial;
+use clv_abi::audit::{DelegationDenial, PublicationAuditView};
 use clv_abi::goal::{
     CreateOptions, CreatePolicy, FileOptions, FileRecipient, RENAME_DIFF_HEADER_BYTES, ReadLimits,
     RenameOptions, ReviewToken,
@@ -24,9 +24,7 @@ use clv_abi::{
     SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
     SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
     SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER,
-    SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
-    SYS_GOAL_PUBLICATION_DECISIONS, SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
-    SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
     SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
     SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_BATCH_GRANTED,
     SYS_GOAL_REVIEW_GRANTED, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
@@ -50,8 +48,8 @@ use crate::ipc::pipe::PipeResult;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::usercopy::UserStack;
 use crate::scheduler::{
-    DelegationAudit, DelegationTarget, LaunchScope, Mailbox, PublicationAudit, ReadAudit,
-    ReceiveResult, Scheduler, WaitResult,
+    DelegationAudit, DelegationTarget, LaunchScope, Mailbox, ReadAudit, ReceiveResult, Scheduler,
+    WaitResult,
 };
 
 const CONSOLE_WRITE_LIMIT: usize = 128;
@@ -309,38 +307,19 @@ pub(crate) fn dispatch(
             frame,
             scheduler.goal_rename_audit(a0, |bytes| stack.copy_to_user(bytes, a1, a2)),
         ),
-        SYS_GOAL_PUBLICATION_AUDIT
-        | SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION
-        | SYS_GOAL_PUBLICATION_DECISIONS
-        | SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY
-        | SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER => {
-            let view = match (number, frame.registers[REG_A4]) {
-                (SYS_GOAL_PUBLICATION_AUDIT, _) => Some(PublicationAudit::Explicit),
-                (SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION, _) => {
-                    Some(PublicationAudit::WithCancellation)
-                }
-                (SYS_GOAL_PUBLICATION_DECISIONS, _)
-                | (SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, 0) => {
-                    Some(PublicationAudit::Decisions)
-                }
-                (SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY, _)
-                | (SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, 1) => {
-                    Some(PublicationAudit::WithExpiry)
-                }
-                _ => None,
-            };
-            view.and_then(|view| {
-                scheduler
-                    .goal_publication_audit(a0, a3, view, |bytes| stack.copy_to_user(bytes, a1, a2))
-            })
-            .map_or(SYSCALL_ERROR, |(count, overwritten, reviewer)| {
-                frame.registers[REG_A1] = overwritten;
-                if number == SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER {
+        SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER => {
+            PublicationAuditView::from_register(frame.registers[REG_A4])
+                .and_then(|view| {
+                    scheduler.goal_publication_audit(a0, a3, view, |bytes| {
+                        stack.copy_to_user(bytes, a1, a2)
+                    })
+                })
+                .map_or(SYSCALL_ERROR, |(count, overwritten, reviewer)| {
+                    frame.registers[REG_A1] = overwritten;
                     frame.registers[REG_A2] = reviewer;
                     frame.registers[REG_A3] = a0;
-                }
-                count
-            })
+                    count
+                })
         }
         SYS_GOAL_READ_AUDIT | SYS_GOAL_READ_AUDIT_WITH_LIMIT | SYS_GOAL_READ_DECISIONS => {
             let view = match number {
