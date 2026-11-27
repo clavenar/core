@@ -1,6 +1,6 @@
 use super::{mmio::Device, order_device_accesses};
 
-pub(super) const BUFFER_BYTES: usize = 32;
+pub(super) const BUFFER_BYTES: usize = clv_abi::bridge::MAX_WIRE_BYTES;
 pub(super) const NEXT: u16 = 1;
 pub(super) const DEVICE_WRITES: u16 = 2;
 const NO_INTERRUPT: u16 = 1;

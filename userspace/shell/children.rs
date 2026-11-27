@@ -276,10 +276,12 @@ impl Children {
         Some(launch)
     }
 
-    pub(super) fn resume_checkpoint(&mut self) -> Option<(usize, agent::AgentLaunch)> {
+    pub(super) fn resume_checkpoint(
+        &mut self,
+    ) -> Result<(usize, agent::AgentLaunch), agent::CheckpointResumeError> {
         let (goal, launch) = agent::resume_checkpoint()?;
         self.handles[Program::Hello as usize] = launch.child;
-        Some((goal, launch))
+        Ok((goal, launch))
     }
 
     pub(super) fn delegate(&mut self, agent: Option<usize>, arguments: &[u8]) {
@@ -495,11 +497,15 @@ fn agent_run_args(
         })
     };
     if options.checkpoint {
-        if !matches!(request, Some(agent::RunRequest::Definition(id)) if id == agent::FIND_GREETING_V2)
+        let Some(agent::RunRequest::Definition(id)) = request else {
+            return None;
+        };
+        if !matches!(id, agent::FIND_GREETING_V2 | agent::FIND_GREETING_V7)
+            || (id == agent::FIND_GREETING_V7 && options.suspended)
         {
             return None;
         }
-        request = Some(agent::RunRequest::Checkpoint);
+        request = Some(agent::RunRequest::Checkpoint(id));
     }
     Some((options, program, request))
 }
@@ -587,7 +593,7 @@ fn print_reply(handle: usize) {
     }
 }
 
-fn display_reply(handle: usize, kind: ReplyKind, bytes: &[u8]) {
+pub(super) fn display_reply(handle: usize, kind: ReplyKind, bytes: &[u8]) {
     match kind {
         ReplyKind::FileData if bytes.is_empty() => print(b"empty file\r\n"),
         ReplyKind::Matches if bytes.is_empty() => {}

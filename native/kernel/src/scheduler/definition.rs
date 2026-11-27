@@ -8,6 +8,8 @@ use crate::ipc::{Message, MessageKind};
 
 pub(super) const FIND_GREETING_V2_PIN: &EncodedDefinitionPin =
     include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v2.pin"));
+pub(super) const FIND_GREETING_V7_PIN: &EncodedDefinitionPin =
+    include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v7.pin"));
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct AgentBinding {
@@ -49,10 +51,7 @@ impl AgentBinding {
                     env!("OUT_DIR"),
                     "/find-greeting-v6.pin"
                 ))),
-                Some(FIND_GREETING_V7) => Some(include_bytes!(concat!(
-                    env!("OUT_DIR"),
-                    "/find-greeting-v7.pin"
-                ))),
+                Some(FIND_GREETING_V7) => Some(FIND_GREETING_V7_PIN),
                 Some(FIND_GREETING_V8) => Some(include_bytes!(concat!(
                     env!("OUT_DIR"),
                     "/find-greeting-v8.pin"

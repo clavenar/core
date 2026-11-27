@@ -1,6 +1,10 @@
+mod host;
+
 use clv_abi::agent::{
-    AgentLaunch, CheckpointReply, DefinitionPin, EncodedDefinitionPin, FIND_GREETING_V2,
+    AgentLaunch, CheckpointReply, CheckpointResumeError, DefinitionPin, EncodedDefinitionPin,
+    FIND_GREETING_V2,
 };
+use clv_abi::bridge::{CheckpointId, SearchReceipt};
 use clv_abi::goal::{
     CreateOptions, CreatePolicy, GoalDeadline, GoalStatus, ReadLimits, RenameOptions,
 };
@@ -15,8 +19,10 @@ use crate::drivers::virtio::block::{
 };
 use crate::fs::ramfs::{HELLO_FILE_CONTENTS, RamFs, RenamePolicy, TaskFs};
 use crate::ipc::{Message, MessageKind};
-use crate::scheduler::definition::{AgentBinding, FIND_GREETING_V2_PIN};
+use crate::scheduler::definition::{AgentBinding, FIND_GREETING_V2_PIN, FIND_GREETING_V7_PIN};
 use crate::scheduler::{LaunchPipes, SHELL_TASK_INDEX, Scheduler, TaskState, task_index};
+
+use self::host::{HOST_COMPLETED, HOST_PENDING, HostCheckpoint};
 
 const PAUSED: u8 = 1;
 const CONSUMED: u8 = 2;
@@ -132,33 +138,27 @@ impl GreetingCheckpoint {
     fn definition_is_current(&self) -> bool {
         &self.definition == FIND_GREETING_V2_PIN
     }
-
-    fn message(&self, slot: usize) -> Option<Message> {
-        if !self.definition_is_current() {
-            return None;
-        }
-        Message::new(
-            slot + 1,
-            MessageKind::Reply(ReplyKind::Matches),
-            self.reply.len(),
-            |bytes| {
-                bytes.copy_from_slice(&self.reply);
-                true
-            },
-        )
-    }
 }
 
 enum CheckpointRecord {
     Paused(GreetingCheckpoint),
     Completed(GreetingCheckpoint),
+    Host(HostCheckpoint, Option<SearchReceipt>),
     Cancelled,
     // Older kernels used this marker for either completion or cancellation.
     Consumed,
 }
 
 impl CheckpointRecord {
-    fn decode(payload: &[u8]) -> Option<Self> {
+    fn decode(payload: &[u8], operation: Option<CheckpointId>) -> Option<Self> {
+        if let Some(operation) = operation {
+            return match payload {
+                [HOST_PENDING | HOST_COMPLETED, ..] => HostCheckpoint::decode(payload, operation)
+                    .map(|(pending, receipt)| Self::Host(pending, receipt)),
+                [CANCELLED] => Some(Self::Cancelled),
+                _ => None,
+            };
+        }
         match payload {
             [PAUSED, bytes @ ..] => {
                 let checkpoint = GreetingCheckpoint::decode(bytes)?;
@@ -176,10 +176,64 @@ impl CheckpointRecord {
             _ => None,
         }
     }
+
+    fn reply(&self) -> Option<CheckpointReply<'_>> {
+        match self {
+            Self::Completed(saved) if saved.definition_is_current() => Some(CheckpointReply {
+                kind: ReplyKind::Matches,
+                bytes: &saved.reply,
+                read_spent: saved.read_spent,
+                reply_spent: saved.reply_spent,
+                host_calls: None,
+            }),
+            Self::Host(saved, Some(receipt)) if saved.definition_is_current() => {
+                let (kind, bytes) = receipt.reply();
+                Some(CheckpointReply {
+                    kind,
+                    bytes,
+                    read_spent: 0,
+                    reply_spent: bytes.len(),
+                    host_calls: Some(receipt.used_calls()),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn message(&self, slot: usize) -> Option<(Message, TaskCompletion)> {
+        let reply = self.reply()?;
+        let status = match reply.kind {
+            ReplyKind::Matches => usize::from(reply.bytes.is_empty()),
+            _ => 2,
+        };
+        let message = Message::new(
+            slot + 1,
+            MessageKind::Reply(reply.kind),
+            reply.bytes.len(),
+            |bytes| {
+                bytes.copy_from_slice(reply.bytes);
+                true
+            },
+        )?;
+        Some((message, TaskCompletion::Exited(status)))
+    }
+}
+
+struct RecoveredGoal {
+    definition: &'static EncodedDefinitionPin,
+    read_limit: usize,
+    reply_limit: usize,
+    reply_reserved: usize,
+}
+
+pub(in crate::scheduler) enum CheckpointLaunch {
+    Local,
+    Host(HostCheckpoint),
 }
 
 pub(in crate::scheduler) struct CheckpointJournal {
     disk: JournalDisk,
+    operation: Option<CheckpointId>,
     record: Option<CheckpointRecord>,
 }
 
@@ -191,11 +245,22 @@ impl CheckpointJournal {
         }
     }
 
+    fn host_pending(&self) -> Option<HostCheckpoint> {
+        match self.record {
+            Some(CheckpointRecord::Host(pending, None)) => Some(pending),
+            _ => None,
+        }
+    }
+
     fn save(&mut self, record: CheckpointRecord) -> Option<()> {
         let result = match &record {
             CheckpointRecord::Paused(checkpoint) => self.disk.save(&checkpoint.encode(PAUSED)),
             CheckpointRecord::Completed(checkpoint) => {
                 self.disk.save(&checkpoint.encode(COMPLETED))
+            }
+            CheckpointRecord::Host(pending, receipt) => {
+                let (bytes, length) = pending.encode(receipt.as_ref());
+                self.disk.save(&bytes[..length])
             }
             CheckpointRecord::Cancelled => self.disk.save(&[CANCELLED]),
             CheckpointRecord::Consumed => unreachable!("legacy checkpoint marker is read-only"),
@@ -223,7 +288,10 @@ impl CheckpointJournal {
 
 impl Scheduler {
     pub(crate) fn attach_checkpoint_disk(&mut self, disk: JournalDevice) {
-        let (disk, record) = match disk.open_journal(CheckpointRecord::decode) {
+        let operation = disk.checkpoint_operation();
+        let (disk, record) = match disk
+            .open_journal(|payload| CheckpointRecord::decode(payload, operation))
+        {
             Ok(recovered) => recovered,
             Err(error) => {
                 uart::write(match error {
@@ -238,7 +306,10 @@ impl Scheduler {
         };
         if let Some(entry) = disk.latest_record() {
             // A paused record occupies the first slot and a terminal record occupies the second.
-            let expected = if matches!(record, Some(CheckpointRecord::Paused(_))) {
+            let expected = if matches!(
+                record,
+                Some(CheckpointRecord::Paused(_) | CheckpointRecord::Host(_, None))
+            ) {
                 1
             } else {
                 2
@@ -257,13 +328,26 @@ impl Scheduler {
             Some(CheckpointRecord::Completed(checkpoint)) if checkpoint.definition_is_current() => {
                 b"agent checkpoint completed\r\n"
             }
-            Some(CheckpointRecord::Paused(_) | CheckpointRecord::Completed(_)) => {
-                b"agent checkpoint definition mismatch\r\n"
+            Some(CheckpointRecord::Host(pending, receipt)) if pending.definition_is_current() => {
+                if receipt.is_some() {
+                    b"agent host checkpoint completed\r\n"
+                } else {
+                    b"agent host checkpoint recovered (pending)\r\n"
+                }
             }
+            Some(
+                CheckpointRecord::Paused(_)
+                | CheckpointRecord::Completed(_)
+                | CheckpointRecord::Host(..),
+            ) => b"agent checkpoint definition mismatch\r\n",
             None if disk.is_writable() => b"agent checkpoint journal ready\r\n",
             None => b"agent checkpoint journal writes unavailable\r\n",
         });
-        self.checkpoint_disk = Some(CheckpointJournal { disk, record });
+        self.checkpoint_disk = Some(CheckpointJournal {
+            disk,
+            operation,
+            record,
+        });
     }
 
     pub(in crate::scheduler) fn check_checkpoint_launch(
@@ -271,17 +355,28 @@ impl Scheduler {
         handle: usize,
         binding: AgentBinding,
         reply_bytes: Option<usize>,
-    ) -> Option<()> {
+        suspended: bool,
+    ) -> Option<CheckpointLaunch> {
         let journal = self.checkpoint_disk.as_ref()?;
         let goal = self.shell_goal(handle)?;
+        if journal.record.is_some()
+            || !journal.disk.is_writable()
+            || goal.status() != GoalStatus::Ready
+            || goal.deadline != GoalDeadline::Unlimited
+        {
+            return None;
+        }
+        if let Some(operation) = journal.operation {
+            if suspended || self.host_bridge.is_none() {
+                return None;
+            }
+            return HostCheckpoint::prepare(operation, goal, binding, reply_bytes)
+                .map(CheckpointLaunch::Host);
+        }
         let (read_limit, _) = goal.reads.checkpoint_counts()?;
         let reply_limit = goal.options.reply_limit?;
         let input = goal.file_grants[0].as_ref()?;
-        if journal.record.is_some()
-            || !journal.disk.is_writable()
-            || binding.definition != Some(FIND_GREETING_V2_PIN)
-            || goal.status() != GoalStatus::Ready
-            || goal.deadline != GoalDeadline::Unlimited
+        if binding.definition != Some(FIND_GREETING_V2_PIN)
             || goal.options.child_limit != 2
             || read_limit < REPLY_BYTES
             || reply_bytes.unwrap_or(reply_limit) < PLAN_REPLY_BUDGET
@@ -291,7 +386,7 @@ impl Scheduler {
         }
         goal.helper_program(Program::Grep as usize, Some(TEXT_SEARCH_V1.id))
             .ok()?;
-        Some(())
+        Some(CheckpointLaunch::Local)
     }
 
     pub(in crate::scheduler) fn arm_checkpoint(&mut self, child: usize) {
@@ -358,16 +453,16 @@ impl Scheduler {
         self.goal
             .as_ref()
             .is_some_and(|goal| goal.checkpoint_child == Some(child))
-            && self
-                .checkpoint_disk
-                .as_ref()
-                .and_then(CheckpointJournal::paused)
-                .is_some()
+            && self.checkpoint_disk.as_ref().is_some_and(|journal| {
+                journal.paused().is_some() || journal.host_pending().is_some()
+            })
     }
 
     pub(super) fn cancel_checkpoint(&mut self) -> Option<()> {
         let journal = self.checkpoint_disk.as_mut()?;
-        journal.paused()?;
+        if journal.paused().is_none() && journal.host_pending().is_none() {
+            return None;
+        }
         journal.save(CheckpointRecord::Cancelled)
     }
 
@@ -375,66 +470,114 @@ impl Scheduler {
         if self.current != SHELL_TASK_INDEX {
             return None;
         }
-        let Some(CheckpointRecord::Completed(checkpoint)) = &self.checkpoint_disk.as_ref()?.record
-        else {
-            return None;
-        };
-        checkpoint
-            .definition_is_current()
-            .then_some(CheckpointReply {
-                bytes: &checkpoint.reply,
-                read_spent: checkpoint.read_spent,
-                reply_spent: checkpoint.reply_spent,
-            })
+        self.checkpoint_disk.as_ref()?.record.as_ref()?.reply()
     }
 
-    fn save_checkpoint_completion(&mut self, saved: GreetingCheckpoint) -> Option<()> {
-        self.checkpoint_disk
-            .as_mut()?
-            .save(CheckpointRecord::Completed(saved.completed()))
+    pub(super) fn complete_live_checkpoint(
+        &mut self,
+        slot: usize,
+        fs: &mut RamFs,
+    ) -> Result<(), CheckpointResumeError> {
+        let journal = self
+            .checkpoint_disk
+            .as_ref()
+            .ok_or(CheckpointResumeError::Unavailable)?;
+        if let Some(pending) = journal.host_pending() {
+            return self.complete_live_host_checkpoint(slot, fs, pending);
+        }
+        let saved = journal.paused().ok_or(CheckpointResumeError::Unavailable)?;
+        self.finish_live_checkpoint(
+            slot,
+            fs,
+            FIND_GREETING_V2_PIN,
+            CheckpointRecord::Completed(saved.completed()),
+        )
+        .ok_or(CheckpointResumeError::Unavailable)
     }
 
-    pub(super) fn complete_live_checkpoint(&mut self, slot: usize, fs: &mut RamFs) -> Option<()> {
-        let saved = self.checkpoint_disk.as_ref()?.paused()?;
-        let reply = saved.message(slot)?;
+    fn finish_live_checkpoint(
+        &mut self,
+        slot: usize,
+        fs: &mut RamFs,
+        definition: &EncodedDefinitionPin,
+        record: CheckpointRecord,
+    ) -> Option<()> {
+        let (reply, completion) = record.message(slot)?;
         let launch = self.tasks[slot].launch.as_ref()?;
         let (_, member, binding) = self.live_agent_member(launch.handle)?;
         if launch.reply.is_some()
-            || binding.definition != Some(FIND_GREETING_V2_PIN)
+            || binding.definition != Some(definition)
             || member
                 .replies
                 .remaining()
-                .is_none_or(|remaining| remaining < saved.reply.len())
+                .is_none_or(|remaining| remaining < reply.bytes(false).len())
         {
             return None;
         }
-        self.save_checkpoint_completion(saved)?;
-        self.publish_checkpoint_reply(slot, fs, reply);
+        self.checkpoint_disk.as_mut()?.save(record)?;
+        self.publish_checkpoint_reply(slot, fs, reply, completion);
         Some(())
     }
 
     pub(crate) fn resume_recovered_checkpoint(
         &mut self,
         fs: &mut RamFs,
-    ) -> Option<(usize, AgentLaunch)> {
+    ) -> Result<(usize, AgentLaunch), CheckpointResumeError> {
         if self.current != SHELL_TASK_INDEX || self.goal.is_some() {
-            return None;
+            return Err(CheckpointResumeError::Unavailable);
         }
-        let saved = self.checkpoint_disk.as_ref()?.paused()?;
+        let journal = self
+            .checkpoint_disk
+            .as_ref()
+            .ok_or(CheckpointResumeError::Unavailable)?;
+        let (recovered, completed) = if let Some(pending) = journal.host_pending() {
+            let receipt = self.reconcile_host_checkpoint(pending)?;
+            (
+                RecoveredGoal {
+                    definition: FIND_GREETING_V7_PIN,
+                    read_limit: 0,
+                    reply_limit: pending.reply_limit,
+                    reply_reserved: pending.reply_reserved,
+                },
+                CheckpointRecord::Host(pending, Some(receipt)),
+            )
+        } else {
+            let saved = journal.paused().ok_or(CheckpointResumeError::Unavailable)?;
+            (
+                RecoveredGoal {
+                    definition: FIND_GREETING_V2_PIN,
+                    read_limit: saved.read_limit,
+                    reply_limit: saved.reply_limit,
+                    reply_reserved: saved.reply_reserved,
+                },
+                CheckpointRecord::Completed(saved.completed()),
+            )
+        };
+        self.restore_checkpoint(fs, recovered, completed)
+            .ok_or(CheckpointResumeError::Unavailable)
+    }
+
+    fn restore_checkpoint(
+        &mut self,
+        fs: &mut RamFs,
+        recovered: RecoveredGoal,
+        completed: CheckpointRecord,
+    ) -> Option<(usize, AgentLaunch)> {
         let handle = self.next_handle;
         let agent = handle.checked_add(1)?;
         let launch = self
             .prepare_launch(Program::Hello, Some(agent), LaunchParent::Shell, None)
             .ok()?;
-        let reply = saved.message(launch.slot)?;
+        let (reply, completion) = completed.message(launch.slot)?;
+        let saved = completed.reply()?;
         let binding = AgentBinding {
             handle: agent,
-            definition: Some(FIND_GREETING_V2_PIN),
+            definition: Some(recovered.definition),
         };
         let policy = CreatePolicy {
             options: CreateOptions {
                 child_limit: 1,
-                reply_limit: Some(saved.reply_limit),
+                reply_limit: Some(recovered.reply_limit),
                 allowed_helper: None,
             },
             allowed_tools: [None, None],
@@ -449,7 +592,7 @@ impl Scheduler {
             RenameOptions::default(),
             None,
         )?;
-        let reads = GoalReads::restored(saved.read_limit, saved.read_spent);
+        let reads = GoalReads::restored(recovered.read_limit, saved.read_spent);
         let mut goal = Goal::new(
             handle,
             policy,
@@ -459,9 +602,10 @@ impl Scheduler {
         );
         let slot = launch.slot;
         let child = launch.handle;
-        let reservation = ReplyReservation::restored(saved.reply_reserved, saved.reply_spent);
+        let spent_before_reply = saved.reply_spent.checked_sub(saved.bytes.len())?;
+        let reservation = ReplyReservation::restored(recovered.reply_reserved, spent_before_reply);
         // Prepare the reply and handles before committing completion. Installation cannot fail.
-        self.save_checkpoint_completion(saved)?;
+        self.checkpoint_disk.as_mut()?.save(completed)?;
         goal.admit(0, child, MemberRole::Agent(binding), reservation, fs);
         self.goal = Some(goal);
         self.install_child(
@@ -471,11 +615,17 @@ impl Scheduler {
             LaunchPipes::default(),
             TaskState::Suspended,
         );
-        self.publish_checkpoint_reply(slot, fs, reply);
+        self.publish_checkpoint_reply(slot, fs, reply, completion);
         Some((handle, AgentLaunch { agent, child }))
     }
 
-    fn publish_checkpoint_reply(&mut self, slot: usize, fs: &mut RamFs, reply: Message) {
+    fn publish_checkpoint_reply(
+        &mut self,
+        slot: usize,
+        fs: &mut RamFs,
+        reply: Message,
+        completion: TaskCompletion,
+    ) {
         let launch = self.tasks[slot]
             .launch
             .as_mut()
@@ -486,7 +636,7 @@ impl Scheduler {
             .charge_reply(launch.handle, reply.bytes(false).len())
             .expect("checkpoint reply fits its reserved budget");
         launch.reply = Some(reply);
-        self.stop_task(slot, fs, TaskCompletion::Exited(0));
+        self.stop_task(slot, fs, completion);
         self.wake_goal_monitor();
     }
 }

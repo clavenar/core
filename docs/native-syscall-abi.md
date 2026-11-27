@@ -1,8 +1,8 @@
 # Native syscall ABI
 
 The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.78 keeps a completed `find-greeting@2` checkpoint reply readable
-after reboot.
+Kernel 0.0.79 adds durable recovery of the pinned `find-greeting@7` host MCP
+search through the broker's SQLite journal.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -22,6 +22,7 @@ The caller places the call number in `a7`, passes up to six arguments in
   - [Delegating a rename review](#delegating-a-rename-review)
 - [Goal membership and delegated authority](#goal-membership-and-delegated-authority)
   - [Local search checkpoint](#local-search-checkpoint)
+  - [Host MCP search checkpoint](#host-mcp-search-checkpoint)
 - [Audit records](#audit-records)
   - [Read audit](#read-audit)
   - [Publication audit](#publication-audit)
@@ -315,7 +316,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 38 `agent_run` | `a0` goal handle, `a1` program selector | Fresh agent handle, with its child launch handle in `a1` |
 | 39 `agent_status` | `a0` agent handle | State tag, with the original child in `a1`, detail in `a2` and owning goal in `a3` |
 | 40 `agent_suspend` | `a0` agent handle | 0 when suspended, 1 if the agent already finished |
-| 41 `agent_resume` | `a0` agent handle | 0 when runnable, 1 if the agent already finished |
+| 41 `agent_resume` | `a0` agent handle, or 0 to resume a recovered checkpoint | 0 when applied, 1 if the agent already finished, or fresh agent, child and goal handles in `a0`–`a2` for a recovered checkpoint. On -1, `a3` carries the resume status. |
 | 42 `agent_run_suspended` | `a0` goal handle, `a1` program selector | Fresh agent handle, with its suspended child launch handle in `a1` |
 | 43 `goal_budget` | `a0` goal handle | Limit flags, with available bytes in `a1`, reserved bytes in `a2` and spent bytes in `a3` |
 | 44 `goal_run_with_reply_budget` | `a0` goal handle, `a1` program selector, `a2` requested reply bytes | Fresh ordinary child launch handle |
@@ -368,9 +369,9 @@ boot probe. Each frame starts with its total length in bytes.
 
 | Offset | Field |
 | --- | --- |
-| 0 | Frame length (11–32 bytes) |
+| 0 | Frame length (11–36 bytes) |
 | 1 | Version (1) |
-| 2 | Kind (1 plan request, 2 plan reply, 3 tool request, or 4 tool reply) |
+| 2 | Kind (1 plan request, 2 plan reply, 3 tool request, 4 tool reply, or 5 checkpoint lookup reply) |
 | 3–10 | Request ID as a little-endian 64-bit integer |
 | 11 | Request selector or reply status |
 
@@ -800,14 +801,14 @@ The agent run calls also create and bind the agent in that operation.
 Call 56 queues a typed request before the agent starts. Bit 0 starts it
 suspended. Bit 1 selects the explicit agent reply allowance in `a3`.
 Otherwise the agent inherits the available balance. Bits 2–5 select the
-request format. Bit 6 requests a durable checkpoint for the revision 2
+request format. Bit 6 requests a durable checkpoint for the revision 2 or 7
 `PlanDefinition` request.
 
 | Format flags | Request kind | Payload |
 | --- | --- | --- |
 | All clear | `DelegateWithFile` (tag 4) | Two little-endian RV64 words for the helper selector and its reply allowance, followed by 0–64 literal argument bytes |
 | Bit 2 only | `PlanIntent` (tag 5) | One intent byte. Intent 1 for `hello` pins `find-greeting@1`. Other legacy intents retain their original delivery behavior. |
-| Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. Intent 1 with revision 1–6 selects the corresponding `find-greeting` definition for `hello`. |
+| Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. Intent 1 with revision 1–8 selects the corresponding `find-greeting` definition for `hello`. |
 | Bit 4 only | `StageRename` (tag 7) | 1–64 bytes for the proposed basename. `hello` presents the name and its startup file descriptor to call 64. |
 | Bit 5 only | `StageRenamePair` (tag 11) | One byte with the first basename's length, followed by both basenames in grant order. Each basename is 1–64 bytes. The request length determines the second length. |
 
@@ -949,13 +950,51 @@ To read a completed checkpoint, the shell uses call 27 with mode 1 in
 `a3` and `NO_CHILD_HANDLE` in `a2`. Registers `a0` and `a1` supply the user
 stack destination and capacity. On success the call copies the saved reply
 and returns its length in `a0`, read bytes spent in `a1`, and reply bytes spent
-in `a2`. This read can be repeated from a read-only image and adds zero
+in `a2`. The low byte of `a3` is the reply kind. The high bits are zero
+for a local checkpoint or one plus the number of spent host calls for a
+host checkpoint. This read can be repeated from a read-only image and adds zero
 charges. The kernel requires a completed record with the current definition
 pin. Other states, unauthorized callers and invalid buffers return -1.
 Existing single-byte consumed records remain terminal. A reboot after the
 completion flush can recover the saved reply even if the mailbox step
 was interrupted.
 [Checkpoint walkthrough](qemu-walkthroughs.md#resume-a-local-search-checkpoint)
+
+### Host MCP search checkpoint
+
+Call 56 with bits 3 and 6 admits `find-greeting@7` with a writable, empty
+`CLVHCP01` journal and an available bridge. The goal must be ready and
+untimed and have one child slot, a zero-byte read limit, the exact
+`host.text.search@1` grant and a finite reply budget with at least 20 bytes
+reserved. It takes no file grant and bit 0 must be clear. The kernel holds the
+agent suspended for the receipt.
+
+The disk header contains the eight-byte magic, the broker's 16-byte session
+ID and zero padding. Before dispatch, the kernel flushes a pending record
+(tag 5) with that ID, the 34-byte definition pin, the tool ID, reply limit
+and reservation. The last three fields are little-endian 64-bit words.
+The checkpoint is bound to one broker session for its lifetime.
+
+The dispatch frame is a 36-byte tool request with selector 6, the
+operation ID at offsets 12–27 and the little-endian goal handle at offsets
+28–35. Its request ID is the child launch handle. The broker records the
+operation and its reservation together before contacting the tool. Call 41
+queries the result over a 28-byte tool request with selector 7, the saved
+operation ID and a fresh request ID. The broker selects the receipt only
+from the session bound to this image.
+
+The lookup reply uses kind 5. Status 5 alone reports an unknown outcome.
+A settled reply uses the tool's status, then one byte for calls charged
+and the optional result text. Before publishing a typed `Matches` or
+`HostToolFailed` reply, the kernel flushes the completed record (tag 6)
+with the same fields and the receipt appended. Its byte charge is the
+length of the typed reply. A live or recovered resume rechecks the pinned
+definition and limited tool scope. After recovery the new goal can only
+finish the reply. Pending lookup and unknown outcome return -1 in `a0`
+with 1 or 2 in `a3`, respectively. Other errors use 0 in `a3`. An unknown
+outcome leaves the checkpoint pending and preserves any outstanding host
+reservation.
+[Host checkpoint walkthrough](qemu-walkthroughs.md#recover-a-host-mcp-search-checkpoint)
 
 ## Audit records
 

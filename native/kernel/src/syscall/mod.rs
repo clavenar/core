@@ -436,18 +436,24 @@ pub(crate) fn dispatch(
                     write_status(frame, agent.registers())
                 })
         }
-        SYS_AGENT_RESUME if a0 == CURRENT_AGENT => {
-            let launch = scheduler
-                .resume_recovered_checkpoint(fs)
-                .map(|(goal, launch)| {
-                    frame.registers[REG_A2] = goal;
-                    launch
-                });
-            write_agent_launch(frame, launch)
+        SYS_AGENT_SUSPEND | SYS_AGENT_RESUME => {
+            let result = if number == SYS_AGENT_RESUME && a0 == CURRENT_AGENT {
+                scheduler
+                    .resume_recovered_checkpoint(fs)
+                    .map(|(goal, launch)| {
+                        frame.registers[REG_A2] = goal;
+                        write_agent_launch(frame, Some(launch))
+                    })
+            } else {
+                scheduler
+                    .set_agent_suspended(fs, a0, number == SYS_AGENT_SUSPEND)
+                    .map(|result| result as usize)
+            };
+            result.unwrap_or_else(|reason| {
+                frame.registers[REG_A3] = reason as usize;
+                SYSCALL_ERROR
+            })
         }
-        SYS_AGENT_SUSPEND | SYS_AGENT_RESUME => scheduler
-            .set_agent_suspended(fs, a0, number == SYS_AGENT_SUSPEND)
-            .map_or(SYSCALL_ERROR, |result| result as usize),
         SYS_AGENT_LAUNCH_SUPERVISOR => spawn_with_request(
             scheduler,
             fs,
@@ -566,6 +572,7 @@ pub(crate) fn dispatch(
                 }
                 frame.registers[REG_A1] = reply.read_spent;
                 frame.registers[REG_A2] = reply.reply_spent;
+                frame.registers[REG_A3] = reply.metadata();
                 reply.bytes.len()
             })
         }

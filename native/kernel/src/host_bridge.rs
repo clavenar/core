@@ -1,4 +1,4 @@
-use clv_abi::bridge::{BridgeFailure, HEADER_BYTES, HostRequest, MAX_FRAME_BYTES, request_id};
+use clv_abi::bridge::{BridgeFailure, HEADER_BYTES, HostRequest, MAX_WIRE_BYTES, request_id};
 
 use crate::arch::monotonic_nanos;
 use crate::drivers::virtio::console::Port;
@@ -15,7 +15,7 @@ pub(crate) struct HostBridge {
     exchange: Option<Exchange>,
     last_request_id: usize,
     // A partial frame and one receive buffer can coexist across goal changes.
-    incoming: [u8; 2 * MAX_FRAME_BYTES],
+    incoming: [u8; 2 * MAX_WIRE_BYTES],
     received: usize,
     failed: bool,
 }
@@ -26,7 +26,7 @@ impl HostBridge {
             port,
             exchange: None,
             last_request_id: 0,
-            incoming: [0; 2 * MAX_FRAME_BYTES],
+            incoming: [0; 2 * MAX_WIRE_BYTES],
             received: 0,
             failed: false,
         }
@@ -45,7 +45,7 @@ impl HostBridge {
         if monotonic_nanos() >= deadline {
             return Err(BridgeFailure::TimedOut);
         }
-        let mut buffer = [0; MAX_FRAME_BYTES];
+        let mut buffer = [0; MAX_WIRE_BYTES];
         let frame = request.encode(id as u64, &mut buffer);
         if !self
             .port
@@ -123,7 +123,7 @@ impl HostBridge {
         if let Some(length) = self.complete_length()? {
             return Ok(Some(length));
         }
-        let mut chunk = [0; MAX_FRAME_BYTES];
+        let mut chunk = [0; MAX_WIRE_BYTES];
         let Some(count) = self
             .port
             .try_read(&mut chunk)
@@ -143,7 +143,7 @@ impl HostBridge {
             return Ok(None);
         }
         let length = usize::from(self.incoming[0]);
-        if !(HEADER_BYTES..=MAX_FRAME_BYTES).contains(&length) {
+        if !(HEADER_BYTES..=MAX_WIRE_BYTES).contains(&length) {
             return Err(BridgeFailure::InvalidReply);
         }
         Ok((length <= self.received).then_some(length))

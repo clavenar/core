@@ -8,13 +8,13 @@ mod rename;
 
 use self::audit::{AuditHistory, PublicationHistory};
 use self::budget::ReplyReservation;
-pub(super) use self::checkpoint::CheckpointJournal;
+pub(super) use self::checkpoint::{CheckpointJournal, CheckpointLaunch};
 pub(super) use self::monitor::{MonitorReport, ReadDenialWatch};
 use self::reads::GoalReads;
 use self::rename::PendingRenames;
 use clv_abi::agent::{
-    AgentStatus, ControlResult, DefinitionPin, EncodedDefinitionPin, FIND_GREETING_V5,
-    FIND_GREETING_V6, FIND_GREETING_V7, FIND_GREETING_V8, ResumeReceipt,
+    AgentStatus, CheckpointResumeError, ControlResult, DefinitionPin, EncodedDefinitionPin,
+    FIND_GREETING_V5, FIND_GREETING_V6, FIND_GREETING_V7, FIND_GREETING_V8, ResumeReceipt,
 };
 use clv_abi::audit::{
     EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationObservation,
@@ -571,16 +571,18 @@ impl Scheduler {
         fs: &mut RamFs,
         handle: usize,
         suspended: bool,
-    ) -> Option<ControlResult> {
-        let (_, member, _) = self.agent_member(handle)?;
+    ) -> Result<ControlResult, CheckpointResumeError> {
+        use CheckpointResumeError::Unavailable;
+
+        let (_, member, _) = self.agent_member(handle).ok_or(Unavailable)?;
         if member.completion.is_some() {
-            return Some(ControlResult::AlreadyFinished);
+            return Ok(ControlResult::AlreadyFinished);
         }
         let child = member.handle;
-        let index = self.launch_index(child)?;
+        let index = self.launch_index(child).ok_or(Unavailable)?;
         let state = self.tasks[index].state;
         if state != TaskState::Suspended && !state.can_finish(child) {
-            return None;
+            return Err(Unavailable);
         }
         if suspended {
             self.tasks[index].state = TaskState::Suspended;
@@ -591,7 +593,7 @@ impl Scheduler {
                 self.resume_suspended_child(index, child);
             }
         }
-        Some(ControlResult::Applied)
+        Ok(ControlResult::Applied)
     }
 
     pub(super) fn agent_resume_grant(&self, agent: usize) -> Option<LaunchGrant> {

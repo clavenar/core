@@ -1,8 +1,8 @@
 pub use clv_abi::agent::{
-    AgentLaunch, AgentStatus, CURRENT_AGENT, CheckpointReply, ControlResult, DefinitionId,
-    DefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, FIND_GREETING_V4,
-    FIND_GREETING_V5, FIND_GREETING_V6, FIND_GREETING_V7, FIND_GREETING_V8, FileDelegation,
-    FileToolInvocation, PlanIntent, ResumeReceipt,
+    AgentLaunch, AgentStatus, CURRENT_AGENT, CheckpointReply, CheckpointResumeError, ControlResult,
+    DefinitionId, DefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3,
+    FIND_GREETING_V4, FIND_GREETING_V5, FIND_GREETING_V6, FIND_GREETING_V7, FIND_GREETING_V8,
+    FileDelegation, FileToolInvocation, PlanIntent, ResumeReceipt,
 };
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES, RECV_CHECKPOINT,
@@ -78,7 +78,7 @@ pub enum RunRequest<'a> {
     DelegateWithFile(FileDelegation<'a>),
     Plan(PlanIntent),
     Definition(DefinitionId),
-    Checkpoint,
+    Checkpoint(DefinitionId),
     StageRename(&'a [u8]),
     StageRenamePair([&'a [u8]; 2]),
 }
@@ -111,9 +111,9 @@ pub fn launch(
             buffer[..2].copy_from_slice(&id.encode());
             &buffer[..2]
         }
-        RunRequest::Checkpoint => {
+        RunRequest::Checkpoint(id) => {
             flags |= RUN_PLAN_DEFINITION | RUN_CHECKPOINT;
-            buffer[..2].copy_from_slice(&FIND_GREETING_V2.encode());
+            buffer[..2].copy_from_slice(&id.encode());
             &buffer[..2]
         }
         RunRequest::StageRename(name) => {
@@ -268,28 +268,37 @@ pub fn status_with_definition(
 }
 
 pub fn suspend(agent: usize) -> Option<ControlResult> {
-    control(SYS_AGENT_SUSPEND, agent)
+    control_result(syscall(SYS_AGENT_SUSPEND, agent, 0, 0))
 }
 
-pub fn resume(agent: usize) -> Option<ControlResult> {
-    control(SYS_AGENT_RESUME, agent)
+pub fn resume(agent: usize) -> Result<ControlResult, CheckpointResumeError> {
+    let (value, ..) = resume_call(agent)?;
+    control_result(value).ok_or(CheckpointResumeError::Unavailable)
 }
 
 /// Completes a recovered checkpoint and returns its new goal and launch handles.
-pub fn resume_checkpoint() -> Option<(usize, AgentLaunch)> {
-    let (agent, child, goal, _) = ecall(SYS_AGENT_RESUME, CURRENT_AGENT, 0, 0, 0, 0);
-    Some((
-        goal,
-        AgentLaunch {
-            agent: syscall_result(agent)?,
-            child,
-        },
-    ))
+pub fn resume_checkpoint() -> Result<(usize, AgentLaunch), CheckpointResumeError> {
+    let (agent, child, goal) = resume_call(CURRENT_AGENT)?;
+    Ok((goal, AgentLaunch { agent, child }))
+}
+
+fn resume_call(agent: usize) -> Result<(usize, usize, usize), CheckpointResumeError> {
+    loop {
+        let (value, child, goal, status) = ecall(SYS_AGENT_RESUME, agent, 0, 0, 0, 0);
+        if let Some(value) = syscall_result(value) {
+            return Ok((value, child, goal));
+        }
+        let reason = CheckpointResumeError::from_raw(status);
+        if reason != CheckpointResumeError::Waiting {
+            return Err(reason);
+        }
+        core::hint::spin_loop();
+    }
 }
 
 /// Inspects the completed checkpoint reply and its final byte charges.
 pub fn receive_checkpoint_reply(buffer: &mut [u8]) -> Option<CheckpointReply<'_>> {
-    let (length, read_spent, reply_spent, _) = ecall(
+    let (length, read_spent, reply_spent, metadata) = ecall(
         SYS_REPLY_RECV,
         buffer.as_mut_ptr().expose_provenance(),
         buffer.len(),
@@ -297,11 +306,7 @@ pub fn receive_checkpoint_reply(buffer: &mut [u8]) -> Option<CheckpointReply<'_>
         RECV_CHECKPOINT,
         0,
     );
-    Some(CheckpointReply {
-        bytes: buffer.get(..length)?,
-        read_spent,
-        reply_spent,
-    })
+    CheckpointReply::from_registers(buffer.get(..length)?, read_spent, reply_spent, metadata)
 }
 
 /// Starts a shell-owned supervisor for this agent's current suspension.
@@ -319,8 +324,8 @@ pub fn resume_granted() -> bool {
     syscall(SYS_AGENT_RESUME_GRANTED, 0, 0, 0) == 0
 }
 
-fn control(call: usize, agent: usize) -> Option<ControlResult> {
-    match syscall(call, agent, 0, 0) {
+fn control_result(result: usize) -> Option<ControlResult> {
+    match result {
         n if n == ControlResult::Applied as usize => Some(ControlResult::Applied),
         n if n == ControlResult::AlreadyFinished as usize => Some(ControlResult::AlreadyFinished),
         _ => None,

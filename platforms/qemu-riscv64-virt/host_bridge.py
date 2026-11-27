@@ -4,6 +4,7 @@ import argparse
 from collections.abc import Callable
 from contextlib import closing
 from functools import partial
+import os
 from pathlib import Path
 import socket
 import sqlite3
@@ -14,9 +15,10 @@ from typing import BinaryIO, NamedTuple
 from uuid import uuid4
 
 from bridge_protocol import (
-    BUDGET_EXHAUSTED, COMBINED_PLAN, COMBINED_TOOL, HostRequest, INVALID_REPLY, MCP_SEARCH,
-    MOCK_GREETING, MODEL_GREETING, REQUEST_SIZES, Reply, SEARCH_GREETING, SERVICE_UNAVAILABLE,
-    SKIP, TOOL_OK, decode_request, encode_reply,
+    BUDGET_EXHAUSTED, CHECKPOINT_LOOKUP, CHECKPOINT_SEARCH, COMBINED_PLAN, COMBINED_TOOL,
+    HostRequest, INVALID_REPLY, MCP_SEARCH, MOCK_GREETING, MODEL_GREETING, OUTCOME_UNKNOWN,
+    REQUEST_SIZES, Reply, SEARCH_GREETING, SERVICE_UNAVAILABLE, SKIP, TOOL_OK, decode_request,
+    encode_reply,
 )
 from mcp_backend import search_fixture
 from ollama_backend import MAX_TOKENS, TokenUsage, choose_action
@@ -26,6 +28,8 @@ KERNEL = Path("target/riscv64gc-unknown-none-elf/release/clavenar-kernel")
 JOURNAL = Path("target/host-bridge.sqlite3")
 REPLAY_JOURNAL = Path("target/host-bridge-replay.sqlite3")
 SOCKET_TIMEOUT = 5
+CHECKPOINT_HEADER = b"CLVHCP01"
+CHECKPOINT_SECTOR_BYTES = 512
 
 MOCK_MAX_UNITS = 2
 MOCK_USED_UNITS = 1
@@ -107,12 +111,16 @@ class Journal:
                 PRIMARY KEY (session_id, request_id),
                 FOREIGN KEY (session_id, request_id) REFERENCES requests(session_id, request_id)
             );
+            CREATE TABLE IF NOT EXISTS checkpoint_calls (
+                session_id TEXT PRIMARY KEY NOT NULL,
+                request_id TEXT NOT NULL,
+                FOREIGN KEY (session_id, request_id) REFERENCES mcp_calls(session_id, request_id)
+            );
         """)
 
     def create_session(
-        self, budget_units: int, model: str | None = None, budget_calls: int | None = None
-    ) -> str:
-        session = uuid4().hex
+        self, session: str, budget_units: int, model: str | None, budget_calls: int | None
+    ) -> None:
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             self.db.execute(
@@ -129,7 +137,6 @@ class Journal:
                     "INSERT INTO mcp_budgets (session_id, budget_calls) VALUES (?, ?)",
                     (session, budget_calls),
                 )
-        return session
 
     def handle_request(
         self,
@@ -144,8 +151,13 @@ class Journal:
         tool_goal = goal if request.is_tool else None
         owner_goal = goal if launch is not None else None
         max_units = service.max_units
+        checkpoint = request.selector == CHECKPOINT_SEARCH
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
+            if checkpoint and self.db.execute(
+                "SELECT 1 FROM checkpoint_calls WHERE session_id = ?", (session,)
+            ).fetchone() is not None:
+                return None
             stored = self.db.execute(
                 """
                 SELECT reply, result, mcp_calls.goal_id, request_owners.goal_id, launch_id FROM requests
@@ -192,6 +204,10 @@ class Journal:
                 self.db.execute(
                     "INSERT INTO mcp_calls (session_id, request_id, goal_id) VALUES (?, ?, ?)",
                     (*key, tool_goal),
+                )
+            if checkpoint:
+                self.db.execute(
+                    "INSERT INTO checkpoint_calls (session_id, request_id) VALUES (?, ?)", key
                 )
             if launch is not None:
                 self.db.execute(
@@ -275,6 +291,70 @@ def handle_live_request(
     return reply
 
 
+def lookup_checkpoint(db: sqlite3.Connection, session: str) -> Reply:
+    row = db.execute(
+        """
+        SELECT reply, used_units, result
+        FROM checkpoint_calls
+        JOIN requests USING (session_id, request_id)
+        JOIN mcp_calls USING (session_id, request_id)
+        WHERE session_id = ?
+        """,
+        (session,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return Reply(OUTCOME_UNKNOWN)
+    status, used_calls, result = row
+    return Reply(status, bytes([used_calls]) + (result or b""))
+
+
+def handle_checkpoint_request(
+    db: sqlite3.Connection,
+    session: str,
+    request: HostRequest,
+    dispatch: Callable[[HostRequest], None] | None = None,
+) -> Reply | None:
+    if request.selector == CHECKPOINT_LOOKUP:
+        if request.operation != bytes.fromhex(session):
+            return Reply(OUTCOME_UNKNOWN)
+        return lookup_checkpoint(db, session)
+    if request.selector == CHECKPOINT_SEARCH:
+        if dispatch is not None and request.operation == bytes.fromhex(session):
+            dispatch(request)
+        return None
+    return Reply(SERVICE_UNAVAILABLE)
+
+
+def dispatch_checkpoint(journal: Journal, session: str, service: Service, request: HostRequest) -> None:
+    journal.handle_request(session, request, service)
+    receipt = lookup_checkpoint(journal.db, session)
+    message = "outcome unknown" if receipt.status == OUTCOME_UNKNOWN else "receipt recorded"
+    print(f"host checkpoint {session} {message}", file=sys.stderr, flush=True)
+
+
+def create_checkpoint_disk(path: Path, session: str) -> None:
+    # A live boot always starts with a fresh image and a fresh broker session.
+    with path.open("xb") as disk:
+        disk.write((CHECKPOINT_HEADER + bytes.fromhex(session)).ljust(CHECKPOINT_SECTOR_BYTES, b"\0"))
+        disk.truncate(1024 * 1024)
+        disk.flush()
+        os.fsync(disk.fileno())
+
+
+def checkpoint_session(path: Path) -> str:
+    with path.open("rb") as disk:
+        header = disk.read(CHECKPOINT_SECTOR_BYTES)
+    operation = header[8:24]
+    if (
+        len(header) != CHECKPOINT_SECTOR_BYTES
+        or not header.startswith(CHECKPOINT_HEADER)
+        or not any(operation)
+        or any(header[24:])
+    ):
+        raise ValueError("invalid host checkpoint disk header")
+    return operation.hex()
+
+
 def serve_requests(
     peer: socket.socket,
     wire: BinaryIO,
@@ -298,7 +378,15 @@ def serve_requests(
 def run_qemu(
     boot_reply: bytes,
     serve: Callable[[socket.socket, BinaryIO], None] | None = None,
+    checkpoint_disk: Path | None = None,
 ) -> int:
+    drive = []
+    if checkpoint_disk is not None:
+        filename = str(checkpoint_disk).replace(",", ",,")
+        drive = [
+            "-drive", f"file={filename},format=raw,if=none,id=checkpoint,cache=writeback",
+            "-device", "virtio-blk-device,drive=checkpoint",
+        ]
     with TemporaryDirectory(prefix="clavenar-bridge-") as directory:
         path = str(Path(directory) / "bridge.sock")
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
@@ -313,6 +401,7 @@ def run_qemu(
                 "-chardev", f"socket,id=bridge,path={path},server=off",
                 "-device", "virtio-serial-device,max_ports=1",
                 "-device", "virtconsole,chardev=bridge,nr=0",
+                *drive,
             ])
             try:
                 peer, _ = listener.accept()
@@ -335,6 +424,7 @@ def run_qemu(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--journal", type=Path, help="SQLite journal for live requests or replay receipts")
+    parser.add_argument("--checkpoint-disk", type=Path, help="host checkpoint image for MCP or recovery")
     parser.add_argument("--replay-journal", type=Path, help="source SQLite journal for offline replay")
     parser.add_argument("--replay-session", help="recorded session ID")
     parser.add_argument("--replay-goal", help="recorded hexadecimal goal handle")
@@ -348,11 +438,16 @@ def main() -> int:
     parser.add_argument("--budget-calls", type=int, default=1, help="MCP tool calls per VM session")
     parser.add_argument(
         "--mode",
-        choices=(*MOCK_ACTIONS, "ollama", "mcp", "combined", "replay", *PROBE_REPLIES),
+        choices=(*MOCK_ACTIONS, "ollama", "mcp", "combined", "replay", "recover", *PROBE_REPLIES),
         default="search",
         help="host response to exercise",
     )
     args = parser.parse_args()
+    checkpoint_disk = args.checkpoint_disk
+    if args.mode == "recover" and checkpoint_disk is None:
+        parser.error("--mode recover requires --checkpoint-disk")
+    if checkpoint_disk is not None and args.mode not in ("mcp", "recover"):
+        parser.error("--checkpoint-disk requires --mode mcp or --mode recover")
     replay_source = (args.replay_journal, args.replay_session, args.replay_goal)
     if args.mode == "replay":
         if None in replay_source:
@@ -395,6 +490,16 @@ def main() -> int:
     if args.mode in PROBE_REPLIES:
         return run_qemu(PROBE_REPLIES[args.mode])
 
+    path = (args.journal or JOURNAL).resolve()
+    if checkpoint_disk is not None and checkpoint_disk.resolve() == path:
+        parser.error("--checkpoint-disk and --journal must be different files")
+    if args.mode == "recover":
+        session = checkpoint_session(checkpoint_disk)
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
+            print(f"recovering host checkpoint {session} journal={path}", file=sys.stderr, flush=True)
+            handle = partial(handle_checkpoint_request, db, session)
+            return run_qemu(b"PONG", partial(serve_requests, handle=handle), checkpoint_disk)
+
     model = None
     call_budget = None
     combined = args.mode == "combined"
@@ -423,18 +528,24 @@ def main() -> int:
 
         services = {MOCK_GREETING: Service(run_request, MOCK_MAX_UNITS)}
 
-    path = (args.journal or JOURNAL).resolve()
     with closing(sqlite3.connect(path, isolation_level=None)) as db:
         journal = Journal(db)
-        session = journal.create_session(budget, model, call_budget)
+        session = uuid4().hex
+        if checkpoint_disk is not None:
+            create_checkpoint_disk(checkpoint_disk, session)
+        journal.create_session(session, budget, model, call_budget)
         print(
             f"host session {session} {budget_info} journal={path}",
             file=sys.stderr,
             flush=True,
         )
 
-        handle = partial(handle_live_request, journal, session, services)
-        return run_qemu(b"PONG", partial(serve_requests, handle=handle))
+        if checkpoint_disk is None:
+            handle = partial(handle_live_request, journal, session, services)
+        else:
+            dispatch = partial(dispatch_checkpoint, journal, session, services[MCP_SEARCH])
+            handle = partial(handle_checkpoint_request, db, session, dispatch=dispatch)
+        return run_qemu(b"PONG", partial(serve_requests, handle=handle), checkpoint_disk)
 
 
 if __name__ == "__main__":

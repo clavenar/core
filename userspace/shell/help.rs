@@ -112,7 +112,7 @@ entries! {
     AgentRun {
         "agent run [--suspended] [--checkpoint] [--reply-bytes N] <program> [request]" =>
             "Start an agent. Requests below apply to hello",
-        "  --checkpoint" => "Pause find-greeting@2 after saving its search result",
+        "  --checkpoint" => "Pause at a durable checkpoint for find-greeting@2 or @7",
         "  --stage-rename <new-name>" => "Stage in grant order (repeat for two files)",
         "  --mock find-greeting[@REV]" => "Run revision 1 (default), 2, 3 (stdio), 4 (MCP) or 5 (host)",
         "  --plan find-greeting@6" => "Use the host model to choose the pinned search",

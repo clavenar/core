@@ -3,6 +3,7 @@ mod journal;
 use super::mmio::Device;
 use super::queue::{DEVICE_WRITES, Descriptor, NEXT, Ring, RingMemory};
 use crate::arch::monotonic_nanos;
+use clv_abi::bridge::CheckpointId;
 
 use journal::{Format, Journal};
 pub(crate) use journal::{JournalLoadError, JournalProbe, JournalRecord, JournalUpdate};
@@ -28,11 +29,20 @@ const DEMO_MARKER: Sector = padded_sector(b"CLVSAVE1");
 const DURABLE_HEADER: Sector = padded_sector(b"CLVRNM01");
 const DURABLE_PAIR_HEADER: Sector = padded_sector(b"CLVRNM02");
 const CHECKPOINT_HEADER: Sector = padded_sector(b"CLVCHK01");
+const HOST_CHECKPOINT_MAGIC: &[u8; 8] = b"CLVHCP01";
 
 const fn padded_sector(prefix: &[u8; 8]) -> Sector {
     let mut sector = BLANK_SECTOR;
     sector.split_at_mut(8).0.copy_from_slice(prefix);
     sector
+}
+
+fn host_checkpoint_operation(header: &Sector) -> Option<CheckpointId> {
+    let (operation, padding) = header
+        .strip_prefix(HOST_CHECKPOINT_MAGIC)?
+        .split_first_chunk()?;
+    (*operation != [0; size_of::<CheckpointId>()] && padding.iter().all(|&byte| byte == 0))
+        .then_some(*operation)
 }
 
 #[repr(C)]
@@ -144,14 +154,14 @@ pub(crate) struct JournalDevice {
 #[derive(Clone, Copy)]
 enum JournalKind {
     Renames(Format),
-    Checkpoint,
+    Checkpoint(Option<CheckpointId>),
 }
 
 impl JournalKind {
     fn format(self) -> Format {
         match self {
             Self::Renames(format) => format,
-            Self::Checkpoint => Format::Single,
+            Self::Checkpoint(_) => Format::Single,
         }
     }
 }
@@ -166,7 +176,14 @@ impl JournalDevice {
     }
 
     pub(crate) fn is_checkpoint(&self) -> bool {
-        matches!(self.kind, JournalKind::Checkpoint)
+        matches!(self.kind, JournalKind::Checkpoint(_))
+    }
+
+    pub(crate) fn checkpoint_operation(&self) -> Option<CheckpointId> {
+        match self.kind {
+            JournalKind::Checkpoint(operation) => operation,
+            _ => None,
+        }
     }
 
     pub(crate) fn open_journal<T>(
@@ -313,8 +330,9 @@ impl Block {
             match first {
                 DURABLE_HEADER => Some(JournalKind::Renames(Format::Single)),
                 DURABLE_PAIR_HEADER => Some(JournalKind::Renames(Format::Pair)),
-                CHECKPOINT_HEADER => Some(JournalKind::Checkpoint),
-                _ => None,
+                CHECKPOINT_HEADER => Some(JournalKind::Checkpoint(None)),
+                _ => host_checkpoint_operation(&first)
+                    .map(|operation| JournalKind::Checkpoint(Some(operation))),
             },
         ))
     }

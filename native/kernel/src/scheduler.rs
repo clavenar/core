@@ -4,7 +4,7 @@ mod pipe;
 
 use self::definition::AgentBinding;
 pub(crate) use self::goal::DelegationTarget;
-use self::goal::{CheckpointJournal, Goal, MonitorReport, ReadDenialWatch};
+use self::goal::{CheckpointJournal, CheckpointLaunch, Goal, MonitorReport, ReadDenialWatch};
 use self::pipe::LaunchPipes;
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
@@ -297,9 +297,12 @@ impl Scheduler {
     ) -> Option<AgentLaunch> {
         let agent = self.next_handle;
         let binding = AgentBinding::resolve(agent, program, request.as_ref())?;
-        if checkpoint {
-            self.check_checkpoint_launch(goal, binding, reply_bytes)?;
-        }
+        let checkpoint = if checkpoint {
+            Some(self.check_checkpoint_launch(goal, binding, reply_bytes, suspended)?)
+        } else {
+            None
+        };
+        let await_receipt = matches!(checkpoint, Some(CheckpointLaunch::Host(_)));
         let child = self.start_child(
             fs,
             program,
@@ -309,10 +312,13 @@ impl Scheduler {
             },
             request,
             Some(binding),
-            TaskState::for_agent(suspended),
+            TaskState::for_agent(suspended || await_receipt),
         )?;
-        if checkpoint {
+        if checkpoint.is_some() {
             self.arm_checkpoint(child);
+        }
+        if let Some(CheckpointLaunch::Host(pending)) = checkpoint {
+            self.dispatch_host_checkpoint(pending, goal, child, fs);
         }
         Some(AgentLaunch { agent, child })
     }

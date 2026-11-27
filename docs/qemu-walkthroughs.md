@@ -19,6 +19,7 @@ handles and ordinary RamFS changes live for one boot.
   - [Run a host-backed mock plan](#run-a-host-backed-mock-plan)
   - [Run a model-backed plan](#run-a-model-backed-plan)
   - [Search a host MCP fixture](#search-a-host-mcp-fixture)
+  - [Recover a host MCP search checkpoint](#recover-a-host-mcp-search-checkpoint)
   - [Run Ollama and both MCP searches in one goal](#run-ollama-and-both-mcp-searches-in-one-goal)
   - [Replay a combined goal offline](#replay-a-combined-goal-offline)
 - [Reviewed renames](#reviewed-renames)
@@ -1737,6 +1738,72 @@ PY
 Expect one `settled` row with `1 1 b'Hello from MCP'` and one `denied` row
 with `1 0 None`. Match the goal and launch columns to the handles shown
 in the guest. Stop the fixture server with `Ctrl+c` in its host terminal.
+
+### Recover a host MCP search checkpoint
+
+Start the [MCP fixture](#search-a-host-mcp-fixture) in a host terminal.
+After building the kernel, run the following at the Linux prompt in
+`core`. The broker creates the image at the new path and binds one
+`find-greeting@7` search to it.
+
+```sh
+checkpoint_dir="$(mktemp -d)"
+python3 platforms/qemu-riscv64-virt/host_bridge.py \
+  --mode mcp --mcp-port 8765 --budget-calls 1 \
+  --checkpoint-disk "$checkpoint_dir/checkpoint.img" \
+  --journal "$checkpoint_dir/bridge.sqlite3"
+```
+
+At `clsh>`, issue the search.
+
+```text
+goal create --children 1 --allow-tool host.text.search@1 --read-bytes 0 --reply-bytes 20
+agent run --checkpoint hello --plan find-greeting@7
+agent status
+goal budget
+recv --checkpoint hello
+```
+
+The agent is suspended at a pending checkpoint with 20 reply bytes reserved
+and zero spent. The fixture logs one `tools/call text.search`. Wait for
+`host checkpoint <id> receipt recorded` in the terminal running QEMU, then
+quit QEMU with `Ctrl+a`, then `x`. You can stop the fixture now. From the same
+Linux terminal, reboot using the same image and journal.
+
+```sh
+python3 platforms/qemu-riscv64-virt/host_bridge.py \
+  --mode recover --checkpoint-disk "$checkpoint_dir/checkpoint.img" \
+  --journal "$checkpoint_dir/bridge.sqlite3"
+```
+
+Look for `agent host checkpoint recovered (pending)`. At `clsh>` enter
+the following.
+
+```text
+agent resume
+wait hello
+recv hello
+recv --checkpoint hello
+recv --checkpoint hello
+goal budget
+```
+
+`wait hello` reports exit 0. Each receive prints `Hello from MCP`, and
+both checkpoint reads report `read_bytes=0 reply_bytes=14 host_calls=1`.
+The goal's reply balance is `available=6 reserved=0 spent=14`. The recovery
+broker looks up the original receipt through a read-only journal connection.
+Reboot again with the recovery command to read the completed checkpoint
+directly with `recv --checkpoint hello`.
+
+To exercise an unknown outcome, restart the fixture with `import time` and
+add `time.sleep(3)` immediately after the tool prints `tools/call text.search`.
+Repeat with a fresh checkpoint directory. The broker times out waiting for
+the tool and prints `host checkpoint <id> outcome unknown`. After reboot
+in recovery mode, `agent resume` prints `host checkpoint outcome unknown`.
+Set `bridge_journal="$checkpoint_dir/bridge.sqlite3"` and run the journal
+query above. It shows a single `in_flight` row with one reserved call.
+Repeated resumes preserve the pending checkpoint and the fixture log contains
+one call across both boots.
 
 ### Run Ollama and both MCP searches in one goal
 

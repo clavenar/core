@@ -1,6 +1,6 @@
 use crate::goal::GoalStatus;
 use crate::tool::ToolId;
-use crate::{MESSAGE_MAX_BYTES, PATH_MAX_BYTES, Program, RequestKind};
+use crate::{MESSAGE_MAX_BYTES, PATH_MAX_BYTES, Program, ReplyKind, RequestKind};
 
 const SUSPENDED: usize = 6;
 pub const RUN_SUSPENDED: usize = 1;
@@ -13,7 +13,7 @@ pub const RUN_PLAN_DEFINITION: usize = 8;
 pub const RUN_STAGE_RENAME: usize = 16;
 /// Selects two destination basenames in rename grant order.
 pub const RUN_STAGE_RENAME_PAIR: usize = 32;
-/// Pause the pinned local search after durably saving its completed reply.
+/// Pause the pinned search at its durable checkpoint.
 pub const RUN_CHECKPOINT: usize = 64;
 /// Selects an owner read of the completed checkpoint in reply receive.
 pub const RECV_CHECKPOINT: usize = 1;
@@ -266,9 +266,55 @@ pub struct AgentLaunch {
 
 /// The saved result and final byte charges of a completed checkpoint.
 pub struct CheckpointReply<'a> {
+    pub kind: ReplyKind,
     pub bytes: &'a [u8],
     pub read_spent: usize,
     pub reply_spent: usize,
+    pub host_calls: Option<usize>,
+}
+
+impl<'a> CheckpointReply<'a> {
+    pub fn metadata(&self) -> usize {
+        self.kind as usize | (self.host_calls.map_or(0, |calls| calls + 1) << 8)
+    }
+
+    pub fn from_registers(
+        bytes: &'a [u8],
+        read_spent: usize,
+        reply_spent: usize,
+        metadata: usize,
+    ) -> Option<Self> {
+        let kind = ReplyKind::from_raw(metadata & 0xff)?;
+        if !matches!(kind, ReplyKind::Matches | ReplyKind::HostToolFailed) || metadata >> 8 > 2 {
+            return None;
+        }
+        Some(Self {
+            kind,
+            bytes,
+            read_spent,
+            reply_spent,
+            host_calls: (metadata >> 8).checked_sub(1),
+        })
+    }
+}
+
+/// Call 41 returns this in a3 when a0 indicates an unsuccessful resume.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum CheckpointResumeError {
+    Unavailable = 0,
+    Waiting = 1,
+    OutcomeUnknown = 2,
+}
+
+impl CheckpointResumeError {
+    pub const fn from_raw(value: usize) -> Self {
+        match value {
+            1 => Self::Waiting,
+            2 => Self::OutcomeUnknown,
+            _ => Self::Unavailable,
+        }
+    }
 }
 
 pub type EncodedResumeReceipt = [[u8; 8]; 4];

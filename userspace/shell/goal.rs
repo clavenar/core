@@ -412,12 +412,18 @@ pub(super) fn recv_checkpoint() {
     let Some(reply) = agent::receive_checkpoint_reply(&mut buffer) else {
         return print(b"no completed checkpoint reply\r\n");
     };
-    print(reply.bytes);
+    super::children::display_reply(0, reply.kind, reply.bytes);
+    let mut calls_buffer = [0; DIGITS];
+    let (host_label, calls): (&[u8], &[u8]) = reply.host_calls.map_or((&[], &[]), |calls| {
+        (b" host_calls=", decimal(calls, &mut calls_buffer))
+    });
     print_line(&[
         b"read_bytes=",
         decimal(reply.read_spent, &mut [0; DIGITS]),
         b" reply_bytes=",
         decimal(reply.reply_spent, &mut [0; DIGITS]),
+        host_label,
+        calls,
     ]);
 }
 
@@ -548,8 +554,12 @@ pub(super) fn agent_command(
             None => print(b"no current agent\r\n"),
         },
         (Subcommand::Resume, b"") if current.is_none() => {
-            let Some((handle, launch)) = children.resume_checkpoint() else {
-                return print(b"no current agent\r\n");
+            let (handle, launch) = match children.resume_checkpoint() {
+                Ok(resumed) => resumed,
+                Err(agent::CheckpointResumeError::OutcomeUnknown) => {
+                    return print(b"host checkpoint outcome unknown\r\n");
+                }
+                Err(_) => return print(b"no current agent\r\n"),
             };
             *current = Some(CurrentGoal {
                 handle,
@@ -562,16 +572,22 @@ pub(super) fn agent_command(
         }
         (action @ (Subcommand::Suspend | Subcommand::Resume), b"") => {
             let suspending = matches!(action, Subcommand::Suspend);
-            let control = if suspending {
-                agent::suspend
-            } else {
-                agent::resume
+            let Some(handle) = agent_handle else {
+                return print(b"no current agent\r\n");
             };
-            match agent_handle.and_then(control) {
-                Some(agent::ControlResult::Applied) if suspending => print(b"agent suspended\r\n"),
-                Some(agent::ControlResult::Applied) => print(b"agent resumed\r\n"),
-                Some(agent::ControlResult::AlreadyFinished) => print(b"agent already finished\r\n"),
-                None => print(b"no current agent\r\n"),
+            let result = if suspending {
+                agent::suspend(handle).ok_or(agent::CheckpointResumeError::Unavailable)
+            } else {
+                agent::resume(handle)
+            };
+            match result {
+                Ok(agent::ControlResult::Applied) if suspending => print(b"agent suspended\r\n"),
+                Ok(agent::ControlResult::Applied) => print(b"agent resumed\r\n"),
+                Ok(agent::ControlResult::AlreadyFinished) => print(b"agent already finished\r\n"),
+                Err(agent::CheckpointResumeError::OutcomeUnknown) => {
+                    print(b"host checkpoint outcome unknown\r\n")
+                }
+                Err(_) => print(b"no current agent\r\n"),
             }
         }
         _ => {

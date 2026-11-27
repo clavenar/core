@@ -13,7 +13,9 @@ block journal and restore them at boot.
 A checkpoint can save the result of the local `find-greeting@2` search
 and resume the reply step after reboot. A completed reply stays readable
 on the checkpoint image.
-[Resume a local search checkpoint](docs/qemu-walkthroughs.md#resume-a-local-search-checkpoint)
+The pinned host MCP search can recover its broker receipt using the same
+checkpoint image and SQLite journal across boots.
+[Resume a local search checkpoint](docs/qemu-walkthroughs.md#resume-a-local-search-checkpoint) · [Recover a host MCP search checkpoint](docs/qemu-walkthroughs.md#recover-a-host-mcp-search-checkpoint)
 
 ## Build and run the RV64 kernel
 
