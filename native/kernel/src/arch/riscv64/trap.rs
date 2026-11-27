@@ -77,7 +77,10 @@ fn supervisor_status() -> usize {
 ///
 /// Only the boot hart may start the scheduler, after installing the trap
 /// vector and preparing all user address spaces.
-pub(crate) unsafe fn start(tasks: [(AddressSpace, usize); TASK_COUNT]) -> ! {
+pub(crate) unsafe fn start(
+    tasks: [(AddressSpace, usize); TASK_COUNT],
+    after_paging: impl FnOnce(),
+) -> ! {
     // SAFETY: No user task has run, and only this hart accesses the state.
     let state = unsafe { &mut *(&raw mut KERNEL_STATE) };
     let scheduler = state
@@ -92,6 +95,7 @@ pub(crate) unsafe fn start(tasks: [(AddressSpace, usize); TASK_COUNT]) -> ! {
         idle();
     }
     uart::write(b"Sv39 paging enabled\r\n");
+    after_paging();
     let first_frame = *scheduler.current_frame();
     arm_timer();
     // SAFETY: The first task's code and stack are mapped in the active space.

@@ -10,6 +10,7 @@ const MIN_USER_STACK_BASE: usize = USER_TEXT_BASE + 2 * FRAME_SIZE;
 
 const PAGE_SHIFT: usize = 12;
 const VPN_BITS: usize = 9;
+const SUPERPAGE_SHIFT: usize = PAGE_SHIFT + VPN_BITS;
 const PTE_PPN_SHIFT: usize = 10;
 const SATP_SV39: usize = 8 << 60;
 
@@ -33,7 +34,7 @@ pub(crate) struct BootMappings<const PROGRAMS: usize> {
     uart: usize,
     user_code: [[Option<usize>; MAX_USER_IMAGE_PAGES]; PROGRAMS],
     kernel_middle: usize,
-    uart_leaves: usize,
+    mmio_leaves: usize,
 }
 
 impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
@@ -41,10 +42,11 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
         frames: &mut FrameAllocator<'_>,
         user_code: [[Option<&Frame>; MAX_USER_IMAGE_PAGES]; PROGRAMS],
         uart: usize,
+        bridge: Option<usize>,
     ) -> Option<Self> {
         let kernel_middle = frames.allocate_zeroed()?;
         let kernel_leaves = frames.allocate_zeroed()?;
-        let uart_leaves = frames.allocate_zeroed()?;
+        let mmio_leaves = frames.allocate_zeroed()?;
 
         // The linker symbols mark page boundaries. Only their addresses are used.
         let text = (&raw const __text_start).addr();
@@ -61,7 +63,21 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
         for &code in user_code.iter().flatten().flatten() {
             kernel_leaves.words_mut()[vpn_index(code, 0)] = 0;
         }
-        map_range(uart_leaves, uart, uart + FRAME_SIZE, READ | WRITE | DIRTY);
+        map_range(mmio_leaves, uart, uart + FRAME_SIZE, READ | WRITE | DIRTY);
+        if let Some(bridge) = bridge {
+            // The selected transport must fit in the UART's supervisor leaf table.
+            if bridge >> SUPERPAGE_SHIFT != uart >> SUPERPAGE_SHIFT
+                || !bridge.is_multiple_of(FRAME_SIZE)
+            {
+                return None;
+            }
+            map_range(
+                mmio_leaves,
+                bridge,
+                bridge + FRAME_SIZE,
+                READ | WRITE | DIRTY,
+            );
+        }
         kernel_middle.words_mut()[vpn_index(text, 1)] =
             pte(kernel_leaves.physical_address(), VALID);
 
@@ -70,7 +86,7 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
             uart,
             user_code,
             kernel_middle: kernel_middle.physical_address(),
-            uart_leaves: uart_leaves.physical_address(),
+            mmio_leaves: mmio_leaves.physical_address(),
         })
     }
 
@@ -85,8 +101,8 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
         let user_leaves = frames.allocate_zeroed()?;
         let stack_frame = frames.allocate_zeroed()?;
 
-        // The user image and stack share a leaf table. The UART uses a separate
-        // leaf table under the same low root entry on QEMU virt.
+        // The user image and stack share a leaf table. MMIO uses a separate
+        // supervisor leaf table under the same low root entry on QEMU virt.
         let entries = user_leaves.words_mut();
         let mut stack_base = MIN_USER_STACK_BASE;
         for (index, page) in user_code.into_iter().enumerate() {
@@ -102,7 +118,7 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
             VALID | ACCESSED | READ | WRITE | DIRTY | USER,
         );
 
-        low_middle.words_mut()[vpn_index(self.uart, 1)] = pte(self.uart_leaves, VALID);
+        low_middle.words_mut()[vpn_index(self.uart, 1)] = pte(self.mmio_leaves, VALID);
         low_middle.words_mut()[vpn_index(USER_TEXT_BASE, 1)] =
             pte(user_leaves.physical_address(), VALID);
         root.words_mut()[vpn_index(self.text, 2)] = pte(self.kernel_middle, VALID);

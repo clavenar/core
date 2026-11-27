@@ -5,6 +5,7 @@ with a fresh boot unless it explicitly continues the previous one. RamFS and
 goal handles live for one boot. [Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)
 
 - [Boot and shell](#boot-and-shell)
+  - [Probe the QEMU host bridge](#probe-the-qemu-host-bridge)
 - [Goals and file grants](#goals-and-file-grants)
 - [Requests, replies and file streams](#requests-replies-and-file-streams)
 - [Delegation and read limits](#delegation-and-read-limits)
@@ -52,7 +53,7 @@ its own Sv39 root and 4 KiB read/write, non-executable stack.
 The stack starts at `0x00402000` for one- and two-page images and immediately
 after the image for larger programs. The initial stack pointer is at the
 top of that page. Nonempty syscall buffers must fit within the calling
-task's stack. The kernel and UART mappings are
+task's stack. The kernel, UART and optional host bridge MMIO mappings are
 shared in supervisor mode. The 91-frame boot pool has room for four full-size
 images, six task stacks and the page tables. The pool, kernel and 64 KiB
 supervisor stack fit within one aligned 2 MiB physical region.
@@ -60,6 +61,66 @@ supervisor stack fit within one aligned 2 MiB physical region.
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
 starts a fresh quantum when the timer fires or a stopped task is replaced.
+
+### Probe the QEMU host bridge
+
+Run this from an interactive terminal in the Core repository after building
+the kernel. The Python 3 fixture creates a private Unix socket and launches
+QEMU with a single modern VirtIO console port. The UART carries `clsh>`.
+The boot probe exchanges four-byte `PING` and `PONG` messages after Sv39
+activation, with a 500 ms deadline. It resets the device before starting the
+first user task. [VirtIO MMIO and console specification](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)
+
+```sh
+python3 - PONG <<'PY'
+import socket
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+
+reply = sys.argv[1].encode("ascii")
+with TemporaryDirectory(prefix="clavenar-bridge-") as directory:
+    path = f"{directory}/bridge.sock"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.settimeout(5)
+        listener.bind(path)
+        listener.listen(1)
+        with open("/dev/tty", "rb") as terminal:
+            guest = subprocess.Popen([
+                "qemu-system-riscv64", "-machine", "virt", "-accel", "tcg",
+                "-m", "128M", "-smp", "1", "-bios", "default", "-nographic",
+                "-nic", "none", "-kernel",
+                "target/riscv64gc-unknown-none-elf/release/clavenar-kernel",
+                "-global", "virtio-mmio.force-legacy=off",
+                "-chardev", f"socket,id=bridge,path={path},server=off",
+                "-device", "virtio-serial-device,max_ports=1",
+                "-device", "virtconsole,chardev=bridge,nr=0",
+            ], stdin=terminal)
+        try:
+            peer, _ = listener.accept()
+            with peer, peer.makefile("rb") as wire:
+                peer.settimeout(5)
+                if wire.read(4) != b"PING":
+                    raise RuntimeError("expected PING from the guest")
+                if reply:
+                    peer.sendall(reply)
+                raise SystemExit(guest.wait())
+        finally:
+            if guest.poll() is None:
+                guest.terminate()
+                guest.wait()
+PY
+```
+
+Look for `host bridge ready` between `Sv39 paging enabled` and `clsh>`.
+At the prompt, run the local MCP example and confirm it returns
+`Hello from RamFS`. Press `Ctrl+a`, then `x`, to exit QEMU.
+[Local MCP example](#invoke-a-registered-file-tool-over-mcp)
+
+Rerun with `python3 - '' <<'PY'` to leave the host peer silent. The kernel
+prints `host bridge timed out` and continues to the shell. Use `PONX` as
+the reply to see `host bridge invalid reply`. The standard boot command
+skips the optional probe.
 
 ### Launch a child and collect its result
 

@@ -15,6 +15,7 @@ use arch::riscv64::{idle, trap};
 use console::write_hex;
 use core::panic::PanicInfo;
 use drivers::uart;
+use drivers::virtio::console::{Console, ProbeError};
 use memory::frame::FrameAllocator;
 use memory::sv39;
 use memory::user_image;
@@ -32,13 +33,20 @@ extern "C" fn kernel_main() -> ! {
     );
     uart::write(banner.as_bytes());
 
+    // SAFETY: QEMU virt supplies the MMIO windows, and paging is still disabled.
+    let bridge = unsafe { Console::discover() };
     // SAFETY: The single boot hart claims the frame pool here once.
     let mut frames = unsafe { FrameAllocator::from_boot_pool() };
     let images = programs::BOOT_IMAGES
         .map(|(name, image)| load_user_program(&mut frames, name.as_bytes(), image));
     let pages = images.each_ref().map(|image| image.pages);
-    let mappings = sv39::BootMappings::new(&mut frames, pages, uart::BASE)
-        .expect("boot frame pool cannot hold supervisor mappings");
+    let mappings = sv39::BootMappings::new(
+        &mut frames,
+        pages,
+        uart::BASE,
+        bridge.as_ref().map(Console::base),
+    )
+    .expect("could not build supervisor mappings");
     let tasks = core::array::from_fn(|task| {
         let image = programs::task_image_index(task);
         (
@@ -48,8 +56,20 @@ extern "C" fn kernel_main() -> ! {
             images[image].entry,
         )
     });
+    let probe_bridge = || {
+        if let Some(bridge) = bridge {
+            // SAFETY: This runs on the boot hart with the selected MMIO page mapped.
+            let message: &[u8] = match unsafe { bridge.probe() } {
+                Ok(()) => b"host bridge ready\r\n",
+                Err(ProbeError::Device) => b"host bridge unavailable\r\n",
+                Err(ProbeError::InvalidReply) => b"host bridge invalid reply\r\n",
+                Err(ProbeError::Timeout) => b"host bridge timed out\r\n",
+            };
+            uart::write(message);
+        }
+    };
     // SAFETY: The boot hart installed the trap vector and built every task's address space.
-    unsafe { trap::start(tasks) }
+    unsafe { trap::start(tasks, probe_bridge) }
 }
 
 fn load_user_program<'a>(
