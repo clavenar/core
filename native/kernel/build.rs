@@ -1,6 +1,7 @@
 #[path = "build/definition.rs"]
 mod definition;
 
+use clv_abi::USER_IMAGE_MAX_BYTES;
 use clv_abi::agent::{FIND_GREETING_V1, FIND_GREETING_V2, SHA256_BYTES};
 use clv_abi::tool::FILE_TOOLS;
 use sha2::{Digest, Sha256};
@@ -74,6 +75,9 @@ fn build_program(source: &Path, linker_script: &Path, output: &Path, name: &str)
             "-Clink-arg=--no-relax",
             "-Clink-arg=--strip-all",
         ])
+        .arg(format!(
+            "-Clink-arg=--defsym=USER_IMAGE_MAX_BYTES={USER_IMAGE_MAX_BYTES}"
+        ))
         .arg(format!("-Clink-arg=-T{}", linker_script.display()))
         .arg(source)
         .arg("-o")

@@ -186,6 +186,9 @@ pub const PIPE_CAPACITY: usize = 32;
 pub const FILE_REPLY_OK: u8 = 0;
 pub const FILE_REPLY_ERROR: u8 = 1;
 
+/// Maximum `p_memsz` of the read/execute segment in an RV64 boot user ELF.
+pub const USER_IMAGE_MAX_BYTES: usize = 64 * 1024;
+
 pub const PROGRAM_HELLO: usize = Program::Hello as usize;
 pub const PROGRAM_ECHO: usize = Program::Echo as usize;
 

@@ -1,8 +1,9 @@
+use clv_abi::USER_IMAGE_MAX_BYTES;
+
 use super::frame::{FRAME_SIZE, Frame, FrameAllocator};
 
 pub(crate) const USER_TEXT_BASE: usize = 0x0040_0000;
-pub(super) const MAX_USER_IMAGE_PAGES: usize = 7;
-const MAX_USER_IMAGE_SIZE: usize = MAX_USER_IMAGE_PAGES * FRAME_SIZE;
+pub(super) const MAX_USER_IMAGE_PAGES: usize = USER_IMAGE_MAX_BYTES.div_ceil(FRAME_SIZE);
 
 const ELF_HEADER_SIZE: usize = 64;
 const PROGRAM_HEADER_SIZE: usize = 56;
@@ -76,7 +77,7 @@ fn load_segment<'a>(image: &'a [u8], header: &[u8]) -> Option<(&'a [u8], usize)>
         || offset % FRAME_SIZE != 0
         || file_size == 0
         || file_size > memory_size
-        || memory_size > MAX_USER_IMAGE_SIZE
+        || memory_size > USER_IMAGE_MAX_BYTES
     {
         return None;
     }

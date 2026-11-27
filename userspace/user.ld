@@ -2,7 +2,8 @@ ENTRY(_start)
 
 MEMORY
 {
-    user_image : ORIGIN = 0x00400000, LENGTH = 28K
+    /* The kernel build passes the boot ABI limit to the linker. */
+    user_image : ORIGIN = 0x00400000, LENGTH = USER_IMAGE_MAX_BYTES
 }
 
 PHDRS

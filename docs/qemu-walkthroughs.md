@@ -30,11 +30,13 @@ build, shell and kernel use that registry for names and stable launch
 selectors. A versioned file tool maps an exact tool ID to one of those
 programs. [Program registry](../crates/clv-abi/src/program.rs) · [File tool registry](../crates/clv-abi/src/tool.rs)
 The loader accepts static, little-endian ELF64 executables with one
-read/execute segment of at most 28 KiB at `0x00400000`. The loader allocates
-one to seven pages based on the segment's memory size (`p_memsz`) and zero-fills
-any bytes beyond the file data. Boot reports each program's validated entry
-address. If loading fails, it prints `User ELF load failed` with the program
-name and idles.
+read/execute segment of at most 64 KiB at `0x00400000`. The kernel build
+supplies this limit from `clv-abi`. When linking a program directly with
+`userspace/user.ld`, pass `--defsym=USER_IMAGE_MAX_BYTES=65536` to the linker.
+The loader allocates one to sixteen pages based on the segment's memory size
+(`p_memsz`) and zero-fills any bytes beyond the file data. Boot reports each
+program's validated entry address. If loading fails, it prints
+`User ELF load failed` with the program name and idles.
 
 The kernel activates paging, prints `Sv39 paging enabled`, and starts hello
 as task 1 and the shell as task 2. Tasks 3 and 4 start on the first launch of
@@ -44,8 +46,9 @@ read/write, non-executable stack. It starts at `0x00402000` for one- and
 two-page images and immediately after the image for larger programs. The
 initial stack pointer is at the top of that page. Nonempty syscall buffers
 must fit within the calling task's stack. The kernel and UART mappings are
-shared in supervisor mode. The kernel, 48 KiB supervisor stack, and 47-frame
-boot pool fit within one aligned 2 MiB physical region.
+shared in supervisor mode. The 83-frame boot pool has room for four full-size
+images, their stacks and the page tables. The pool, kernel and 48 KiB
+supervisor stack fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
