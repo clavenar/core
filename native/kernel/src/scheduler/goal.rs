@@ -10,12 +10,12 @@ use self::reads::GoalReads;
 use self::rename::PendingRenames;
 use clv_abi::agent::{
     AgentStatus, ControlResult, DefinitionPin, EncodedDefinitionPin, FIND_GREETING_V5,
-    ResumeReceipt,
+    FIND_GREETING_V6, ResumeReceipt,
 };
 use clv_abi::audit::{
     EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationOutcome, ReplyRecord,
 };
-use clv_abi::bridge::PlanFailure;
+use clv_abi::bridge::{HostPlan, PlanFailure};
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CreateOptions, CreatePolicy, DiscardResult,
@@ -471,17 +471,25 @@ impl Scheduler {
         self.live_agent_member(child)
     }
 
-    fn host_plan_owner(&self) -> Option<(usize, GoalDeadline)> {
+    fn host_plan_owner(&self) -> Option<(usize, GoalDeadline, HostPlan)> {
         let (goal, member, binding) = self.current_agent_member()?;
         let pin = DefinitionPin::decode(binding.definition?)?;
-        (pin.id == FIND_GREETING_V5).then_some((member.handle, goal.deadline))
+        let plan = match pin.id {
+            FIND_GREETING_V5 => HostPlan::MockGreeting,
+            FIND_GREETING_V6 => HostPlan::ModelGreeting,
+            _ => return None,
+        };
+        Some((member.handle, goal.deadline, plan))
     }
 
     pub(crate) fn submit_host_plan(&mut self) -> Result<usize, PlanFailure> {
-        const PLAN_TIMEOUT_NS: u64 = 2_000_000_000;
-
-        let (launch, goal_deadline) = self.host_plan_owner().ok_or(PlanFailure::Unavailable)?;
-        let limit = monotonic_nanos().saturating_add(PLAN_TIMEOUT_NS);
+        let (launch, goal_deadline, plan) =
+            self.host_plan_owner().ok_or(PlanFailure::Unavailable)?;
+        let timeout_ns = match plan {
+            HostPlan::MockGreeting => 2_000_000_000,
+            HostPlan::ModelGreeting => 30_000_000_000,
+        };
+        let limit = monotonic_nanos().saturating_add(timeout_ns);
         let deadline = match goal_deadline {
             GoalDeadline::Unlimited => limit,
             GoalDeadline::At(at) => limit.min(at),
@@ -490,14 +498,14 @@ impl Scheduler {
         self.host_bridge
             .as_mut()
             .ok_or(PlanFailure::Unavailable)?
-            .submit(launch, FIND_GREETING_V5.intent, deadline)
+            .submit(launch, plan, deadline)
     }
 
     pub(crate) fn poll_host_plan(
         &mut self,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Result<usize, PlanFailure> {
-        let (launch, _) = self.host_plan_owner().ok_or(PlanFailure::Unavailable)?;
+        let (launch, _, _) = self.host_plan_owner().ok_or(PlanFailure::Unavailable)?;
         self.host_bridge
             .as_mut()
             .ok_or(PlanFailure::Unavailable)?

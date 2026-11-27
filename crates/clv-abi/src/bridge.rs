@@ -1,6 +1,4 @@
-//! Bounded guest-host records and the mock planner's syscall results.
-
-use crate::agent::PlanIntent;
+//! Bounded guest-host records and planner results.
 
 pub const SUBMIT_PLAN: usize = 0;
 pub const POLL_PLAN: usize = 1;
@@ -14,6 +12,15 @@ const PLAN_REQUEST: u8 = 1;
 const PLAN_REPLY: u8 = 2;
 pub const BUDGET_EXHAUSTED: u8 = 0;
 pub const SEARCH_GREETING: u8 = 1;
+pub const SKIP: u8 = 3;
+pub const MODEL_UNAVAILABLE: u8 = 4;
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum HostPlan {
+    MockGreeting = 1,
+    ModelGreeting = 2,
+}
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
@@ -22,6 +29,8 @@ pub enum PlanFailure {
     TimedOut = 2,
     InvalidReply = 3,
     BudgetExhausted = 4,
+    Skipped = 5,
+    ModelUnavailable = 6,
 }
 
 impl PlanFailure {
@@ -31,16 +40,18 @@ impl PlanFailure {
             2 => Some(Self::TimedOut),
             3 => Some(Self::InvalidReply),
             4 => Some(Self::BudgetExhausted),
+            5 => Some(Self::Skipped),
+            6 => Some(Self::ModelUnavailable),
             _ => None,
         }
     }
 }
 
-pub fn plan_request(request_id: u64, intent: PlanIntent) -> [u8; PLAN_FRAME_BYTES] {
+pub fn plan_request(request_id: u64, plan: HostPlan) -> [u8; PLAN_FRAME_BYTES] {
     let mut frame = [0; PLAN_FRAME_BYTES];
     frame[..3].copy_from_slice(&[PLAN_FRAME_BYTES as u8, VERSION, PLAN_REQUEST]);
     frame[3..HEADER_BYTES].copy_from_slice(&request_id.to_le_bytes());
-    frame[HEADER_BYTES] = intent as u8;
+    frame[HEADER_BYTES] = plan as u8;
     frame
 }
 

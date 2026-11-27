@@ -106,6 +106,7 @@ entries! {
             "Start an agent. Requests below apply to hello",
         "  --stage-rename <new-name>" => "Stage in grant order (repeat for two files)",
         "  --mock find-greeting[@REV]" => "Run revision 1 (default), 2, 3 (stdio), 4 (MCP) or 5 (host)",
+        "  --plan find-greeting@6" => "Use the host model to choose the pinned search",
         "  --delegate --with-file --reply-bytes N grep -F <pattern>" =>
             "Ask grep to search the file",
     },

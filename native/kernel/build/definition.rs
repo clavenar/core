@@ -1,7 +1,8 @@
 use clv_abi::Program;
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, DefinitionId, DefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2,
-    FIND_GREETING_V3, FIND_GREETING_V4, FIND_GREETING_V5, FileDelegation, FileToolInvocation,
+    FIND_GREETING_V3, FIND_GREETING_V4, FIND_GREETING_V5, FIND_GREETING_V6, FileDelegation,
+    FileToolInvocation,
 };
 use clv_abi::tool::FileTool;
 use serde::Deserialize;
@@ -16,6 +17,8 @@ struct Definition {
     agent: String,
     #[serde(default)]
     host_mock: bool,
+    #[serde(default)]
+    host_model: bool,
     delegate_with_file: Delegation,
 }
 
@@ -41,14 +44,18 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
     assert_eq!(definition.name, id.intent.name());
     assert_eq!(definition.revision, id.revision);
     assert_eq!(definition.agent, id.intent.program().name());
-    assert_eq!(definition.host_mock, id == FIND_GREETING_V5);
+    assert_eq!(
+        (definition.host_mock, definition.host_model),
+        (id == FIND_GREETING_V5, id == FIND_GREETING_V6),
+        "wrong planner for {stem}"
+    );
 
     let step = definition.delegate_with_file;
     assert_eq!(
         (step.stdio, step.mcp),
         (
             id == FIND_GREETING_V3,
-            matches!(id, FIND_GREETING_V4 | FIND_GREETING_V5)
+            matches!(id, FIND_GREETING_V4 | FIND_GREETING_V5 | FIND_GREETING_V6)
         ),
         "wrong transport for {stem}"
     );
@@ -63,7 +70,8 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
         }
         .encode(&mut buffer),
         (
-            FIND_GREETING_V2 | FIND_GREETING_V3 | FIND_GREETING_V4 | FIND_GREETING_V5,
+            FIND_GREETING_V2 | FIND_GREETING_V3 | FIND_GREETING_V4 | FIND_GREETING_V5
+            | FIND_GREETING_V6,
             None,
             Some(name),
         ) => FileToolInvocation {

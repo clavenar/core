@@ -1,5 +1,6 @@
-use clv_abi::agent::PlanIntent;
-use clv_abi::bridge::{HEADER_BYTES, MAX_FRAME_BYTES, PlanFailure, plan_request, request_id};
+use clv_abi::bridge::{
+    HEADER_BYTES, HostPlan, MAX_FRAME_BYTES, PlanFailure, plan_request, request_id,
+};
 
 use crate::arch::monotonic_nanos;
 use crate::drivers::virtio::console::Port;
@@ -35,7 +36,7 @@ impl HostBridge {
     pub(crate) fn submit(
         &mut self,
         launch: usize,
-        intent: PlanIntent,
+        plan: HostPlan,
         deadline: u64,
     ) -> Result<usize, PlanFailure> {
         if self.failed || self.exchange.is_some() || launch <= self.last_launch {
@@ -44,7 +45,7 @@ impl HostBridge {
         if monotonic_nanos() >= deadline {
             return Err(PlanFailure::TimedOut);
         }
-        let frame = plan_request(launch as u64, intent);
+        let frame = plan_request(launch as u64, plan);
         if !self
             .port
             .try_send(&frame)

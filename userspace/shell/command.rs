@@ -83,5 +83,6 @@ keywords!(GoalFlag {
     Argument => "--argument",
     Delegate => "--delegate",
     Mock => "--mock",
+    Plan => "--plan",
     StageRename => "--stage-rename",
 });

@@ -123,20 +123,27 @@ fn run_plan(kind: RequestKind, bytes: &[u8]) -> usize {
             };
             supervise_stdio_tool(&request)
         }
-        Some(id @ (agent::FIND_GREETING_V4 | agent::FIND_GREETING_V5)) => {
-            let host = id == agent::FIND_GREETING_V5;
-            let action: &[u8] = if host {
-                include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v5.action"))
-            } else {
-                include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v4.action"))
+        Some(
+            id @ (agent::FIND_GREETING_V4 | agent::FIND_GREETING_V5 | agent::FIND_GREETING_V6),
+        ) => {
+            let action: &[u8] = match id {
+                agent::FIND_GREETING_V4 => {
+                    include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v4.action"))
+                }
+                agent::FIND_GREETING_V5 => {
+                    include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v5.action"))
+                }
+                _ => include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v6.action")),
             };
             let Some(request) = agent::FileToolInvocation::decode(action) else {
                 return delegation_failed();
             };
-            if host {
+            if id != agent::FIND_GREETING_V4 {
                 let failure = match bridge::plan_action() {
                     Ok(bridge::SEARCH_GREETING) => return mcp_client::run(&request),
                     Ok(bridge::BUDGET_EXHAUSTED) => bridge::PlanFailure::BudgetExhausted,
+                    Ok(bridge::SKIP) => bridge::PlanFailure::Skipped,
+                    Ok(bridge::MODEL_UNAVAILABLE) => bridge::PlanFailure::ModelUnavailable,
                     Ok(_) => bridge::PlanFailure::InvalidReply,
                     Err(reason) => reason,
                 };

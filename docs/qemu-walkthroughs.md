@@ -11,6 +11,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
 - [Delegation and read limits](#delegation-and-read-limits)
 - [Mock planning and registered tools](#mock-planning-and-registered-tools)
   - [Run a host-backed mock plan](#run-a-host-backed-mock-plan)
+  - [Run a model-backed plan](#run-a-model-backed-plan)
 - [Reviewed renames](#reviewed-renames)
   - [Review a staged rename through echo](#review-a-staged-rename-through-echo)
   - [Require a supervisor review before commit](#require-a-supervisor-review-before-commit)
@@ -1089,7 +1090,7 @@ completion or cancellation, until the owner closes the goal. [Definition source]
 ```text
 goal create --children 2 --allow-helper grep --read-bytes 18 --reply-bytes 36
 goal grant-file --delegate-to grep --argument Hello /hello.txt
-agent run hello --mock find-greeting@6
+agent run hello --mock find-greeting@7
 goal status
 goal budget
 agent run --suspended hello --mock find-greeting@1
@@ -1102,7 +1103,7 @@ goal audit
 goal close
 ```
 
-Revision 6 prints `cannot start agent`. The goal remains `Ready` with
+Revision 7 prints `cannot start agent`. The goal remains `Ready` with
 `available=36 reserved=0 spent=0`. Revision 1 starts in the same goal.
 Both status snapshots show `definition=find-greeting@1 sha256=` followed
 by the same 64 hex digits. Compare those digits on the build host with
@@ -1293,6 +1294,75 @@ cancel while the request is pending. Then `wait hello` prints
 `hello cancelled` and the delegation and read histories are empty. The
 journal keeps the operation `in_flight` with its two host units reserved.
 A replay of an `in_flight` request leaves that reservation in place.
+
+### Run a model-backed plan
+
+Start local-only Ollama on the host and download the model. Then run the
+broker from `core` in a host terminal. The broker contacts Ollama on
+loopback and sends the fixed greeting task and a two-action JSON schema.
+The pinned guest definition supplies the tool and pattern. The goal grant
+supplies the file.
+[Local model setup](../README.md#use-a-local-ollama-model) · [Ollama structured outputs](https://docs.ollama.com/capabilities/structured-outputs) · [Revision 6 definition](../userspace/hello/definitions/find-greeting-v6.toml)
+
+```sh
+bridge_journal="$(mktemp -d)/host-bridge.sqlite3"
+python3 platforms/qemu-riscv64-virt/host_bridge.py \
+  --journal "$bridge_journal" --mode ollama \
+  --ollama-model qwen2.5:0.5b --budget-tokens 2080
+```
+
+Enter these commands at `clsh>`.
+
+```text
+goal create --children 2 --allow-tool text.search@1 --read-bytes 18 --reply-bytes 1042
+goal grant-file --delegate-to grep --argument Hello /hello.txt
+agent run hello --plan find-greeting@6
+wait hello
+recv hello
+agent status
+goal audit
+goal audit --reads
+goal budget
+goal close
+```
+
+When the model chooses `search`, `recv hello` prints `Hello from RamFS`
+and the audit shows `read_bytes=18`. A `skip` decision prints
+`host plan skipped the search` with zero file reads. The guest waits at most
+30 seconds or until the goal deadline, whichever comes first.
+
+The broker reserves 2,080 tokens before dispatch, using a 2,048-token context
+and a 32-token generation limit. It settles the prompt and generation counts
+reported by Ollama. Run a second goal in the same VM to see
+`host plan budget exhausted` after the first has used some of its allowance.
+An invalid decision or exhausted host budget leaves `read_bytes=0`. When
+usage is unknown, the journal keeps the reservation `in_flight`.
+[Model limits](https://docs.ollama.com/modelfile#valid-parameters-and-values) · [Chat response fields](https://docs.ollama.com/api/chat)
+
+Quit QEMU with `Ctrl+a`, then `x`. From the same host terminal, inspect the
+reserved and settled token counts in the journal.
+
+```sh
+python3 - "$bridge_journal" <<'PY'
+from contextlib import closing
+from pathlib import Path
+import sqlite3
+import sys
+
+path = Path(sys.argv[1]).resolve().as_uri()
+with closing(sqlite3.connect(path + "?mode=ro", uri=True)) as journal:
+    print("model request state max_tokens used_tokens prompt_tokens generation_tokens")
+    for row in journal.execute("""
+        SELECT model, request_id, state, max_units, used_units,
+               prompt_tokens, generation_tokens
+        FROM requests
+        JOIN model_sessions USING (session_id)
+        LEFT JOIN token_usage USING (session_id, request_id)
+        ORDER BY session_id, request_id
+    """):
+        print(*row)
+PY
+```
 
 ### Require an exact tool revision for a goal
 

@@ -408,7 +408,13 @@ fn agent_run_args(
             GoalFlag::Delegate => {
                 agent::RunRequest::DelegateWithFile(Helper::parse(args)?.file_request()?)
             }
-            GoalFlag::Mock => agent::RunRequest::Definition(mock_definition(args)?),
+            option @ (GoalFlag::Mock | GoalFlag::Plan) => {
+                let definition = greeting_definition(args)?;
+                if matches!(option, GoalFlag::Plan) != (definition == agent::FIND_GREETING_V6) {
+                    return None;
+                }
+                agent::RunRequest::Definition(definition)
+            }
             GoalFlag::StageRename => {
                 let (first, rest) = split_literal(args)?;
                 if rest.is_empty() {
@@ -430,7 +436,7 @@ fn agent_run_args(
     Some((options, program, request))
 }
 
-fn mock_definition(name: &[u8]) -> Option<agent::DefinitionId> {
+fn greeting_definition(name: &[u8]) -> Option<agent::DefinitionId> {
     let default = agent::FIND_GREETING_V1;
     let suffix = name.strip_prefix(default.intent.name().as_bytes())?;
     let revision = match suffix {
@@ -535,6 +541,8 @@ fn display_reply(kind: ReplyKind, bytes: &[u8]) {
                 Some(PlanFailure::Unavailable) => b"host bridge unavailable\r\n",
                 Some(PlanFailure::TimedOut) => b"host plan timed out\r\n",
                 Some(PlanFailure::BudgetExhausted) => b"host plan budget exhausted\r\n",
+                Some(PlanFailure::Skipped) => b"host plan skipped the search\r\n",
+                Some(PlanFailure::ModelUnavailable) => b"host model unavailable\r\n",
                 Some(PlanFailure::InvalidReply) | None => b"invalid host plan reply\r\n",
             });
         }

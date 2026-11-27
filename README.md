@@ -47,6 +47,29 @@ The broker gives this VM a two-unit mock allowance and stores its
 reservations and replies in `target/host-bridge.sqlite3`.
 [Run two goals against the host allowance](docs/qemu-walkthroughs.md#run-a-host-backed-mock-plan)
 
+### Use a local Ollama model
+
+Install Ollama on the Linux host. In a host terminal, start its loopback
+server with cloud features disabled. The broker checks this through
+`/api/status`. This setup was verified with Ollama 0.40.18.
+[Ollama Linux setup](https://docs.ollama.com/linux) · [Local-only settings](https://docs.ollama.com/faq#how-do-i-disable-ollamas-cloud-features)
+
+```sh
+OLLAMA_NO_CLOUD=1 ollama serve
+```
+
+In a second host terminal in `core`, download the model and start the broker.
+
+```sh
+ollama pull qwen2.5:0.5b
+python3 platforms/qemu-riscv64-virt/host_bridge.py \
+  --mode ollama --ollama-model qwen2.5:0.5b --budget-tokens 2080
+```
+
+For a loopback server on another port, pass `--ollama-port` to the broker.
+At `clsh>`, use revision 6 to request the model decision.
+[Run a model-backed plan](docs/qemu-walkthroughs.md#run-a-model-backed-plan)
+
 ## Limit file reads to a directory
 
 At a fresh `clsh>` prompt, give `hello` a file that the shell can read but

@@ -1,7 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.61 adds a distinct budget-exhausted reply for the host-backed mock planner.
+Kernel 0.0.62 adds a pinned plan that requests a local model decision from the host.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -347,12 +347,13 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 
 ### Host plan requests
 
-Call 76 accepts the live agent launch pinned to `find-greeting@5`. A
-successful submit produces one request for that launch using the intent from
-its pin. The boot-unique launch handle serves as the request ID. There is
-one exchange at a time. Both operations return without waiting for the host.
-The exchange expires two seconds after submission or at the goal deadline,
-whichever comes first. Stopping the launch releases the exchange.
+Call 76 accepts live agent launches pinned to `find-greeting@5` or
+`find-greeting@6`. A successful submit produces one request for that launch
+using the selector from its pin. The boot-unique launch handle serves as the
+request ID. There is one exchange at a time. Both operations return without
+waiting for the host. Revision 5 has a two-second exchange deadline and
+revision 6 has a 30-second deadline. An earlier goal deadline takes priority.
+Stopping the launch releases the exchange.
 
 The optional VirtIO console carries the following byte stream after the
 boot probe. Each frame starts with its total length in bytes.
@@ -365,8 +366,11 @@ boot probe. Each frame starts with its total length in bytes.
 | 3–10 | Request ID as a little-endian 64-bit integer |
 | 11 | Selector for version 1 plan frames, which are 12 bytes long |
 
-The plan request uses selector 1 for `find-greeting`. In a reply, selector 1
-chooses the pinned search and selector 0 reports host budget exhaustion.
+Plan requests use selector 1 for revision 5 and selector 2 for revision 6.
+The host broker handles the selector for its configured planner.
+In a reply, selector 1 chooses the pinned search, selector 0 reports host
+budget exhaustion, selector 2 reports an invalid decision, selector 3
+skips the search and selector 4 reports an unavailable model.
 The kernel assembles frames across reads, discards
 complete frames addressed to another launch and retires the port for plan
 requests if a length falls outside the frame bounds. The guest client checks
@@ -375,9 +379,10 @@ to invoke the existing registered file tool.
 
 Failure codes in `a1` are 1 for unavailable or denied, 2 for timeout and 3
 for an invalid reply. The agent uses the same codes in a `HostPlanFailed`
-reply and uses code 4 for host budget exhaustion. The typed failure reply
-spends one byte of the agent's reply allowance.
-[QEMU walkthrough](qemu-walkthroughs.md#run-a-host-backed-mock-plan)
+reply, code 4 for host budget exhaustion, code 5 for a skipped search and
+code 6 for an unavailable model. The typed reply spends one byte of the
+agent's reply allowance.
+[Mock planner walkthrough](qemu-walkthroughs.md#run-a-host-backed-mock-plan) · [Model planner walkthrough](qemu-walkthroughs.md#run-a-model-backed-plan)
 
 ### Goal creation
 
@@ -664,7 +669,7 @@ request format.
 | --- | --- | --- |
 | All clear | `DelegateWithFile` (tag 4) | Two little-endian RV64 words for the helper selector and its reply allowance, followed by 0–64 literal argument bytes |
 | Bit 2 only | `PlanIntent` (tag 5) | One intent byte. Intent 1 for `hello` pins `find-greeting@1`. Other legacy intents retain their original delivery behavior. |
-| Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. Intent 1 with revision 1–5 selects the corresponding `find-greeting` definition for `hello`. |
+| Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. Intent 1 with revision 1–6 selects the corresponding `find-greeting` definition for `hello`. |
 | Bit 4 only | `StageRename` (tag 7) | 1–64 bytes for the proposed basename. `hello` presents the name and its startup file descriptor to call 64. |
 | Bit 5 only | `StageRenamePair` (tag 11) | One byte with the first basename's length, followed by both basenames in grant order. Each basename is 1–64 bytes. The request length determines the second length. |
 
