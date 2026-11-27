@@ -123,9 +123,8 @@ impl Goal {
         requested_tool: Option<ToolId>,
     ) -> Result<Program, DelegationDenial> {
         let program = Program::from_raw(selector).ok_or(DelegationDenial::UnknownProgram)?;
-        if self
-            .allowed_tool
-            .is_some_and(|allowed| Some(allowed) != requested_tool)
+        if self.allowed_tools[0].is_some()
+            && (requested_tool.is_none() || !self.allowed_tools.contains(&requested_tool))
         {
             return Err(DelegationDenial::ToolNotAllowed);
         }

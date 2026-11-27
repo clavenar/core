@@ -383,11 +383,11 @@ impl CreateOptions {
     }
 }
 
-/// Policy encoded in the six words following the goal creation request's version.
+/// Goal creation policy. The second tool ID follows the file and timeout fields.
 pub struct CreatePolicy {
     pub options: CreateOptions,
     pub read_limits: ReadLimits,
-    pub allowed_tool: Option<ToolId>,
+    pub allowed_tools: [Option<ToolId>; 2],
     /// Only the bound echo supervisor can approve publication of a rename.
     pub require_rename_review: bool,
     pub rename_limit: usize,
@@ -398,9 +398,14 @@ impl CreatePolicy {
     const ALLOW_TWO_RENAMES: usize = 1 << 6;
 
     pub fn registers(&self) -> Option<[usize; 6]> {
+        if let [first, Some(second)] = self.allowed_tools
+            && (first.is_none() || first == Some(second) || second.0 == 0)
+        {
+            return None;
+        }
         let mut words = self
             .options
-            .registers_with_allowed_tool(self.read_limits, self.allowed_tool)?;
+            .registers_with_allowed_tool(self.read_limits, self.allowed_tools[0])?;
         if self.require_rename_review {
             words[1] |= Self::REQUIRE_RENAME_REVIEW;
         }
@@ -412,7 +417,7 @@ impl CreatePolicy {
         Some(words)
     }
 
-    pub fn from_registers(mut words: [usize; 6]) -> Option<Self> {
+    pub fn from_registers(mut words: [usize; 6], second_tool: Option<ToolId>) -> Option<Self> {
         let require_rename_review = words[1] & Self::REQUIRE_RENAME_REVIEW != 0;
         let rename_limit = if words[1] & Self::ALLOW_TWO_RENAMES != 0 {
             MAX_GOAL_RENAMES
@@ -422,10 +427,13 @@ impl CreatePolicy {
         words[1] &= !(Self::REQUIRE_RENAME_REVIEW | Self::ALLOW_TWO_RENAMES);
         let (options, read_limits, allowed_tool) =
             CreateOptions::from_registers_with_allowed_tool(words)?;
+        if second_tool.is_some() && (allowed_tool.is_none() || allowed_tool == second_tool) {
+            return None;
+        }
         Some(Self {
             options,
             read_limits,
-            allowed_tool,
+            allowed_tools: [allowed_tool, second_tool],
             require_rename_review,
             rename_limit,
         })
@@ -434,8 +442,8 @@ impl CreatePolicy {
 
 const GOAL_CREATE_V1_WORDS: usize = 11;
 
-/// Version 2 appends an optional second preserved-file handle to the version 1 request.
-pub type EncodedGoalCreate = [[u8; 8]; GOAL_CREATE_V1_WORDS + 1];
+/// Version 3 adds a second exact tool ID to the version 2 request.
+pub type EncodedGoalCreate = [[u8; 8]; GOAL_CREATE_V1_WORDS + 2];
 
 pub struct GoalCreateRequest {
     pub policy: CreatePolicy,
@@ -444,7 +452,7 @@ pub struct GoalCreateRequest {
 }
 
 impl GoalCreateRequest {
-    const VERSION: u64 = 2;
+    const VERSION: u64 = 3;
 
     pub fn encode(&self) -> Option<EncodedGoalCreate> {
         let [first_file, second_file] = self.files.rename.preserve_files;
@@ -475,6 +483,7 @@ impl GoalCreateRequest {
                 first_file,
                 self.timeout_ms.unwrap_or(0) as u64,
                 second_file,
+                self.policy.allowed_tools[1].map_or(0, |tool| tool.0),
             ]
             .map(u64::to_le_bytes),
         )
@@ -491,13 +500,20 @@ impl GoalCreateRequest {
             timeout_ms,
         ] = prefix.map(u64::from_le_bytes);
         let handle = |word: u64| (word != NO_RAMFS_HANDLE as u64).then_some(word as usize);
-        let second_file = match (version, extra) {
-            (1, []) => None,
-            (Self::VERSION, [word]) => handle(u64::from_le_bytes(*word)),
+        let (second_file, second_tool) = match (version, extra) {
+            (1, []) => (None, None),
+            (2, [file]) => (handle(u64::from_le_bytes(*file)), None),
+            (Self::VERSION, [file, tool]) => {
+                let tool = u64::from_le_bytes(*tool);
+                (
+                    handle(u64::from_le_bytes(*file)),
+                    (tool != 0).then_some(ToolId(tool)),
+                )
+            }
             _ => return None,
         };
         Some(Self {
-            policy: CreatePolicy::from_registers(policy.map(|word| word as usize))?,
+            policy: CreatePolicy::from_registers(policy.map(|word| word as usize), second_tool)?,
             files: FileOptions {
                 read_directory: handle(read_directory),
                 rename: RenameOptions {

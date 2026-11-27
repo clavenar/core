@@ -79,6 +79,14 @@ to one call per VM. Revision 7 requires the goal's explicit
 server with the MCP Python SDK and shows the guest and journal commands.
 [Search a host MCP fixture](docs/qemu-walkthroughs.md#search-a-host-mcp-fixture)
 
+### Run Ollama and both MCP searches in one goal
+
+Start local-only Ollama and the host MCP fixture, then use `--mode combined`
+and `find-greeting@8`. Grant both exact tool revisions and a local file.
+The broker applies independent model token and host tool call allowances
+and records both requests under the same goal and agent launch.
+[Run the combined walkthrough](docs/qemu-walkthroughs.md#run-ollama-and-both-mcp-searches-in-one-goal)
+
 ## Limit file reads to a directory
 
 At a fresh `clsh>` prompt, give `hello` a file that the shell can read but

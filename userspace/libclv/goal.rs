@@ -132,7 +132,7 @@ pub fn create_with_timeout(
         CreatePolicy {
             options,
             read_limits: limits,
-            allowed_tool,
+            allowed_tools: [allowed_tool, None],
             require_rename_review: false,
             rename_limit: 1,
         },

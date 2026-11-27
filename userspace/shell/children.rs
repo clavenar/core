@@ -412,7 +412,7 @@ fn agent_run_args(
                 let definition = greeting_definition(args)?;
                 let live = matches!(
                     definition,
-                    agent::FIND_GREETING_V6 | agent::FIND_GREETING_V7
+                    agent::FIND_GREETING_V6 | agent::FIND_GREETING_V7 | agent::FIND_GREETING_V8
                 );
                 if matches!(option, GoalFlag::Plan) != live {
                     return None;
@@ -555,6 +555,7 @@ fn display_reply(kind: ReplyKind, bytes: &[u8]) {
                 (_, Some(BudgetExhausted)) => b"host plan budget exhausted\r\n",
                 (_, Some(Skipped)) => b"host plan skipped the search\r\n",
                 (_, Some(ModelUnavailable)) => b"host model unavailable\r\n",
+                (_, Some(ToolNotAllowed)) => b"plan tool grants required\r\n",
                 _ => b"invalid host plan reply\r\n",
             });
         }

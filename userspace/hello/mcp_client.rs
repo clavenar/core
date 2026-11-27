@@ -3,14 +3,16 @@ use clv::{ChildStatus, agent, pipe};
 use clv_abi::{MESSAGE_MAX_BYTES, ReplyKind};
 use core::fmt::{self, Write};
 
-pub(super) fn run(invocation: &agent::FileToolInvocation<'_>) -> usize {
+pub(super) fn search(
+    invocation: &agent::FileToolInvocation<'_>,
+    matches: &mut [u8; MESSAGE_MAX_BYTES],
+) -> Result<usize, ReplyKind> {
     let Some(helper) = agent::invoke_file_tool_mcp(agent::CURRENT_AGENT, invocation) else {
-        return super::delegation_failed();
+        return Err(ReplyKind::DelegationFailed);
     };
     let mut stream = Stdio::new(helper);
     let mut frame = [0; FRAME_BYTES];
-    let mut matches = [0; MESSAGE_MAX_BYTES];
-    let length = exchange(&mut stream, &mut frame, invocation.argument, &mut matches);
+    let length = exchange(&mut stream, &mut frame, invocation.argument, matches);
 
     // Close both endpoints on failure so neither side can wait for more traffic.
     let stdin_closed = pipe::close_stdin(helper);
@@ -19,13 +21,10 @@ pub(super) fn run(invocation: &agent::FileToolInvocation<'_>) -> usize {
     pipe::close(helper);
     let status = clv::wait(helper);
     if let (Some(length), true, Some(ChildStatus::Exited(0))) = (length, clean_eof, status) {
-        if clv::send_reply(ReplyKind::Matches, &matches[..length]) {
-            return usize::from(length == 0);
-        }
-        return 2;
+        Ok(length)
+    } else {
+        Err(ReplyKind::ReadFailed)
     }
-    clv::send_reply(ReplyKind::ReadFailed, &[]);
-    2
 }
 
 fn exchange(

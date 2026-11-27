@@ -3,7 +3,7 @@ use clv_abi::agent::{
     RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED, decode_rename_pair,
 };
 use clv_abi::audit::{DelegationDenial, PublicationAuditView, ReadAuditView};
-use clv_abi::bridge::{BridgeFailure, MAX_FRAME_BYTES, POLL, SUBMIT};
+use clv_abi::bridge::{BridgeFailure, MAX_FRAME_BYTES, POLL, SUBMIT, SUBMIT_TOOL};
 use clv_abi::goal::{
     EncodedGoalCreate, FileRecipient, GoalCreateRequest, RENAME_DIFF_HEADER_BYTES, ReviewToken,
 };
@@ -342,7 +342,9 @@ pub(crate) fn dispatch(
         }
         SYS_HOST_BRIDGE => {
             let result = match a0 {
-                SUBMIT if a1 == 0 && a2 == 0 => scheduler.submit_host_request(),
+                SUBMIT | SUBMIT_TOOL if a1 == 0 && a2 == 0 => {
+                    scheduler.submit_host_request(a0 == SUBMIT_TOOL)
+                }
                 POLL if a2 == MAX_FRAME_BYTES && stack.contains(a1, a2) => {
                     scheduler.poll_host_reply(|bytes| stack.copy_to_user(bytes, a1, a2))
                 }

@@ -66,7 +66,7 @@ entries! {
         "  --rename-limit 1|2" => "Allow up to two renames in one commit (default 1)",
         "  --require-rename-review echo" => "Require echo to review a rename before commit",
         "  --allow-helper <program> | --allow-tool <name@rev>" =>
-            "Allow one helper or one tool, e.g. text.search@1",
+            "Allow one helper or up to two exact tools (repeat --allow-tool)",
     },
     GrantFile {
         "goal grant-file [mode] <path>" => "Grant a read-only file. Choose at most one mode",
@@ -108,6 +108,7 @@ entries! {
         "  --mock find-greeting[@REV]" => "Run revision 1 (default), 2, 3 (stdio), 4 (MCP) or 5 (host)",
         "  --plan find-greeting@6" => "Use the host model to choose the pinned search",
         "  --plan find-greeting@7" => "Call host.text.search@1 with an explicit goal grant",
+        "  --plan find-greeting@8" => "Use the host model and both granted MCP searches",
         "  --delegate --with-file --reply-bytes N grep -F <pattern>" =>
             "Ask grep to search the file",
     },

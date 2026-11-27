@@ -10,18 +10,18 @@ use self::reads::GoalReads;
 use self::rename::PendingRenames;
 use clv_abi::agent::{
     AgentStatus, ControlResult, DefinitionPin, EncodedDefinitionPin, FIND_GREETING_V5,
-    FIND_GREETING_V6, FIND_GREETING_V7, ResumeReceipt,
+    FIND_GREETING_V6, FIND_GREETING_V7, FIND_GREETING_V8, ResumeReceipt,
 };
 use clv_abi::audit::{
     EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationOutcome, ReplyRecord,
 };
-use clv_abi::bridge::{BridgeFailure, HostRequest};
+use clv_abi::bridge::{BridgeFailure, HostRequest, SEARCH_GREETING, plan_action};
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CreateOptions, CreatePolicy, DiscardResult,
     FileOptions, GoalDeadline, GoalObservation, GoalStatus, MAX_CHILDREN, MAX_GOAL_RENAMES,
 };
-use clv_abi::tool::{HOST_TEXT_SEARCH_V1, ToolId};
+use clv_abi::tool::{HOST_TEXT_SEARCH_V1, TEXT_SEARCH_V1, ToolId};
 use clv_abi::{LaunchParent, Program, ReplyKind, RequestKind, TaskCompletion};
 
 use super::{AgentBinding, LaunchGrant, SHELL_TASK_INDEX, Scheduler, TaskState};
@@ -52,6 +52,15 @@ struct Member {
     role: MemberRole,
     replies: ReplyReservation,
     completion: Option<TaskCompletion>,
+    host_step: HostStep,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostStep {
+    Ready,
+    AwaitingDecision,
+    SearchApproved,
+    ToolSubmitted,
 }
 
 impl Member {
@@ -77,7 +86,7 @@ pub(super) struct Goal {
     handle: usize,
     options: CreateOptions,
     deadline: GoalDeadline,
-    allowed_tool: Option<ToolId>,
+    allowed_tools: [Option<ToolId>; 2],
     reads: GoalReads,
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
@@ -194,6 +203,7 @@ impl Goal {
             role,
             replies,
             completion: None,
+            host_step: HostStep::Ready,
         });
         if slot + 1 == self.options.child_limit {
             // Launch slots are never reused. Issued handles keep their own file references.
@@ -264,7 +274,7 @@ impl Scheduler {
         let CreatePolicy {
             options,
             read_limits,
-            allowed_tool,
+            allowed_tools,
             require_rename_review,
             rename_limit,
         } = policy;
@@ -275,10 +285,10 @@ impl Scheduler {
         {
             return None;
         }
-        if let Some(id) = allowed_tool
-            && id != HOST_TEXT_SEARCH_V1
-        {
-            crate::programs::file_tool(id)?;
+        for id in allowed_tools.into_iter().flatten() {
+            if id != HOST_TEXT_SEARCH_V1 {
+                crate::programs::file_tool(id)?;
+            }
         }
         let handle = self.next_handle;
         let next_handle = handle.checked_add(1)?;
@@ -297,7 +307,7 @@ impl Scheduler {
             handle,
             options,
             deadline,
-            allowed_tool,
+            allowed_tools,
             reads: GoalReads::new(read_limits, read_directory),
             members: [const { None }; MAX_CHILDREN],
             cancelled_before_launch: false,
@@ -473,7 +483,7 @@ impl Scheduler {
         self.live_agent_member(child)
     }
 
-    pub(crate) fn submit_host_request(&mut self) -> Result<usize, BridgeFailure> {
+    pub(crate) fn submit_host_request(&mut self, tool: bool) -> Result<usize, BridgeFailure> {
         let (goal, member, binding) = self
             .current_agent_member()
             .ok_or(BridgeFailure::Unavailable)?;
@@ -481,29 +491,72 @@ impl Scheduler {
             .definition
             .and_then(|definition| DefinitionPin::decode(definition))
             .ok_or(BridgeFailure::Unavailable)?;
-        let (request, timeout_ns) = match pin.id {
-            FIND_GREETING_V5 => (HostRequest::MockGreeting, 2_000_000_000),
-            FIND_GREETING_V6 => (HostRequest::ModelGreeting, 30_000_000_000),
-            FIND_GREETING_V7 if goal.allowed_tool == Some(HOST_TEXT_SEARCH_V1) => (
+        let launch = member.handle;
+        let combined = pin.id == FIND_GREETING_V8;
+        let host_granted = goal.allowed_tools.contains(&Some(HOST_TEXT_SEARCH_V1));
+        let (request, timeout_ns) = match (pin.id, tool) {
+            (FIND_GREETING_V5, false) => (HostRequest::MockGreeting, 2_000_000_000),
+            (FIND_GREETING_V6, false) => (HostRequest::ModelGreeting, 30_000_000_000),
+            (FIND_GREETING_V7, _) if host_granted => (
                 HostRequest::SearchFixture {
                     goal: goal.handle as u64,
                 },
                 10_000_000_000,
             ),
-            FIND_GREETING_V7 => return Err(BridgeFailure::ToolNotAllowed),
+            (FIND_GREETING_V7, _) => return Err(BridgeFailure::ToolNotAllowed),
+            (FIND_GREETING_V8, _) => {
+                if !host_granted || !goal.allowed_tools.contains(&Some(TEXT_SEARCH_V1.id)) {
+                    return Err(BridgeFailure::ToolNotAllowed);
+                }
+                let (required_step, timeout) = if tool {
+                    (HostStep::SearchApproved, 10_000_000_000)
+                } else {
+                    (HostStep::Ready, 30_000_000_000)
+                };
+                if member.host_step != required_step {
+                    return Err(BridgeFailure::Unavailable);
+                }
+                (
+                    HostRequest::Combined {
+                        goal: goal.handle as u64,
+                        launch: launch as u64,
+                        tool,
+                    },
+                    timeout,
+                )
+            }
             _ => return Err(BridgeFailure::Unavailable),
         };
-        let launch = member.handle;
         let limit = monotonic_nanos().saturating_add(timeout_ns);
         let deadline = match goal.deadline {
             GoalDeadline::Unlimited => limit,
             GoalDeadline::At(at) => limit.min(at),
             GoalDeadline::Expired => return Err(BridgeFailure::TimedOut),
         };
+        // A separate handle for each combined request lets the bridge reject stale replies.
+        let (request_id, next_handle) = if combined {
+            (
+                self.next_handle,
+                self.next_handle
+                    .checked_add(1)
+                    .ok_or(BridgeFailure::Unavailable)?,
+            )
+        } else {
+            (launch, self.next_handle)
+        };
         self.host_bridge
             .as_mut()
             .ok_or(BridgeFailure::Unavailable)?
-            .submit(launch, request, deadline)
+            .submit(launch, request_id, request, deadline)?;
+        self.next_handle = next_handle;
+        if combined {
+            *self.host_step_mut(launch) = if tool {
+                HostStep::ToolSubmitted
+            } else {
+                HostStep::AwaitingDecision
+            };
+        }
+        Ok(request_id)
     }
 
     pub(crate) fn poll_host_reply(
@@ -514,10 +567,31 @@ impl Scheduler {
             .current_agent_member()
             .ok_or(BridgeFailure::Unavailable)?;
         let launch = member.handle;
-        self.host_bridge
+        let awaiting_decision = member.host_step == HostStep::AwaitingDecision;
+        let mut search_approved = false;
+        let length = self
+            .host_bridge
             .as_mut()
             .ok_or(BridgeFailure::Unavailable)?
-            .poll(launch, copy)
+            .poll(launch, |id, bytes| {
+                let copied = copy(bytes);
+                search_approved =
+                    copied && awaiting_decision && plan_action(bytes, id) == Some(SEARCH_GREETING);
+                copied
+            })?;
+        if search_approved {
+            *self.host_step_mut(launch) = HostStep::SearchApproved;
+        }
+        Ok(length)
+    }
+
+    fn host_step_mut(&mut self, launch: usize) -> &mut HostStep {
+        &mut self
+            .goal
+            .as_mut()
+            .and_then(|goal| goal.live_member_mut(launch))
+            .expect("a host exchange belongs to a live goal member")
+            .host_step
     }
 
     /// The boot-unique child handle identifies both the original goal and its agent.

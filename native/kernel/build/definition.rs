@@ -2,7 +2,7 @@ use clv_abi::Program;
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, DefinitionId, DefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2,
     FIND_GREETING_V3, FIND_GREETING_V4, FIND_GREETING_V5, FIND_GREETING_V6, FIND_GREETING_V7,
-    FileDelegation, FileToolInvocation,
+    FIND_GREETING_V8, FileDelegation, FileToolInvocation,
 };
 use clv_abi::tool::{FileTool, HOST_TEXT_SEARCH_NAME};
 use serde::Deserialize;
@@ -47,13 +47,16 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
     assert_eq!(definition.agent, id.intent.program().name());
     assert_eq!(
         (definition.host_mock, definition.host_model),
-        (id == FIND_GREETING_V5, id == FIND_GREETING_V6),
+        (
+            id == FIND_GREETING_V5,
+            matches!(id, FIND_GREETING_V6 | FIND_GREETING_V8)
+        ),
         "wrong planner for {stem}"
     );
 
     assert_eq!(
         definition.host_tool.as_deref(),
-        (id == FIND_GREETING_V7).then_some(HOST_TEXT_SEARCH_NAME),
+        matches!(id, FIND_GREETING_V7 | FIND_GREETING_V8).then_some(HOST_TEXT_SEARCH_NAME),
         "wrong host tool for {stem}"
     );
     match definition.delegate_with_file {
@@ -74,7 +77,10 @@ fn build_delegation(output: &Path, stem: &str, id: DefinitionId, step: Delegatio
         (step.stdio, step.mcp),
         (
             id == FIND_GREETING_V3,
-            matches!(id, FIND_GREETING_V4 | FIND_GREETING_V5 | FIND_GREETING_V6)
+            matches!(
+                id,
+                FIND_GREETING_V4 | FIND_GREETING_V5 | FIND_GREETING_V6 | FIND_GREETING_V8
+            )
         ),
         "wrong transport for {stem}"
     );
@@ -90,7 +96,7 @@ fn build_delegation(output: &Path, stem: &str, id: DefinitionId, step: Delegatio
         .encode(&mut buffer),
         (
             FIND_GREETING_V2 | FIND_GREETING_V3 | FIND_GREETING_V4 | FIND_GREETING_V5
-            | FIND_GREETING_V6,
+            | FIND_GREETING_V6 | FIND_GREETING_V8,
             None,
             Some(name),
         ) => FileToolInvocation {

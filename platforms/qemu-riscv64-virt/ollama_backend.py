@@ -37,6 +37,20 @@ MESSAGES = [
         ),
     },
 ]
+COMBINED_MESSAGES = [
+    {
+        "role": "system",
+        "content": "Choose the action that can satisfy the task. Return a JSON action.",
+    },
+    {
+        "role": "user",
+        "content": (
+            "Goal: find lines containing Hello in both the granted local file and the approved "
+            "host fixture. The action search runs both searches. The action skip ends the task "
+            "without a search. Which action completes this goal?"
+        ),
+    },
+]
 
 
 class TokenUsage(NamedTuple):
@@ -44,7 +58,9 @@ class TokenUsage(NamedTuple):
     generation_tokens: int
 
 
-def choose_action(model: str, port: int) -> tuple[str | None, TokenUsage] | None:
+def choose_action(
+    model: str, port: int, *, combined: bool = False
+) -> tuple[str | None, TokenUsage] | None:
     """Return a known decision and usage, or preserve an unknown outcome."""
     try:
         status = request_json(port, "/api/status", STATUS_TIMEOUT_SECONDS)
@@ -57,7 +73,7 @@ def choose_action(model: str, port: int) -> tuple[str | None, TokenUsage] | None
     try:
         reply = request_json(port, "/api/chat", HTTP_TIMEOUT_SECONDS, {
             "model": model,
-            "messages": MESSAGES,
+            "messages": COMBINED_MESSAGES if combined else MESSAGES,
             "format": DECISION_SCHEMA,
             "stream": False,
             "think": False,

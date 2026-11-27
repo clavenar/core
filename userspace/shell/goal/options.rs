@@ -19,7 +19,7 @@ pub(crate) struct GoalOptions<'a> {
     pub read_limits: ReadLimits,
     pub read_under: Option<&'a [u8]>,
     pub allowed_helper: Option<Program>,
-    pub allowed_tool: Option<ToolId>,
+    pub allowed_tools: [Option<ToolId>; 2],
     pub preserve_files: [Option<&'a [u8]>; MAX_GOAL_RENAMES],
     pub rename_under: Option<&'a [u8]>,
     pub rename_limit: Option<usize>,
@@ -54,17 +54,28 @@ impl<'a> GoalOptions<'a> {
                 GoalFlag::HelperReadBytes if matches!(command, GoalCommand::Create) => {
                     parse_count(rest, &mut options.read_limits.helpers)?
                 }
-                GoalFlag::AllowHelper | GoalFlag::AllowTool
+                GoalFlag::AllowHelper
                     if matches!(command, GoalCommand::Create)
                         && options.allowed_helper.is_none()
-                        && options.allowed_tool.is_none() =>
+                        && options.allowed_tools == [None, None] =>
                 {
                     let (name, rest) = split_word(rest);
-                    if matches!(flag, GoalFlag::AllowTool) {
-                        options.allowed_tool = Some(ToolId::named(name)?);
-                    } else {
-                        options.allowed_helper = Some(Program::named(name)?);
+                    options.allowed_helper = Some(Program::named(name)?);
+                    rest
+                }
+                GoalFlag::AllowTool
+                    if matches!(command, GoalCommand::Create)
+                        && options.allowed_helper.is_none() =>
+                {
+                    let (name, rest) = split_word(rest);
+                    let tool = Some(ToolId::named(name)?);
+                    if options.allowed_tools.contains(&tool) {
+                        return None;
                     }
+                    *options
+                        .allowed_tools
+                        .iter_mut()
+                        .find(|slot| slot.is_none())? = tool;
                     rest
                 }
                 GoalFlag::PreserveFile if matches!(command, GoalCommand::Create) => {

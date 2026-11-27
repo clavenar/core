@@ -1,4 +1,4 @@
-"""Launch Clavenar in QEMU with journaled planning or a read-only host tool."""
+"""Launch Clavenar in QEMU with journaled planning and read-only host tools."""
 
 import argparse
 from collections.abc import Callable
@@ -23,6 +23,7 @@ SOCKET_TIMEOUT = 5
 
 PLAN = struct.Struct("<BBBQB")
 TOOL = struct.Struct("<BBBQBQ")
+COMBINED = struct.Struct("<BBBQBQQ")
 VERSION = 1
 PLAN_REQUEST = 1
 PLAN_REPLY = 2
@@ -31,6 +32,8 @@ TOOL_REPLY = 4
 MOCK_GREETING = 1
 MODEL_GREETING = 2
 MCP_SEARCH = 3
+COMBINED_PLAN = 4
+COMBINED_TOOL = 5
 BUDGET_EXHAUSTED = 0
 SEARCH_GREETING = 1
 TOOL_OK = 1
@@ -55,6 +58,22 @@ class RequestResult(NamedTuple):
 
 
 RequestRunner = Callable[[str], RequestResult | None]
+
+
+class HostRequest(NamedTuple):
+    request_id: int
+    selector: int
+    goal_id: int | None = None
+    launch_id: int | None = None
+
+    @property
+    def is_tool(self) -> bool:
+        return self.selector in (MCP_SEARCH, COMBINED_TOOL)
+
+
+class Service(NamedTuple):
+    run: RequestRunner
+    max_units: int
 
 
 class Journal:
@@ -106,9 +125,23 @@ class Journal:
                 PRIMARY KEY (session_id, request_id),
                 FOREIGN KEY (session_id, request_id) REFERENCES requests(session_id, request_id)
             );
+            CREATE TABLE IF NOT EXISTS mcp_budgets (
+                session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(id),
+                budget_calls INTEGER NOT NULL CHECK (budget_calls >= 0)
+            );
+            CREATE TABLE IF NOT EXISTS request_owners (
+                session_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                goal_id TEXT NOT NULL,
+                launch_id TEXT NOT NULL,
+                PRIMARY KEY (session_id, request_id),
+                FOREIGN KEY (session_id, request_id) REFERENCES requests(session_id, request_id)
+            );
         """)
 
-    def create_session(self, budget_units: int, model: str | None = None) -> str:
+    def create_session(
+        self, budget_units: int, model: str | None = None, budget_calls: int | None = None
+    ) -> str:
         session = uuid4().hex
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
@@ -121,45 +154,58 @@ class Journal:
                     "INSERT INTO model_sessions (session_id, model) VALUES (?, ?)",
                     (session, model),
                 )
+            if budget_calls is not None:
+                self.db.execute(
+                    "INSERT INTO mcp_budgets (session_id, budget_calls) VALUES (?, ?)",
+                    (session, budget_calls),
+                )
         return session
 
     def handle_request(
         self,
         session: str,
-        request_id: int,
-        goal_id: int | None,
-        run_request: RequestRunner,
-        max_units: int,
+        request: HostRequest,
+        service: Service,
     ) -> Reply | None:
         # Store unsigned wire IDs as fixed-width hex for SQLite and host inspection.
-        key = (session, f"{request_id:016x}")
-        goal = None if goal_id is None else f"{goal_id:016x}"
+        key = (session, f"{request.request_id:016x}")
+        goal = None if request.goal_id is None else f"{request.goal_id:016x}"
+        launch = None if request.launch_id is None else f"{request.launch_id:016x}"
+        tool_goal = goal if request.is_tool else None
+        owner_goal = goal if launch is not None else None
+        max_units = service.max_units
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             stored = self.db.execute(
                 """
-                SELECT reply, goal_id, result FROM requests
+                SELECT reply, result, mcp_calls.goal_id, request_owners.goal_id, launch_id FROM requests
                 LEFT JOIN mcp_calls USING (session_id, request_id)
+                LEFT JOIN request_owners USING (session_id, request_id)
                 WHERE requests.session_id = ? AND requests.request_id = ?
                 """,
                 key,
             ).fetchone()
             if stored is not None:
-                status, stored_goal, data = stored
-                if goal != stored_goal:
-                    raise ValueError("repeated host request changed its goal")
+                status, data, *stored_owner = stored
+                if stored_owner != [tool_goal, owner_goal, launch]:
+                    raise ValueError("repeated host request changed its owner or service")
                 return None if status is None else Reply(status, data or b"")
 
             remaining = self.db.execute(
                 """
-                SELECT budget_units - COALESCE(SUM(
-                    CASE WHEN state = 'in_flight' THEN max_units ELSE used_units END
-                ), 0)
-                FROM sessions LEFT JOIN requests ON id = session_id
-                WHERE id = ?
-                GROUP BY id
+                SELECT (CASE WHEN :tool THEN COALESCE(budget_calls, budget_units)
+                             ELSE budget_units END) - (
+                    SELECT COALESCE(SUM(
+                        CASE WHEN state = 'in_flight' THEN max_units ELSE used_units END
+                    ), 0)
+                    FROM requests LEFT JOIN mcp_calls USING (session_id, request_id)
+                    WHERE requests.session_id = :session
+                      AND (mcp_calls.request_id IS NOT NULL) = :tool
+                )
+                FROM sessions LEFT JOIN mcp_budgets ON id = session_id
+                WHERE id = :session
                 """,
-                (session,),
+                {"session": session, "tool": request.is_tool},
             ).fetchone()
             if remaining is None:
                 raise ValueError("unknown VM session")
@@ -172,17 +218,22 @@ class Journal:
                 """,
                 (*key, state, max_units, status),
             )
-            if goal is not None:
+            if tool_goal is not None:
                 self.db.execute(
                     "INSERT INTO mcp_calls (session_id, request_id, goal_id) VALUES (?, ?, ?)",
-                    (*key, goal),
+                    (*key, tool_goal),
+                )
+            if launch is not None:
+                self.db.execute(
+                    "INSERT INTO request_owners (session_id, request_id, goal_id, launch_id) VALUES (?, ?, ?, ?)",
+                    (*key, owner_goal, launch),
                 )
 
         if not can_dispatch:
             return Reply(BUDGET_EXHAUSTED)
 
         # The reservation is committed before dispatch. An unknown outcome keeps it.
-        result = run_request(f"{session}/{key[1]}")
+        result = service.run(f"{session}/{key[1]}")
         if result is None:
             return None
 
@@ -210,7 +261,7 @@ class Journal:
                     """,
                     (*key, *usage),
                 )
-            if goal is not None and reply.status == TOOL_OK:
+            if request.is_tool and reply.status == TOOL_OK:
                 self.db.execute(
                     "UPDATE mcp_calls SET result = ? WHERE session_id = ? AND request_id = ?",
                     (reply.data, *key),
@@ -218,8 +269,10 @@ class Journal:
         return reply
 
 
-def run_ollama_plan(model: str, port: int, _operation_id: str) -> RequestResult | None:
-    result = choose_action(model, port)
+def run_ollama_plan(
+    model: str, port: int, _operation_id: str, *, combined: bool = False
+) -> RequestResult | None:
+    result = choose_action(model, port, combined=combined)
     if result is None:
         return None
     decision, usage = result
@@ -240,46 +293,54 @@ def run_mcp_search(port: int, operation_id: str) -> RequestResult | None:
     return RequestResult(reply, result.used_calls)
 
 
+def decode_request(frame: bytes) -> HostRequest:
+    length, version, kind, request_id, selector = PLAN.unpack_from(frame)
+    if version != VERSION or request_id == 0:
+        raise ValueError("invalid host request header")
+    if kind == PLAN_REQUEST and length == PLAN.size and selector in (MOCK_GREETING, MODEL_GREETING):
+        return HostRequest(request_id, selector)
+    if kind == TOOL_REQUEST and length == TOOL.size and selector == MCP_SEARCH:
+        goal = TOOL.unpack(frame)[5]
+        if goal == 0:
+            raise ValueError("invalid host tool goal ID")
+        return HostRequest(request_id, selector, goal)
+    if length == COMBINED.size and (kind, selector) in (
+        (PLAN_REQUEST, COMBINED_PLAN), (TOOL_REQUEST, COMBINED_TOOL)
+    ):
+        goal, launch = COMBINED.unpack(frame)[5:]
+        if not 0 < goal < launch < request_id:
+            raise ValueError("invalid combined request owner")
+        return HostRequest(request_id, selector, goal, launch)
+    raise ValueError("invalid host request kind or selector")
+
+
 def serve_requests(
     peer: socket.socket,
     wire: BinaryIO,
     journal: Journal,
     session: str,
-    allowed_selector: int,
-    run_request: RequestRunner,
-    max_units: int,
+    services: dict[int, Service],
 ) -> None:
     while first := wire.read(1):
         length = first[0]
-        if length not in (PLAN.size, TOOL.size):
+        if length not in (PLAN.size, TOOL.size, COMBINED.size):
             raise ValueError("invalid host request length")
         peer.settimeout(SOCKET_TIMEOUT)
         body = wire.read(length - 1)
         if len(body) != length - 1:
             raise ValueError("truncated host request")
-        frame = first + body
-        _, version, kind, request_id, selector = PLAN.unpack_from(frame)
-        if version != VERSION or request_id == 0:
-            raise ValueError("invalid host request header")
-        if kind == PLAN_REQUEST and length == PLAN.size and selector in (MOCK_GREETING, MODEL_GREETING):
-            goal_id = None
-            reply_kind = PLAN_REPLY
-        elif kind == TOOL_REQUEST and length == TOOL.size and selector == MCP_SEARCH:
-            goal_id = TOOL.unpack(frame)[5]
-            if goal_id == 0:
-                raise ValueError("invalid host tool goal ID")
-            reply_kind = TOOL_REPLY
-        else:
-            raise ValueError("invalid host request kind or selector")
-
+        request = decode_request(first + body)
+        service = services.get(request.selector)
         reply = Reply(SERVICE_UNAVAILABLE)
-        if selector == allowed_selector:
-            reply = journal.handle_request(session, request_id, goal_id, run_request, max_units)
-            if reply is None and selector != MOCK_GREETING:
+        if service is not None:
+            reply = journal.handle_request(session, request, service)
+            if reply is None and request.selector != MOCK_GREETING:
                 reply = Reply(SERVICE_UNAVAILABLE)
         if reply is not None:
             length = PLAN.size + len(reply.data)
-            peer.sendall(PLAN.pack(length, VERSION, reply_kind, request_id, reply.status) + reply.data)
+            reply_kind = TOOL_REPLY if request.is_tool else PLAN_REPLY
+            header = PLAN.pack(length, VERSION, reply_kind, request.request_id, reply.status)
+            peer.sendall(header + reply.data)
         peer.settimeout(None)
 
 
@@ -333,7 +394,7 @@ def main() -> int:
     parser.add_argument("--budget-calls", type=int, default=1, help="MCP tool calls per VM session")
     parser.add_argument(
         "--mode",
-        choices=(*MOCK_ACTIONS, "ollama", "mcp", *PROBE_REPLIES),
+        choices=(*MOCK_ACTIONS, "ollama", "mcp", "combined", *PROBE_REPLIES),
         default="search",
         help="host response to exercise",
     )
@@ -344,12 +405,14 @@ def main() -> int:
         parser.error("--budget-tokens must be a nonnegative SQLite integer")
     if not 0 <= args.budget_calls < 2**63:
         parser.error("--budget-calls must be a nonnegative SQLite integer")
-    if args.mode == "ollama" and not args.ollama_model:
-        parser.error("--mode ollama requires --ollama-model")
+    if args.mode in ("ollama", "combined") and not args.ollama_model:
+        parser.error(f"--mode {args.mode} requires --ollama-model")
     if not 1 <= args.ollama_port <= 65535:
         parser.error("--ollama-port must be between 1 and 65535")
-    if args.mode == "mcp" and (args.mcp_port is None or not 1 <= args.mcp_port <= 65535):
-        parser.error("--mode mcp requires --mcp-port between 1 and 65535")
+    if args.mode in ("mcp", "combined") and (
+        args.mcp_port is None or not 1 <= args.mcp_port <= 65535
+    ):
+        parser.error(f"--mode {args.mode} requires --mcp-port between 1 and 65535")
     if not KERNEL.is_file():
         parser.error(f"build the RV64 release ELF from the Core repository first ({KERNEL})")
 
@@ -357,33 +420,37 @@ def main() -> int:
         return run_qemu(PROBE_REPLIES[args.mode])
 
     model = None
-    if args.mode == "ollama":
+    call_budget = None
+    combined = args.mode == "combined"
+    if args.mode in ("ollama", "combined"):
         model = args.ollama_model
         budget = args.budget_tokens
         budget_info = f"budget_tokens={budget} model={model}"
-        selector = MODEL_GREETING
-        max_units = MAX_TOKENS
-        run_request = partial(run_ollama_plan, model, args.ollama_port)
+        selector = COMBINED_PLAN if combined else MODEL_GREETING
+        run_model = partial(run_ollama_plan, model, args.ollama_port, combined=combined)
+        services = {selector: Service(run_model, MAX_TOKENS)}
+        if combined:
+            call_budget = args.budget_calls
+            budget_info += f" budget_calls={call_budget} mcp_port={args.mcp_port}"
+            services[COMBINED_TOOL] = Service(partial(run_mcp_search, args.mcp_port), 1)
     elif args.mode == "mcp":
         budget = args.budget_calls
         budget_info = f"budget_calls={budget} mcp_port={args.mcp_port}"
-        selector = MCP_SEARCH
-        max_units = 1
-        run_request = partial(run_mcp_search, args.mcp_port)
+        services = {MCP_SEARCH: Service(partial(run_mcp_search, args.mcp_port), 1)}
     else:
         budget = args.budget_units
         budget_info = f"budget_units={budget}"
-        selector = MOCK_GREETING
-        max_units = MOCK_MAX_UNITS
         action = MOCK_ACTIONS[args.mode]
 
         def run_request(_operation_id: str) -> RequestResult | None:
             return None if action is None else RequestResult(Reply(action), MOCK_USED_UNITS)
 
+        services = {MOCK_GREETING: Service(run_request, MOCK_MAX_UNITS)}
+
     path = args.journal.resolve()
     with closing(sqlite3.connect(path, isolation_level=None)) as db:
         journal = Journal(db)
-        session = journal.create_session(budget, model)
+        session = journal.create_session(budget, model, call_budget)
         print(
             f"host session {session} {budget_info} journal={path}",
             file=sys.stderr,
@@ -391,7 +458,7 @@ def main() -> int:
         )
 
         def serve(peer, wire):
-            serve_requests(peer, wire, journal, session, selector, run_request, max_units)
+            serve_requests(peer, wire, journal, session, services)
 
         return run_qemu(b"PONG", serve)
 

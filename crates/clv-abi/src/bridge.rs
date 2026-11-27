@@ -2,18 +2,22 @@
 
 pub const SUBMIT: usize = 0;
 pub const POLL: usize = 1;
+pub const SUBMIT_TOOL: usize = 2;
 
 pub const MAX_FRAME_BYTES: usize = 32;
 /// Length, version, kind and a little-endian u64 request ID.
 pub const HEADER_BYTES: usize = 11;
 const PLAN_FRAME_BYTES: usize = HEADER_BYTES + 1;
 const TOOL_REQUEST_BYTES: usize = PLAN_FRAME_BYTES + 8;
+const COMBINED_REQUEST_BYTES: usize = TOOL_REQUEST_BYTES + 8;
 const VERSION: u8 = 1;
 const PLAN_REQUEST: u8 = 1;
 const PLAN_REPLY: u8 = 2;
 const TOOL_REQUEST: u8 = 3;
 const TOOL_REPLY: u8 = 4;
 const SEARCH_FIXTURE: u8 = 3;
+const COMBINED_PLAN: u8 = 4;
+const COMBINED_TOOL: u8 = 5;
 const TOOL_OK: u8 = 1;
 const TOOL_UNAVAILABLE: u8 = 4;
 pub const BUDGET_EXHAUSTED: u8 = 0;
@@ -25,6 +29,7 @@ pub enum HostRequest {
     MockGreeting,
     ModelGreeting,
     SearchFixture { goal: u64 },
+    Combined { goal: u64, launch: u64, tool: bool },
 }
 
 impl HostRequest {
@@ -35,6 +40,17 @@ impl HostRequest {
             Self::SearchFixture { goal } => {
                 buffer[PLAN_FRAME_BYTES..TOOL_REQUEST_BYTES].copy_from_slice(&goal.to_le_bytes());
                 (TOOL_REQUEST, SEARCH_FIXTURE, TOOL_REQUEST_BYTES)
+            }
+            Self::Combined { goal, launch, tool } => {
+                buffer[PLAN_FRAME_BYTES..TOOL_REQUEST_BYTES].copy_from_slice(&goal.to_le_bytes());
+                buffer[TOOL_REQUEST_BYTES..COMBINED_REQUEST_BYTES]
+                    .copy_from_slice(&launch.to_le_bytes());
+                let (kind, selector) = if tool {
+                    (TOOL_REQUEST, COMBINED_TOOL)
+                } else {
+                    (PLAN_REQUEST, COMBINED_PLAN)
+                };
+                (kind, selector, COMBINED_REQUEST_BYTES)
             }
         };
         buffer[..3].copy_from_slice(&[length as u8, VERSION, kind]);

@@ -124,7 +124,10 @@ fn run_plan(kind: RequestKind, bytes: &[u8]) -> usize {
             supervise_stdio_tool(&request)
         }
         Some(
-            id @ (agent::FIND_GREETING_V4 | agent::FIND_GREETING_V5 | agent::FIND_GREETING_V6),
+            id @ (agent::FIND_GREETING_V4
+            | agent::FIND_GREETING_V5
+            | agent::FIND_GREETING_V6
+            | agent::FIND_GREETING_V8),
         ) => {
             let action: &[u8] = match id {
                 agent::FIND_GREETING_V4 => {
@@ -133,40 +136,84 @@ fn run_plan(kind: RequestKind, bytes: &[u8]) -> usize {
                 agent::FIND_GREETING_V5 => {
                     include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v5.action"))
                 }
-                _ => include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v6.action")),
+                agent::FIND_GREETING_V6 => {
+                    include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v6.action"))
+                }
+                _ => include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v8.action")),
             };
             let Some(request) = agent::FileToolInvocation::decode(action) else {
                 return delegation_failed();
             };
-            if id != agent::FIND_GREETING_V4 {
-                let failure = match bridge::plan_action() {
-                    Ok(bridge::SEARCH_GREETING) => return mcp_client::run(&request),
-                    Ok(bridge::BUDGET_EXHAUSTED) => bridge::BridgeFailure::BudgetExhausted,
-                    Ok(bridge::SKIP) => bridge::BridgeFailure::Skipped,
-                    Ok(bridge::MODEL_UNAVAILABLE) => bridge::BridgeFailure::ModelUnavailable,
-                    Ok(_) => bridge::BridgeFailure::InvalidReply,
-                    Err(reason) => reason,
-                };
-                clv::send_reply(ReplyKind::HostPlanFailed, &[failure as u8]);
-                return 2;
+            if id != agent::FIND_GREETING_V4
+                && let Err(reason) = plan_search()
+            {
+                return host_failure(ReplyKind::HostPlanFailed, reason);
             }
-            mcp_client::run(&request)
+            run_mcp_search(&request, id == agent::FIND_GREETING_V8)
         }
         Some(agent::FIND_GREETING_V7) => {
             let mut frame = [0; bridge::MAX_FRAME_BYTES];
             match bridge::tool_text(&mut frame) {
-                Ok(text) if clv::send_reply(ReplyKind::Matches, text) => {
-                    usize::from(text.is_empty())
-                }
-                Ok(_) => 2,
-                Err(reason) => {
-                    clv::send_reply(ReplyKind::HostToolFailed, &[reason as u8]);
-                    2
-                }
+                Ok(text) => send_matches(text),
+                Err(reason) => host_failure(ReplyKind::HostToolFailed, reason),
             }
         }
         _ => delegation_failed(),
     }
+}
+
+fn plan_search() -> Result<(), bridge::BridgeFailure> {
+    match bridge::plan_action()? {
+        bridge::SEARCH_GREETING => Ok(()),
+        bridge::BUDGET_EXHAUSTED => Err(bridge::BridgeFailure::BudgetExhausted),
+        bridge::SKIP => Err(bridge::BridgeFailure::Skipped),
+        bridge::MODEL_UNAVAILABLE => Err(bridge::BridgeFailure::ModelUnavailable),
+        _ => Err(bridge::BridgeFailure::InvalidReply),
+    }
+}
+
+fn run_mcp_search(invocation: &agent::FileToolInvocation<'_>, include_host: bool) -> usize {
+    let mut matches = [0; MESSAGE_MAX_BYTES];
+    let length = match mcp_client::search(invocation, &mut matches) {
+        Ok(length) => length,
+        Err(ReplyKind::DelegationFailed) => return delegation_failed(),
+        Err(kind) => {
+            clv::send_reply(kind, &[]);
+            return 2;
+        }
+    };
+    if !include_host {
+        return send_matches(&matches[..length]);
+    }
+    let mut frame = [0; bridge::MAX_FRAME_BYTES];
+    let text = match bridge::tool_text(&mut frame) {
+        Ok(text) => text,
+        Err(reason) => return host_failure(ReplyKind::HostToolFailed, reason),
+    };
+    let separator = usize::from(length != 0 && !text.is_empty() && matches[length - 1] != b'\n');
+    let end = length + separator + text.len();
+    let Some(destination) = matches.get_mut(length..end) else {
+        clv::send_reply(ReplyKind::ResultTooLarge, &[]);
+        return 2;
+    };
+    if separator != 0 {
+        destination[0] = b'\n';
+    }
+    destination[separator..].copy_from_slice(text);
+    send_matches(&matches[..end])
+}
+
+fn send_matches(text: &[u8]) -> usize {
+    if clv::send_reply(ReplyKind::Matches, text) {
+        usize::from(text.is_empty())
+    } else {
+        2
+    }
+}
+
+fn host_failure(kind: ReplyKind, reason: bridge::BridgeFailure) -> usize {
+    clv::send_reply(kind, &[reason as u8]);
+    2
 }
 
 fn delegation_failed() -> usize {

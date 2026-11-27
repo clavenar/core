@@ -340,7 +340,7 @@ fn create_goal(options: &GoalOptions<'_>) -> Option<usize> {
             allowed_helper: options.allowed_helper,
         },
         read_limits: options.read_limits,
-        allowed_tool: options.allowed_tool,
+        allowed_tools: options.allowed_tools,
         require_rename_review: options.require_rename_review,
         rename_limit: options.rename_limit.unwrap_or(1),
     };

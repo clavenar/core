@@ -6,13 +6,14 @@ use crate::drivers::virtio::console::Port;
 #[derive(Clone, Copy)]
 struct Exchange {
     launch: usize,
+    request_id: usize,
     deadline: u64,
 }
 
 pub(crate) struct HostBridge {
     port: Port,
     exchange: Option<Exchange>,
-    last_launch: usize,
+    last_request_id: usize,
     // A partial frame and one receive buffer can coexist across goal changes.
     incoming: [u8; 2 * MAX_FRAME_BYTES],
     received: usize,
@@ -24,7 +25,7 @@ impl HostBridge {
         Self {
             port,
             exchange: None,
-            last_launch: 0,
+            last_request_id: 0,
             incoming: [0; 2 * MAX_FRAME_BYTES],
             received: 0,
             failed: false,
@@ -34,17 +35,18 @@ impl HostBridge {
     pub(crate) fn submit(
         &mut self,
         launch: usize,
+        id: usize,
         request: HostRequest,
         deadline: u64,
-    ) -> Result<usize, BridgeFailure> {
-        if self.failed || self.exchange.is_some() || launch <= self.last_launch {
+    ) -> Result<(), BridgeFailure> {
+        if self.failed || self.exchange.is_some() || id <= self.last_request_id {
             return Err(BridgeFailure::Unavailable);
         }
         if monotonic_nanos() >= deadline {
             return Err(BridgeFailure::TimedOut);
         }
         let mut buffer = [0; MAX_FRAME_BYTES];
-        let frame = request.encode(launch as u64, &mut buffer);
+        let frame = request.encode(id as u64, &mut buffer);
         if !self
             .port
             .try_send(frame)
@@ -52,16 +54,20 @@ impl HostBridge {
         {
             return Err(BridgeFailure::Unavailable);
         }
-        self.last_launch = launch;
-        self.exchange = Some(Exchange { launch, deadline });
-        Ok(launch)
+        self.last_request_id = id;
+        self.exchange = Some(Exchange {
+            launch,
+            request_id: id,
+            deadline,
+        });
+        Ok(())
     }
 
     /// Advances at most one receive buffer and delivers a complete matching frame.
     pub(crate) fn poll(
         &mut self,
         launch: usize,
-        copy: impl FnOnce(&[u8]) -> bool,
+        copy: impl FnOnce(u64, &[u8]) -> bool,
     ) -> Result<usize, BridgeFailure> {
         let exchange = self
             .exchange
@@ -87,11 +93,12 @@ impl HostBridge {
             return Err(BridgeFailure::TimedOut);
         }
         let frame = &self.incoming[..length];
-        if request_id(frame) != Some(launch as u64) {
+        let id = exchange.request_id as u64;
+        if request_id(frame) != Some(id) {
             self.consume(length);
             return Ok(0);
         }
-        if !copy(frame) {
+        if !copy(id, frame) {
             return Err(BridgeFailure::Unavailable);
         }
         self.consume(length);

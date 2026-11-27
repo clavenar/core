@@ -13,6 +13,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
   - [Run a host-backed mock plan](#run-a-host-backed-mock-plan)
   - [Run a model-backed plan](#run-a-model-backed-plan)
   - [Search a host MCP fixture](#search-a-host-mcp-fixture)
+  - [Run Ollama and both MCP searches in one goal](#run-ollama-and-both-mcp-searches-in-one-goal)
 - [Reviewed renames](#reviewed-renames)
   - [Review a staged rename through echo](#review-a-staged-rename-through-echo)
   - [Require a supervisor review before commit](#require-a-supervisor-review-before-commit)
@@ -1453,6 +1454,81 @@ PY
 Expect one `settled` row with `1 1 b'Hello from MCP'` and one `denied` row
 with `1 0 None`. Match the goal and launch columns to the handles shown
 in the guest. Stop the fixture server with `Ctrl+c` in its host terminal.
+
+### Run Ollama and both MCP searches in one goal
+
+Start local-only Ollama with `qwen2.5:0.5b` and the MCP fixture in host
+terminals. The example uses Ollama on port `11435` and the MCP fixture on
+port `8765`. Pass `--ollama-port 11434` if you use Ollama's default port.
+[Ollama setup](../README.md#use-a-local-ollama-model) · [MCP fixture](#search-a-host-mcp-fixture)
+
+With the kernel built, run the broker from `core` in another host terminal.
+
+```sh
+bridge_journal="$(mktemp -d)/host-bridge.sqlite3"
+python3 platforms/qemu-riscv64-virt/host_bridge.py \
+  --mode combined --ollama-model qwen2.5:0.5b --ollama-port 11435 \
+  --mcp-port 8765 --budget-tokens 4160 --budget-calls 1 --journal "$bridge_journal"
+```
+
+Enter these commands at `clsh>`.
+
+```text
+goal create --children 2 --allow-tool text.search@1 --allow-tool host.text.search@1 --read-bytes 18 --reply-bytes 1088
+goal grant-file --delegate-to grep --argument Hello /hello.txt
+agent run hello --plan find-greeting@8
+wait hello
+recv hello
+goal audit
+goal audit --reads
+goal budget
+goal close
+```
+
+When Ollama chooses `search`, `recv hello` prints `Hello from RamFS` and
+`Hello from MCP` on separate lines. The guest audit attributes the local
+`text.search@1` invocation and 18 bytes read to the helper. The guest
+spends 476 reply bytes, including the local MCP traffic. The host fixture
+prints one `tools/call text.search` line. A `skip` decision ends the plan
+before either search runs.
+[Revision 8 definition](../userspace/hello/definitions/find-greeting-v8.toml)
+
+Repeat the guest commands in the same VM. There is enough model allowance for
+another inference, and the next `search` decision can still run the local
+tool. `recv hello` reports `host tool budget exhausted`. The fixture call
+count stays at one. Remove either `--allow-tool` option to see
+`plan tool grants required` before the model is contacted.
+
+Quit QEMU with `Ctrl+a`, then `x`. In the broker terminal, inspect the journal.
+
+```sh
+python3 - "$bridge_journal" <<'PY'
+from contextlib import closing
+from pathlib import Path
+import sqlite3
+import sys
+
+path = Path(sys.argv[1]).resolve().as_uri()
+with closing(sqlite3.connect(path + "?mode=ro", uri=True)) as journal:
+    print("session goal launch request resource state reserved used result")
+    for row in journal.execute("""
+        SELECT r.session_id, o.goal_id, o.launch_id, r.request_id,
+               CASE WHEN c.request_id IS NULL THEN 'tokens' ELSE 'calls' END,
+               r.state, r.max_units, r.used_units, c.result
+        FROM requests AS r
+        JOIN request_owners AS o USING (session_id, request_id)
+        LEFT JOIN mcp_calls AS c USING (session_id, request_id)
+        ORDER BY r.session_id, r.request_id
+    """):
+        print(*row)
+PY
+```
+
+The successful goal has two rows with the same session, goal and launch
+and distinct request IDs. The model reserves 2,080 tokens and settles its
+reported usage. The tool reserves and settles one call. The next goal's tool
+row is `denied` with zero calls used. A tool request whose outcome is
+unknown remains `in_flight` and keeps its call reservation.
 
 ### Require an exact tool revision for a goal
 
