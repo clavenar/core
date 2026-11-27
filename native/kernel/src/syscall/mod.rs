@@ -9,10 +9,10 @@ use clv_abi::goal::{
 use clv_abi::tool::ToolId;
 use clv_abi::{
     ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE,
-    PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, Program, ReplyKind, RequestKind,
-    SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE, SYS_AGENT_DELEGATE_WITH_FILE_ARG,
-    SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_LAUNCH_SUPERVISOR, SYS_AGENT_RESUME,
-    SYS_AGENT_RESUME_GRANTED, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
+    PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, PipeStream, Program, ReplyKind, RequestKind,
+    SPAWN_STDIO, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
+    SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_LAUNCH_SUPERVISOR,
+    SYS_AGENT_RESUME, SYS_AGENT_RESUME_GRANTED, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
     SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STAGE_RENAME,
     SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE,
     SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL,
@@ -110,9 +110,13 @@ pub(crate) fn dispatch(
         SYS_RMDIR => {
             with_user_path(stack, a0, a1, |path| scheduler.rmdir(fs, path)).unwrap_or(SYSCALL_ERROR)
         }
-        SYS_SPAWN => scheduler
-            .spawn(fs, a0, LaunchScope::Plain, None)
-            .unwrap_or(SYSCALL_ERROR),
+        SYS_SPAWN => match a1 {
+            0 => Some(LaunchScope::Plain),
+            SPAWN_STDIO => Some(LaunchScope::Stdio),
+            _ => None,
+        }
+        .and_then(|scope| scheduler.spawn(fs, a0, scope, None))
+        .unwrap_or(SYSCALL_ERROR),
         SYS_SPAWN_AT => scheduler
             .spawn(fs, a0, LaunchScope::Directory(a1), None)
             .unwrap_or(SYSCALL_ERROR),
@@ -408,7 +412,8 @@ pub(crate) fn dispatch(
             }
         }
         SYS_PIPE_CLOSE => {
-            if scheduler.close_pipe(a0) {
+            if PipeStream::from_register(a1).is_some_and(|stream| scheduler.close_pipe(a0, stream))
+            {
                 0
             } else {
                 SYSCALL_ERROR

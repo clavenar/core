@@ -40,6 +40,7 @@ entries! {
     Ask {
         "ask [--echo | --read] <program> <text>" =>
             "Send a request and print the reply (default --echo)",
+        "ask --stdio echo [<text>]" => "Send input through stdin and print stdout",
     },
     AskAt {
         "askat [--read | --echo] hello <dir> <payload>" =>

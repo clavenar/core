@@ -1,7 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 76 calls numbered from 0 through 75.
-Kernel 0.0.55 supports two rename grants in one agent launch.
+Kernel 0.0.56 adds a stdio launch mode to call 15.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -109,12 +109,14 @@ schedule. A task that exits successfully reports
 `user exit status=0x0000000000000000`. When the last task stops, the kernel
 prints `all tasks exited` and idles. Unknown call numbers return -1 in `a0`.
 
-Call 15 (`spawn`) takes a program selector in `a0`. Selectors 0, 1 and 2
-choose `hello`, `echo` and `grep`, respectively. The child starts with no RamFS
-handles or working directory. The call returns a fresh, nonzero child handle
-in `a0` when the task is ready to run and -1 if the selector is unknown or
-the program slot is occupied. Child launches, goals and agents draw distinct
-handles from one boot-wide sequence. RamFS allocates its handles independently.
+Call 15 (`spawn`) takes a program selector in `a0` and a launch mode in `a1`.
+Selectors 0, 1 and 2 choose `hello`, `echo` and `grep`, respectively. Mode 0 is
+a plain launch. Mode 1 attaches [stdin and stdout pipes](#pipes-and-completion-events).
+The child starts with no RamFS handles or working directory. The call returns
+a fresh, nonzero child handle in `a0` when the task is ready to run and -1 if
+the selector or mode is unknown or the program slot is occupied. Child
+launches, goals and agents draw distinct handles from one boot-wide sequence.
+RamFS allocates its handles independently.
 
 Call 16 (`wait`) takes the child handle in `a0`. On success, `a0` contains
 the result type. For exit (0) or fault (1), `a1` holds the full exit status
@@ -230,33 +232,41 @@ status 0 to `FileData` and a lone status byte 1 to `ReadFailed`.
 
 ## Pipes and completion events
 
+Call 15 in mode 1 gives the shell and its child two pipes identified by the
+new launch handle. The child starts with zero in `a1` and `a2` and receives
+that handle in `a3`. The parent writes the child's stdin and reads its
+stdout. The child reads stdin and writes stdout. Each peer can close its
+endpoint of either stream independently.
+
 Call 28 (`spawn_with_file_pipe`) takes the program selector in `a0` and the
 shell's regular file handle in `a1`. The kernel grants the child an independent
 read-only file handle using the same rules as call 23. It also creates a
-one-way pipe for this launch. The returned child handle identifies the shell's
-read end. At startup the child gets its file in `a1`, grant kind 2 in `a2`,
-and the handle for its write end in `a3`. Other launches start with `a3` zero.
+stdout pipe. At startup the child gets its file in `a1`, grant kind 2 in
+`a2` and the stdout handle in `a3`. The parent uses the returned launch
+handle to read stdout.
 
 | Call | Arguments | Result in `a0` |
 | --- | --- | --- |
-| 29 `pipe_read` | `a0` launch handle, `a1` shell stack destination, `a2` capacity | Bytes read in order, or 0 at EOF |
-| 30 `pipe_write` | `a0` launch handle, `a1` child stack source, `a2` length | Bytes accepted, possibly a prefix |
-| 31 `pipe_close` | `a0` launch handle | 0 after closing the caller's pipe end |
+| 29 `pipe_read` | `a0` launch handle, `a1` stack destination, `a2` capacity | Bytes read in order, or 0 at EOF |
+| 30 `pipe_write` | `a0` launch handle, `a1` stack source, `a2` length | Bytes accepted, possibly a prefix |
+| 31 `pipe_close` | `a0` launch handle, `a1` stream (0 stdout or 1 stdin) | 0 after closing the caller's endpoint |
 
-The pipe holds 32 bytes. A nonempty write sleeps when the pipe is full and
-resumes when the shell reads. A nonempty read sleeps while the pipe is empty
-and the writer is open. Each transfer validates the full user buffer before
-moving bytes. Zero-length I/O on a connected endpoint returns 0 immediately.
-Invalid handles, wrong endpoints or invalid buffers return -1.
+Each pipe holds 32 bytes. A nonempty write can sleep while the pipe is full.
+A nonempty read can sleep while it is empty and the writer is open. Both
+wake when the peer makes progress or closes its endpoint. If the peer is
+already blocked on pipe I/O for this launch, a second operation that would
+block returns -1 so its caller can service the other stream. Each transfer
+validates the full user buffer before moving bytes. Zero-length I/O on an
+connected endpoint returns 0 immediately. An invalid handle, caller, buffer
+or stream selection returns -1. An unavailable stream also returns -1.
 
-Closing the writer or stopping the child preserves buffered bytes for the
-reader. Once drained, further reads return EOF. Closing the reader or stopping
-the shell discards unread bytes and wakes a blocked writer with an error.
-Closing either end leaves the launch status available to `wait`. If the
-shell waits for a result or reply while that child is blocked on a full pipe,
-the wait or receive returns -1 so the shell can drain or close the pipe and
-retry. A queued reply or completed status can still be collected. A successful
-relaunch invalidates the previous pipe handle along with the previous launch.
+Closing the writer preserves buffered bytes for the reader. Once drained,
+further reads return EOF. Closing the reader discards unread bytes and wakes
+a blocked writer, which retries and returns -1. Stopping either task closes
+its endpoints. If the parent waits for a result or reply while the child
+needs pipe I/O, the wait or receive returns -1 so the parent can service
+the stream. A queued reply or completed status can still be collected.
+A successful relaunch invalidates the previous launch handle and its pipes.
 
 Call 32 (`event_wait`) takes no arguments. Only the shell can collect events.
 It receives the oldest pending completion's launch handle in `a0` and its

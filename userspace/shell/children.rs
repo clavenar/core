@@ -266,6 +266,9 @@ impl Children {
     }
 
     pub(super) fn ask(&mut self, arguments: &[u8]) {
+        if let (b"--stdio", rest) = split_word(arguments) {
+            return self.ask_stdio(rest);
+        }
         let (kind, arguments) = request_kind(arguments, RequestKind::Echo);
         let (name, text) = split_word(arguments);
         let program = match Program::named(name) {
@@ -279,6 +282,26 @@ impl Children {
             return;
         };
         self.collect_reply(program, handle);
+    }
+
+    fn ask_stdio(&mut self, arguments: &[u8]) {
+        let (b"echo", text) = split_word(arguments) else {
+            return Entry::Ask.usage();
+        };
+        let program = Program::Echo as usize;
+        let Some(handle) = clv::spawn_stdio(program) else {
+            return print(b"cannot start stdio echo\r\n");
+        };
+        self.handles[program] = handle;
+        let exchanged = print_echo_stream(handle, text).is_some();
+        let stdin_closed = pipe::close_stdin(handle);
+        let eof =
+            exchanged && stdin_closed && pipe::read(handle, &mut [0]).is_some_and(<[u8]>::is_empty);
+        pipe::close(handle);
+        print(b"\r\n");
+        if !eof {
+            print(b"stdio exchange failed\r\n");
+        }
     }
 
     pub(super) fn ask_at(&mut self, arguments: &[u8]) {
@@ -514,6 +537,26 @@ fn display_reply(kind: ReplyKind, bytes: &[u8]) {
             }
         }
     }
+}
+
+fn print_echo_stream(handle: usize, mut input: &[u8]) -> Option<()> {
+    let mut buffer = [0; PIPE_CAPACITY];
+    while !input.is_empty() {
+        let mut remaining = pipe::write(handle, input)?;
+        if remaining == 0 {
+            return None;
+        }
+        input = input.get(remaining..)?;
+        // Read the submitted bytes before filling stdin again.
+        while remaining > 0 {
+            let bytes = pipe::read(handle, buffer.get_mut(..remaining)?)?;
+            if bytes.is_empty() || clv::write_console(bytes) != Some(bytes.len()) {
+                return None;
+            }
+            remaining -= bytes.len();
+        }
+    }
+    Some(())
 }
 
 fn print_stream(handle: usize) {

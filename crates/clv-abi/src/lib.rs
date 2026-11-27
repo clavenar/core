@@ -87,6 +87,27 @@ pub const SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER: usize = 73;
 pub const SYS_GOAL_RENAME_DIFF: usize = 74;
 pub const SYS_GOAL_REVIEW_BATCH_GRANTED: usize = 75;
 
+/// Call 15 starts the child with stdin and stdout pipes when `a1` has this value.
+pub const SPAWN_STDIO: usize = 1;
+
+/// Stream selected by `pipe_close` in `a1`.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub enum PipeStream {
+    Stdout = 0,
+    Stdin = 1,
+}
+
+impl PipeStream {
+    pub const fn from_register(value: usize) -> Option<Self> {
+        match value {
+            0 => Some(Self::Stdout),
+            1 => Some(Self::Stdin),
+            _ => None,
+        }
+    }
+}
+
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_RAMFS_HANDLE: usize = usize::MAX;
 pub const NO_DIRECTORY_GRANT: usize = NO_RAMFS_HANDLE;

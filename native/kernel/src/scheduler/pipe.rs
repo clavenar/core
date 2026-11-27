@@ -1,22 +1,58 @@
-use super::{ChildLaunch, SHELL_TASK_INDEX, Scheduler, TaskState};
+use clv_abi::PipeStream;
+
+use super::{ChildLaunch, Scheduler, TaskState};
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::ipc::pipe::{Pipe, PipeResult};
 
-impl ChildLaunch {
-    pub(super) fn close_pipe_reader(&mut self, child_state: &mut TaskState) -> bool {
-        let closed = self.pipe.as_mut().is_some_and(Pipe::close_reader);
-        if closed {
-            child_state.wake_from(TaskState::WaitingForPipeSpace);
+#[derive(Default)]
+pub(super) struct LaunchPipes {
+    pub(super) stdin: Option<Pipe>,
+    pub(super) stdout: Option<Pipe>,
+}
+
+impl LaunchPipes {
+    fn get_mut(&mut self, stream: PipeStream) -> Option<&mut Pipe> {
+        match stream {
+            PipeStream::Stdin => self.stdin.as_mut(),
+            PipeStream::Stdout => self.stdout.as_mut(),
         }
-        closed
     }
+
+    fn close(&mut self, stream: PipeStream, reader: bool) -> bool {
+        self.get_mut(stream).is_some_and(if reader {
+            Pipe::close_reader
+        } else {
+            Pipe::close_writer
+        })
+    }
+}
+
+impl ChildLaunch {
+    pub(super) fn close_parent_pipes(&mut self, child_state: &mut TaskState) {
+        self.pipes.close(PipeStream::Stdin, false);
+        self.pipes.close(PipeStream::Stdout, true);
+        if child_state.waits_for_pipe(self.handle) {
+            *child_state = TaskState::Runnable;
+        }
+    }
+
+    pub(super) fn close_child_pipes(&mut self) {
+        self.pipes.close(PipeStream::Stdin, true);
+        self.pipes.close(PipeStream::Stdout, false);
+    }
+}
+
+struct PipeAccess {
+    child: usize,
+    peer: Option<usize>,
+    is_parent: bool,
 }
 
 impl Scheduler {
     pub(crate) fn has_active_pipe_reader(&self) -> bool {
         self.tasks
             .iter()
-            .filter_map(|task| task.launch.as_ref()?.pipe.as_ref())
+            .filter_map(|task| task.launch.as_ref()?.pipes.stdout.as_ref())
             .any(Pipe::is_reading)
     }
 
@@ -27,19 +63,27 @@ impl Scheduler {
         frame: &mut TrapFrame,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> PipeResult {
-        let Some((launch, child_state)) = self.launch_for_parent(handle) else {
+        let Some(access) = self.pipe_access(handle) else {
             return PipeResult::Error;
         };
-        let Some(pipe) = launch.pipe.as_mut() else {
+        let stream = if access.is_parent {
+            PipeStream::Stdout
+        } else {
+            PipeStream::Stdin
+        };
+        let Some(pipe) = self.pipes(access.child).get_mut(stream) else {
             return PipeResult::Error;
         };
-        match pipe.read(capacity, copy) {
+        let result = pipe.read(capacity, copy);
+        match result {
             PipeResult::Ready(count) if count > 0 => {
-                child_state.wake_from(TaskState::WaitingForPipeSpace);
-                PipeResult::Ready(count)
+                self.wake_pipe_peer(access.peer, TaskState::WaitingForPipeSpace(handle));
+                result
             }
-            PipeResult::Wait => self.wait_for_pipe(frame, TaskState::WaitingForPipeData(handle)),
-            result => result,
+            PipeResult::Wait => {
+                self.wait_for_pipe(frame, access, handle, TaskState::WaitingForPipeData(handle))
+            }
+            _ => result,
         }
     }
 
@@ -50,54 +94,103 @@ impl Scheduler {
         frame: &mut TrapFrame,
         copy: impl FnOnce(&mut [u8]) -> bool,
     ) -> PipeResult {
-        let Some(pipe) = self.writer_pipe(handle) else {
+        let Some(access) = self.pipe_access(handle) else {
             return PipeResult::Error;
         };
-        match pipe.write(length, copy) {
+        let stream = if access.is_parent {
+            PipeStream::Stdin
+        } else {
+            PipeStream::Stdout
+        };
+        let Some(pipe) = self.pipes(access.child).get_mut(stream) else {
+            return PipeResult::Error;
+        };
+        let result = pipe.write(length, copy);
+        match result {
             PipeResult::Ready(count) if count > 0 => {
-                self.tasks[SHELL_TASK_INDEX]
-                    .state
-                    .wake_from(TaskState::WaitingForPipeData(handle));
-                PipeResult::Ready(count)
+                self.wake_pipe_peer(access.peer, TaskState::WaitingForPipeData(handle));
+                result
             }
-            PipeResult::Wait => {
-                // A parent waiting for this child's result must be able to drain or close the pipe.
-                let shell = &mut self.tasks[SHELL_TASK_INDEX];
-                if shell.state.waits_for_result(handle) {
-                    shell.state = TaskState::Runnable;
-                }
-                self.wait_for_pipe(frame, TaskState::WaitingForPipeSpace)
-            }
-            result => result,
+            PipeResult::Wait => self.wait_for_pipe(
+                frame,
+                access,
+                handle,
+                TaskState::WaitingForPipeSpace(handle),
+            ),
+            _ => result,
         }
     }
 
-    pub(crate) fn close_pipe(&mut self, handle: usize) -> bool {
-        if self.current == SHELL_TASK_INDEX {
-            return self
-                .launch_for_parent(handle)
-                .is_some_and(|(launch, state)| launch.close_pipe_reader(state));
+    pub(crate) fn close_pipe(&mut self, handle: usize, stream: PipeStream) -> bool {
+        let Some(access) = self.pipe_access(handle) else {
+            return false;
+        };
+        let reader = match stream {
+            PipeStream::Stdout => access.is_parent,
+            PipeStream::Stdin => !access.is_parent,
+        };
+        if !self.pipes(access.child).close(stream, reader) {
+            return false;
         }
-        let closed = self.writer_pipe(handle).is_some_and(Pipe::close_writer);
-        if closed {
-            self.tasks[SHELL_TASK_INDEX]
-                .state
-                .wake_from(TaskState::WaitingForPipeData(handle));
-        }
-        closed
+        let wait = if reader {
+            TaskState::WaitingForPipeSpace(handle)
+        } else {
+            TaskState::WaitingForPipeData(handle)
+        };
+        self.wake_pipe_peer(access.peer, wait);
+        true
     }
 
-    fn writer_pipe(&mut self, handle: usize) -> Option<&mut Pipe> {
-        self.tasks[self.current]
-            .launch
-            .as_mut()
-            .filter(|launch| launch.handle == handle)?
-            .pipe
-            .as_mut()
+    fn pipe_access(&self, handle: usize) -> Option<PipeAccess> {
+        let child = self.launch_index(handle)?;
+        let parent = self.live_parent(self.tasks[child].launch.as_ref()?.parent);
+        if self.current == child {
+            Some(PipeAccess {
+                child,
+                peer: parent,
+                is_parent: false,
+            })
+        } else if parent == Some(self.current) {
+            Some(PipeAccess {
+                child,
+                peer: Some(child),
+                is_parent: true,
+            })
+        } else {
+            None
+        }
     }
 
-    fn wait_for_pipe(&mut self, frame: &mut TrapFrame, state: TaskState) -> PipeResult {
-        if self.block_current(frame, state) {
+    fn pipes(&mut self, child: usize) -> &mut LaunchPipes {
+        &mut self.tasks[child].launch.as_mut().unwrap().pipes
+    }
+
+    fn wake_pipe_peer(&mut self, peer: Option<usize>, state: TaskState) {
+        if let Some(peer) = peer {
+            self.tasks[peer].state.wake_from(state);
+        }
+    }
+
+    fn wait_for_pipe(
+        &mut self,
+        frame: &mut TrapFrame,
+        access: PipeAccess,
+        handle: usize,
+        wait: TaskState,
+    ) -> PipeResult {
+        let Some(peer) = access.peer else {
+            return PipeResult::Error;
+        };
+        let state = &mut self.tasks[peer].state;
+        // Blocking here would leave both ends of this launch waiting.
+        if state.waits_for_pipe(handle) {
+            return PipeResult::Error;
+        }
+        // Let a waiting parent service this pipe before collecting results.
+        if !access.is_parent && state.waits_for_result(handle) {
+            *state = TaskState::Runnable;
+        }
+        if self.block_current(frame, wait) {
             PipeResult::Wait
         } else {
             PipeResult::Error

@@ -352,7 +352,7 @@ impl Scheduler {
             launch,
             TaskFs::empty(),
             Some(request),
-            None,
+            Default::default(),
             TaskState::WaitingForGoal(goal),
         );
         // Registration after completion uses the same delivery path.

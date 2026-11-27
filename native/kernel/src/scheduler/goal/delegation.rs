@@ -68,7 +68,13 @@ impl Scheduler {
             .encode(),
         );
         let (launch, child_fs, argument) = admission.ok()?;
-        Some(self.install_child(launch, child_fs, argument, None, TaskState::Runnable))
+        Some(self.install_child(
+            launch,
+            child_fs,
+            argument,
+            Default::default(),
+            TaskState::Runnable,
+        ))
     }
 }
 

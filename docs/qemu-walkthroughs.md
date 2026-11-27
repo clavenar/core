@@ -734,6 +734,21 @@ after exit or fault. Relaunching a program
 invalidates its previous handle and discards the results for that handle.
 A failed launch preserves the previous handle and its results.
 
+### Send data through stdin and stdout
+
+`ask --stdio echo` gives `echo` separate stdin and stdout pipes. The shell
+writes input and drains the echoed chunks before sending more. Once all
+input has been sent, it closes stdin and reads stdout through EOF.
+
+```text
+ask --stdio echo 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz
+wait echo
+```
+
+The input is longer than a pipe's 32-byte capacity. The shell prints all of
+it in order, and `wait echo` reports exit status 0. Run `ask --stdio echo`
+with no text to check that closing empty stdin also lets the child exit.
+
 ### Search a granted file with grep
 
 `grep -F <pattern> <path>` runs the native search program on one read-only

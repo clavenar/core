@@ -5,6 +5,7 @@ mod pipe;
 use self::definition::AgentBinding;
 pub(crate) use self::goal::DelegationTarget;
 use self::goal::Goal;
+use self::pipe::LaunchPipes;
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
 use clv_abi::goal::GoalObservation;
@@ -32,7 +33,7 @@ enum TaskState {
     WaitingForGoal(usize),
     WaitingForMessage(usize),
     WaitingForPipeData(usize),
-    WaitingForPipeSpace,
+    WaitingForPipeSpace(usize),
     Stopped,
 }
 
@@ -55,6 +56,10 @@ impl TaskState {
         self == Self::WaitingForChild(handle)
             || self == Self::WaitingForMessage(handle)
             || self == Self::WaitingForEvent
+    }
+
+    fn waits_for_pipe(self, handle: usize) -> bool {
+        self == Self::WaitingForPipeData(handle) || self == Self::WaitingForPipeSpace(handle)
     }
 
     // An agent blocked on its helper can still finish while its own parent waits.
@@ -90,7 +95,7 @@ struct ChildLaunch {
     request: Option<Message>,
     reply: Option<Message>,
     legacy_file_reply: bool,
-    pipe: Option<Pipe>,
+    pipes: LaunchPipes,
     completion: Option<TaskCompletion>,
     event: Option<PendingEvent>,
 }
@@ -110,6 +115,7 @@ pub(crate) enum LaunchScope {
     Directory(usize),
     File(usize),
     FileWithPipe(usize),
+    Stdio,
     GoalObserver(usize),
     RenameReviewer(usize),
     ResumeSupervisor(usize),
@@ -295,7 +301,11 @@ impl Scheduler {
                 && (previous.reply.is_some()
                     || previous.completion.is_some()
                     || previous.event.is_some()
-                    || previous.pipe.as_ref().is_some_and(Pipe::reader_open))
+                    || previous
+                        .pipes
+                        .stdout
+                        .as_ref()
+                        .is_some_and(Pipe::reader_open))
                 && self.live_parent(previous.parent).is_some()
         });
         if task.state != TaskState::Stopped || other_results {
@@ -352,6 +362,7 @@ impl Scheduler {
             .ok()?;
         let task_fs = match scope {
             LaunchScope::Plain
+            | LaunchScope::Stdio
             | LaunchScope::GoalObserver(_)
             | LaunchScope::ResumeSupervisor(_) => TaskFs::empty(),
             LaunchScope::RenameReviewer(handle) => {
@@ -380,8 +391,12 @@ impl Scheduler {
                 self.tasks[self.current].fs.grant(fs, fd, GrantKind::File)?
             }
         };
-        let pipe = matches!(scope, LaunchScope::FileWithPipe(_)).then(Pipe::new);
-        Some(self.install_child(launch, task_fs, request, pipe, initial_state))
+        let pipes = LaunchPipes {
+            stdin: matches!(scope, LaunchScope::Stdio).then(Pipe::new),
+            stdout: matches!(scope, LaunchScope::Stdio | LaunchScope::FileWithPipe(_))
+                .then(Pipe::new),
+        };
+        Some(self.install_child(launch, task_fs, request, pipes, initial_state))
     }
 
     fn install_child(
@@ -389,7 +404,7 @@ impl Scheduler {
         launch: PreparedLaunch,
         task_fs: TaskFs,
         request: Option<Message>,
-        pipe: Option<Pipe>,
+        pipes: LaunchPipes,
         initial_state: TaskState,
     ) -> usize {
         let PreparedLaunch {
@@ -409,8 +424,10 @@ impl Scheduler {
         );
         let startup_grant = task_fs.startup_grant();
         if let Some((fd, kind, second)) = startup_grant {
-            let extra = second.unwrap_or(if pipe.is_some() { handle } else { 0 });
+            let extra = second.unwrap_or(if pipes.stdout.is_some() { handle } else { 0 });
             frame.set_startup_args(fd, kind as usize, extra);
+        } else if pipes.stdin.is_some() {
+            frame.set_startup_args(0, 0, handle);
         }
         // SAFETY: This slot is stopped and its private stack frame is mapped
         // writable in the shared supervisor identity map.
@@ -430,7 +447,7 @@ impl Scheduler {
             request,
             reply: None,
             legacy_file_reply,
-            pipe,
+            pipes,
             completion: None,
             event: None,
         });
@@ -556,7 +573,7 @@ impl Scheduler {
             return result;
         }
         match wait_for {
-            Some((_, TaskState::WaitingForPipeSpace)) => ReceiveResult::Error,
+            Some((handle, state)) if state.waits_for_pipe(handle) => ReceiveResult::Error,
             Some((handle, state))
                 if state.can_finish()
                     && self.block_current(frame, TaskState::WaitingForMessage(handle)) =>
@@ -586,7 +603,7 @@ impl Scheduler {
                 if let Some(launch) = &mut task.launch {
                     launch.reply = None;
                     launch.event = None;
-                    launch.close_pipe_reader(&mut task.state);
+                    launch.close_parent_pipes(&mut task.state);
                 }
             }
         } else if let Some(launch) = &self.tasks[self.current].launch {
@@ -618,15 +635,12 @@ impl Scheduler {
                 // Spawn checks for handle exhaustion. One event per launch keeps this count in range.
                 self.next_event_sequence += 1;
             }
-            if let Some(pipe) = &mut launch.pipe {
-                pipe.close_writer();
-            }
+            launch.close_child_pipes();
             let handle = launch.handle;
             let owner = launch.parent;
             if let Some(parent) = self.live_parent(owner) {
                 let state = &mut self.tasks[parent].state;
-                if state.waits_for_result(handle) || *state == TaskState::WaitingForPipeData(handle)
-                {
+                if state.waits_for_result(handle) || state.waits_for_pipe(handle) {
                     *state = TaskState::Runnable;
                 }
             }
