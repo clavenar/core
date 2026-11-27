@@ -28,6 +28,8 @@ const STATUS: usize = 0x070;
 const QUEUE_DESC: usize = 0x080;
 const QUEUE_DRIVER: usize = 0x090;
 const QUEUE_DEVICE: usize = 0x0a0;
+const CONFIG_GENERATION: usize = 0x0fc;
+const CONFIG: usize = 0x100;
 
 const ACKNOWLEDGE: u32 = 1;
 const DRIVER: u32 = 2;
@@ -73,21 +75,37 @@ impl Device {
         }
     }
 
-    pub(super) fn negotiate(&self) -> bool {
+    pub(super) fn negotiate(&self, supported_features: u32) -> bool {
         self.write(STATUS, ACKNOWLEDGE);
         self.write(STATUS, ACKNOWLEDGE | DRIVER);
 
+        self.write(DEVICE_FEATURES_SEL, 0);
+        let features = self.read(DEVICE_FEATURES) & supported_features;
         self.write(DEVICE_FEATURES_SEL, 1);
         if self.read(DEVICE_FEATURES) & VERSION_1_HIGH_BIT == 0 {
             return false;
         }
-        // Accept only VERSION_1. Both queues use the split ring format.
+        // Accept VERSION_1 and the device-specific features supported by the driver.
         self.write(DRIVER_FEATURES_SEL, 0);
-        self.write(DRIVER_FEATURES, 0);
+        self.write(DRIVER_FEATURES, features);
         self.write(DRIVER_FEATURES_SEL, 1);
         self.write(DRIVER_FEATURES, VERSION_1_HIGH_BIT);
         self.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK);
         self.has_status(FEATURES_OK)
+    }
+
+    /// # Safety
+    /// The device must expose a 64-bit configuration field at this aligned offset.
+    pub(super) unsafe fn config_u64(&self, offset: usize, deadline: u64) -> Option<u64> {
+        while monotonic_nanos() < deadline {
+            let generation = self.read(CONFIG_GENERATION);
+            let low = self.read(CONFIG + offset);
+            let high = self.read(CONFIG + offset + 4);
+            if self.read(CONFIG_GENERATION) == generation {
+                return Some((u64::from(high) << 32) | u64::from(low));
+            }
+        }
+        None
     }
 
     pub(super) fn set_queue(

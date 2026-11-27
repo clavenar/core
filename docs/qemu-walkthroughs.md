@@ -5,6 +5,7 @@ with a fresh boot unless it explicitly continues the previous one. RamFS and
 goal handles live for one boot. [Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)
 
 - [Boot and shell](#boot-and-shell)
+  - [Probe a VirtIO block device](#probe-a-virtio-block-device)
   - [Probe the QEMU host bridge](#probe-the-qemu-host-bridge)
 - [Goals and file grants](#goals-and-file-grants)
 - [Requests, replies and file streams](#requests-replies-and-file-streams)
@@ -68,6 +69,38 @@ supervisor stack fit within one aligned 2 MiB physical region.
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
 starts a fresh quantum when the timer fires or a stopped task is replaced.
+
+### Probe a VirtIO block device
+
+Build the kernel, then run these commands from `core` in a Linux terminal.
+They create a 1 MiB image with a known prefix and attach it read-only.
+
+```sh
+disk="$(mktemp -d)/probe.img"
+truncate -s 1M "$disk"
+printf 'CLVBLK01' | dd of="$disk" conv=notrunc status=none
+
+qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
+  -kernel target/riscv64gc-unknown-none-elf/release/clavenar-kernel \
+  -global virtio-mmio.force-legacy=off \
+  -drive "file=$disk,format=raw,if=none,id=probe,readonly=on" \
+  -device virtio-blk-device,drive=probe
+```
+
+Before paging, the kernel reads sector 0 with a 500 ms probe deadline. It
+prints the capacity in 512-byte sectors and the first eight bytes in disk
+order. The probe resets the device before continuing to `clsh>`.
+[VirtIO MMIO and block specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
+
+```text
+virtio block sectors=0x0000000000000800 sector0=0x434c56424c4b3031
+```
+
+At `clsh>`, run `cat /hello.txt` to confirm the shell responds. Quit QEMU
+with `Ctrl+a`, then `x`. Use the regular boot command to try the same
+kernel with no disk. The block line appears when a modern device is
+attached, and a failed probe reports the error before continuing to the
+shell.
 
 ### Probe the QEMU host bridge
 

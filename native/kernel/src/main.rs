@@ -16,6 +16,7 @@ use arch::riscv64::{idle, trap};
 use console::write_hex;
 use core::panic::PanicInfo;
 use drivers::uart;
+use drivers::virtio::block;
 use drivers::virtio::console::{Console, ProbeError};
 use memory::frame::FrameAllocator;
 use memory::sv39;
@@ -34,6 +35,7 @@ extern "C" fn kernel_main() -> ! {
     );
     uart::write(banner.as_bytes());
 
+    probe_block();
     // SAFETY: QEMU virt supplies the MMIO windows, and paging is still disabled.
     let bridge = unsafe { Console::discover() };
     // SAFETY: The single boot hart claims the frame pool here once.
@@ -77,6 +79,29 @@ extern "C" fn kernel_main() -> ! {
     };
     // SAFETY: The boot hart installed the trap vector and built every task's address space.
     unsafe { trap::start(tasks, probe_bridge) }
+}
+
+fn probe_block() {
+    // SAFETY: This is called once on the boot hart, before enabling paging.
+    let Some(result) = (unsafe { block::probe() }) else {
+        return;
+    };
+    match result {
+        Ok(probe) => {
+            uart::write(b"virtio block sectors=");
+            write_hex(probe.sectors as usize);
+            uart::write(b" sector0=");
+            write_hex(u64::from_be_bytes(probe.prefix) as usize);
+            uart::write(b"\r\n");
+        }
+        Err(error) => uart::write(match error {
+            block::ProbeError::Device => b"virtio block unavailable\r\n",
+            block::ProbeError::Empty => b"virtio block empty\r\n",
+            block::ProbeError::Read => b"virtio block read failed\r\n",
+            block::ProbeError::InvalidCompletion => b"virtio block invalid completion\r\n",
+            block::ProbeError::Timeout => b"virtio block timed out\r\n",
+        }),
+    }
 }
 
 fn load_user_program<'a>(

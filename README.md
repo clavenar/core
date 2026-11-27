@@ -34,6 +34,8 @@ ELF entry addresses for `hello`, `shell`, `echo` and `grep`, then
 `Sv39 paging enabled` and the green `clsh>` prompt. Type `help` for the
 command reference. Press `Ctrl+a`, then `x`, to quit QEMU.
 
+[Boot with a read-only VirtIO block image](docs/qemu-walkthroughs.md#probe-a-virtio-block-device)
+
 ## Run the QEMU host broker
 
 After building the kernel, use Python 3.10 or later with its standard

@@ -1,3 +1,4 @@
+pub(crate) mod block;
 pub(crate) mod console;
 mod mmio;
 mod queue;
