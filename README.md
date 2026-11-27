@@ -34,7 +34,7 @@ cargo +stable rustc --locked --manifest-path native/kernel/Cargo.toml \
   --target riscv64gc-unknown-none-elf --target-dir target --release \
   -- -C "link-arg=-T${PWD}/native/linker/riscv64.ld" -C link-arg=--no-relax
 
-qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
+qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic -nic none \
   -kernel target/riscv64gc-unknown-none-elf/release/clavenar-kernel
 ```
 
@@ -44,6 +44,8 @@ ELF entry addresses for `hello`, `shell`, `echo` and `grep`, then
 command reference. Press `Ctrl+a`, then `x`, to quit QEMU.
 
 [Boot with a read-only VirtIO block image](docs/qemu-walkthroughs.md#probe-a-virtio-block-device) · [Recover a marker after reboot](docs/qemu-walkthroughs.md#recover-a-virtio-block-marker-after-reboot) · [Recover a previous journal record](docs/qemu-walkthroughs.md#recover-a-previous-journal-record)
+
+[Verify the VirtIO-net Ethernet exchange](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net)
 
 ## Run the QEMU host broker
 

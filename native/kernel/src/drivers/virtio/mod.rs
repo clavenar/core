@@ -1,6 +1,7 @@
 pub(crate) mod block;
 pub(crate) mod console;
 mod mmio;
+pub(crate) mod net;
 mod queue;
 
 use core::arch::asm;

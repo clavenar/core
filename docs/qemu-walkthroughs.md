@@ -6,6 +6,7 @@ handles and ordinary RamFS changes live for one boot.
 [Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)
 
 - [Boot and shell](#boot-and-shell)
+  - [Exchange an Ethernet frame over VirtIO-net](#exchange-an-ethernet-frame-over-virtio-net)
   - [Probe a VirtIO block device](#probe-a-virtio-block-device)
   - [Recover a VirtIO block marker after reboot](#recover-a-virtio-block-marker-after-reboot)
   - [Recover a previous journal record](#recover-a-previous-journal-record)
@@ -79,6 +80,90 @@ supervisor stack fit within one aligned 2 MiB physical region.
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
 starts a fresh quantum when the timer fires or a stopped task is replaced.
+
+### Exchange an Ethernet frame over VirtIO-net
+
+The kernel reads the MAC address from an attached modern VirtIO-net device
+and posts one receive buffer before paging. It waits up to 500 ms for a
+60-byte Ethernet frame with the local experimental EtherType `0x88b5`
+and the padded request `CLVNET01`. For that request it sends one
+`CLVNET02` reply, polls transmit completion for up to 500 ms and resets the
+device before continuing to the shell. [VirtIO network specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html) · [EtherType registry](https://www.iana.org/assignments/ieee-802-numbers/ieee-802-numbers.xhtml)
+
+After building the kernel, paste this block at the Linux prompt in `core`.
+It connects each QEMU boot to a private Unix datagram socket and stops
+the VM after seeing `clsh>`. [QEMU datagram backend options](https://www.qemu.org/docs/master/system/invocation.html)
+
+```sh
+python3 - <<'PY'
+import os
+from select import select
+from socket import SOCK_DGRAM, socketpair
+from subprocess import DEVNULL, PIPE, STDOUT, Popen
+import sys
+from time import monotonic
+
+guest_mac = bytes.fromhex("52 54 00 12 34 56")
+host_mac = bytes.fromhex("02 00 00 00 00 01")
+ethertype = bytes.fromhex("88 b5")
+request = (guest_mac + host_mac + ethertype + b"CLVNET01").ljust(60, b"\0")
+expected = (host_mac + guest_mac + ethertype + b"CLVNET02").ljust(60, b"\0")
+
+def wait_for(guest, serial, marker):
+    deadline = monotonic() + 5
+    while marker not in serial:
+        remaining = deadline - monotonic()
+        if remaining <= 0 or not select([guest.stdout], [], [], remaining)[0]:
+            raise RuntimeError(f"Timed out waiting for {marker!r}")
+        chunk = os.read(guest.stdout.fileno(), 4096)
+        if not chunk:
+            raise RuntimeError("QEMU stopped before reaching the shell")
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+        serial.extend(chunk)
+
+def boot(send_request):
+    host, nic = socketpair(type=SOCK_DGRAM)
+    with host, nic:
+        fd = nic.fileno()
+        guest = Popen([
+            "qemu-system-riscv64", "-machine", "virt", "-smp", "1", "-m", "128M",
+            "-bios", "default", "-display", "none", "-monitor", "none",
+            "-serial", "stdio", "-nic", "none",
+            "-kernel", "target/riscv64gc-unknown-none-elf/release/clavenar-kernel",
+            "-global", "virtio-mmio.force-legacy=off",
+            "-netdev", f"dgram,id=net0,local.type=fd,local.str={fd}",
+            "-device", "virtio-net-device,netdev=net0,mac=52:54:00:12:34:56",
+        ], stdin=DEVNULL, stdout=PIPE, stderr=STDOUT, pass_fds=(fd,))
+        nic.close()
+        try:
+            serial = bytearray()
+            wait_for(guest, serial, b"virtio net ready mac=52:54:00:12:34:56")
+            if send_request:
+                host.send(request)
+                host.settimeout(2)
+                if host.recv(2048) != expected:
+                    raise RuntimeError("The Ethernet reply differs from the expected frame")
+                wait_for(guest, serial, b"virtio net received probe")
+                wait_for(guest, serial, b"virtio net sent probe reply")
+            else:
+                wait_for(guest, serial, b"virtio net receive timed out")
+            wait_for(guest, serial, b"\x1b[32mclsh> \x1b[0m")
+            print()
+        finally:
+            guest.terminate()
+            guest.wait(timeout=5)
+
+boot(send_request=True)
+print("Host verified the 60-byte Ethernet reply", flush=True)
+boot(send_request=False)
+PY
+```
+
+The first boot reports receive and transmit completion. The second reports
+`virtio net receive timed out` and reaches the shell with the peer silent.
+Run the regular boot command with `-nic none` to check the shell on its
+own. [Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)
 
 ### Probe a VirtIO block device
 

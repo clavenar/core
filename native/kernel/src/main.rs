@@ -16,8 +16,8 @@ use arch::riscv64::{idle, trap};
 use console::write_hex;
 use core::panic::PanicInfo;
 use drivers::uart;
-use drivers::virtio::block;
 use drivers::virtio::console::{Console, Port, ProbeError};
+use drivers::virtio::{block, net};
 use fs::ramfs::{RamFs, SavedFiles};
 use memory::frame::FrameAllocator;
 use memory::sv39;
@@ -39,6 +39,8 @@ extern "C" fn kernel_main() -> ! {
 
     let journal = probe_block();
     // SAFETY: QEMU virt supplies the MMIO windows, and paging is still disabled.
+    unsafe { net::boot_probe() };
+    // SAFETY: The transport windows are still accessible before paging.
     let bridge = unsafe { Console::discover() };
     // SAFETY: The single boot hart claims the frame pool here once.
     let mut frames = unsafe { FrameAllocator::from_boot_pool() };

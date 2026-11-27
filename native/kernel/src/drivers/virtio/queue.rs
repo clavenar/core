@@ -1,6 +1,5 @@
 use super::{mmio::Device, order_device_accesses};
 
-pub(super) const BUFFER_BYTES: usize = clv_abi::bridge::MAX_WIRE_BYTES;
 pub(super) const NEXT: u16 = 1;
 pub(super) const DEVICE_WRITES: u16 = 2;
 const NO_INTERRUPT: u16 = 1;
@@ -181,12 +180,12 @@ impl<const SIZE: usize> Ring<SIZE> {
 }
 
 #[repr(C)]
-pub(super) struct QueueMemory {
+pub(super) struct QueueMemory<const BUFFER_BYTES: usize> {
     ring: RingMemory<1>,
     buffer: [u8; BUFFER_BYTES],
 }
 
-impl QueueMemory {
+impl<const BUFFER_BYTES: usize> QueueMemory<BUFFER_BYTES> {
     pub(super) const fn empty() -> Self {
         Self {
             ring: RingMemory::empty(),
@@ -195,16 +194,17 @@ impl QueueMemory {
     }
 }
 
-/// The console's single-buffer queue.
-pub(super) struct Queue {
+/// A split virtqueue backed by one resident buffer.
+pub(super) struct Queue<const BUFFER_BYTES: usize> {
     ring: Ring<1>,
     buffer: *mut [u8; BUFFER_BYTES],
 }
 
-impl Queue {
+impl<const BUFFER_BYTES: usize> Queue<BUFFER_BYTES> {
     /// # Safety
     /// The caller must own this resident storage and have reset the device.
-    pub(super) unsafe fn new(memory: *mut QueueMemory, index: u32) -> Self {
+    pub(super) unsafe fn new(memory: *mut QueueMemory<BUFFER_BYTES>, index: u32) -> Self {
+        const { assert!(BUFFER_BYTES > 0 && BUFFER_BYTES <= u32::MAX as usize) };
         // SAFETY: The driver has exclusive access until the queue is enabled.
         unsafe {
             let ring = Ring::new(&raw mut (*memory).ring, index);

@@ -1,5 +1,7 @@
+use clv_abi::bridge::MAX_WIRE_BYTES as BUFFER_BYTES;
+
 use super::mmio::Device;
-use super::queue::{BUFFER_BYTES, Queue, QueueError, QueueMemory};
+use super::queue::{Queue, QueueError, QueueMemory};
 use crate::arch::monotonic_nanos;
 
 const CONSOLE_DEVICE: u32 = 3;
@@ -10,8 +12,8 @@ const PROBE_REQUEST: &[u8] = b"PING";
 const PROBE_RESPONSE: &[u8] = b"PONG";
 
 // The DMA storage remains reserved even if a device fails to reset.
-static mut RECEIVE: QueueMemory = QueueMemory::empty();
-static mut TRANSMIT: QueueMemory = QueueMemory::empty();
+static mut RECEIVE: QueueMemory<BUFFER_BYTES> = QueueMemory::empty();
+static mut TRANSMIT: QueueMemory<BUFFER_BYTES> = QueueMemory::empty();
 
 pub(crate) enum ProbeError {
     Device,
@@ -63,8 +65,8 @@ impl Console {
 
 pub(crate) struct Port {
     device: Device,
-    receive: Queue,
-    transmit: Queue,
+    receive: Queue<BUFFER_BYTES>,
+    transmit: Queue<BUFFER_BYTES>,
 }
 
 impl Port {

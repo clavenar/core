@@ -97,12 +97,35 @@ impl Device {
     /// # Safety
     /// The device must expose a 64-bit configuration field at this aligned offset.
     pub(super) unsafe fn config_u64(&self, offset: usize, deadline: u64) -> Option<u64> {
-        while monotonic_nanos() < deadline {
-            let generation = self.read(CONFIG_GENERATION);
+        self.config_snapshot(deadline, || {
             let low = self.read(CONFIG + offset);
             let high = self.read(CONFIG + offset + 4);
+            (u64::from(high) << 32) | u64::from(low)
+        })
+    }
+
+    /// # Safety
+    /// The device must expose these configuration fields as readable bytes.
+    pub(super) unsafe fn config_bytes<const LENGTH: usize>(
+        &self,
+        offset: usize,
+        deadline: u64,
+    ) -> Option<[u8; LENGTH]> {
+        self.config_snapshot(deadline, || {
+            core::array::from_fn(|index| {
+                let address = without_provenance::<u8>(self.base + CONFIG + offset + index);
+                // SAFETY: The caller guarantees the device exposes each byte field.
+                unsafe { address.read_volatile() }
+            })
+        })
+    }
+
+    fn config_snapshot<T>(&self, deadline: u64, read: impl Fn() -> T) -> Option<T> {
+        while monotonic_nanos() < deadline {
+            let generation = self.read(CONFIG_GENERATION);
+            let value = read();
             if self.read(CONFIG_GENERATION) == generation {
-                return Some((u64::from(high) << 32) | u64::from(low));
+                return Some(value);
             }
         }
         None
