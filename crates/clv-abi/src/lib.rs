@@ -177,6 +177,8 @@ pub enum ReplyKind {
     RenameReviewed = 10,
     /// One byte explaining why the guest could not obtain an approved host plan.
     HostPlanFailed = 11,
+    /// One byte explaining why the guest could not obtain a host tool result.
+    HostToolFailed = 12,
 }
 
 impl ReplyKind {
@@ -193,6 +195,7 @@ impl ReplyKind {
             value if value == Self::AgentResumed as usize => Some(Self::AgentResumed),
             value if value == Self::RenameReviewed as usize => Some(Self::RenameReviewed),
             value if value == Self::HostPlanFailed as usize => Some(Self::HostPlanFailed),
+            value if value == Self::HostToolFailed as usize => Some(Self::HostToolFailed),
             _ => None,
         }
     }

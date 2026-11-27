@@ -10,18 +10,18 @@ use self::reads::GoalReads;
 use self::rename::PendingRenames;
 use clv_abi::agent::{
     AgentStatus, ControlResult, DefinitionPin, EncodedDefinitionPin, FIND_GREETING_V5,
-    FIND_GREETING_V6, ResumeReceipt,
+    FIND_GREETING_V6, FIND_GREETING_V7, ResumeReceipt,
 };
 use clv_abi::audit::{
     EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationOutcome, ReplyRecord,
 };
-use clv_abi::bridge::{HostPlan, PlanFailure};
+use clv_abi::bridge::{BridgeFailure, HostRequest};
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CreateOptions, CreatePolicy, DiscardResult,
     FileOptions, GoalDeadline, GoalObservation, GoalStatus, MAX_CHILDREN, MAX_GOAL_RENAMES,
 };
-use clv_abi::tool::ToolId;
+use clv_abi::tool::{HOST_TEXT_SEARCH_V1, ToolId};
 use clv_abi::{LaunchParent, Program, ReplyKind, RequestKind, TaskCompletion};
 
 use super::{AgentBinding, LaunchGrant, SHELL_TASK_INDEX, Scheduler, TaskState};
@@ -275,7 +275,9 @@ impl Scheduler {
         {
             return None;
         }
-        if let Some(id) = allowed_tool {
+        if let Some(id) = allowed_tool
+            && id != HOST_TEXT_SEARCH_V1
+        {
             crate::programs::file_tool(id)?;
         }
         let handle = self.next_handle;
@@ -471,44 +473,50 @@ impl Scheduler {
         self.live_agent_member(child)
     }
 
-    fn host_plan_owner(&self) -> Option<(usize, GoalDeadline, HostPlan)> {
-        let (goal, member, binding) = self.current_agent_member()?;
-        let pin = DefinitionPin::decode(binding.definition?)?;
-        let plan = match pin.id {
-            FIND_GREETING_V5 => HostPlan::MockGreeting,
-            FIND_GREETING_V6 => HostPlan::ModelGreeting,
-            _ => return None,
+    pub(crate) fn submit_host_request(&mut self) -> Result<usize, BridgeFailure> {
+        let (goal, member, binding) = self
+            .current_agent_member()
+            .ok_or(BridgeFailure::Unavailable)?;
+        let pin = binding
+            .definition
+            .and_then(|definition| DefinitionPin::decode(definition))
+            .ok_or(BridgeFailure::Unavailable)?;
+        let (request, timeout_ns) = match pin.id {
+            FIND_GREETING_V5 => (HostRequest::MockGreeting, 2_000_000_000),
+            FIND_GREETING_V6 => (HostRequest::ModelGreeting, 30_000_000_000),
+            FIND_GREETING_V7 if goal.allowed_tool == Some(HOST_TEXT_SEARCH_V1) => (
+                HostRequest::SearchFixture {
+                    goal: goal.handle as u64,
+                },
+                10_000_000_000,
+            ),
+            FIND_GREETING_V7 => return Err(BridgeFailure::ToolNotAllowed),
+            _ => return Err(BridgeFailure::Unavailable),
         };
-        Some((member.handle, goal.deadline, plan))
-    }
-
-    pub(crate) fn submit_host_plan(&mut self) -> Result<usize, PlanFailure> {
-        let (launch, goal_deadline, plan) =
-            self.host_plan_owner().ok_or(PlanFailure::Unavailable)?;
-        let timeout_ns = match plan {
-            HostPlan::MockGreeting => 2_000_000_000,
-            HostPlan::ModelGreeting => 30_000_000_000,
-        };
+        let launch = member.handle;
         let limit = monotonic_nanos().saturating_add(timeout_ns);
-        let deadline = match goal_deadline {
+        let deadline = match goal.deadline {
             GoalDeadline::Unlimited => limit,
             GoalDeadline::At(at) => limit.min(at),
-            GoalDeadline::Expired => return Err(PlanFailure::TimedOut),
+            GoalDeadline::Expired => return Err(BridgeFailure::TimedOut),
         };
         self.host_bridge
             .as_mut()
-            .ok_or(PlanFailure::Unavailable)?
-            .submit(launch, plan, deadline)
+            .ok_or(BridgeFailure::Unavailable)?
+            .submit(launch, request, deadline)
     }
 
-    pub(crate) fn poll_host_plan(
+    pub(crate) fn poll_host_reply(
         &mut self,
         copy: impl FnOnce(&[u8]) -> bool,
-    ) -> Result<usize, PlanFailure> {
-        let (launch, _, _) = self.host_plan_owner().ok_or(PlanFailure::Unavailable)?;
+    ) -> Result<usize, BridgeFailure> {
+        let (_, member, _) = self
+            .current_agent_member()
+            .ok_or(BridgeFailure::Unavailable)?;
+        let launch = member.handle;
         self.host_bridge
             .as_mut()
-            .ok_or(PlanFailure::Unavailable)?
+            .ok_or(BridgeFailure::Unavailable)?
             .poll(launch, copy)
     }
 

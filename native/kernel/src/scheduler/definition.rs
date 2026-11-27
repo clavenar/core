@@ -1,7 +1,7 @@
 use clv_abi::RequestKind;
 use clv_abi::agent::{
     DefinitionId, EncodedDefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3,
-    FIND_GREETING_V4, FIND_GREETING_V5, FIND_GREETING_V6,
+    FIND_GREETING_V4, FIND_GREETING_V5, FIND_GREETING_V6, FIND_GREETING_V7,
 };
 
 use crate::ipc::{Message, MessageKind};
@@ -48,6 +48,10 @@ impl AgentBinding {
                 Some(FIND_GREETING_V6) => Some(include_bytes!(concat!(
                     env!("OUT_DIR"),
                     "/find-greeting-v6.pin"
+                ))),
+                Some(FIND_GREETING_V7) => Some(include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/find-greeting-v7.pin"
                 ))),
                 _ => None,
             };

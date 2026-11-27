@@ -70,6 +70,15 @@ For a loopback server on another port, pass `--ollama-port` to the broker.
 At `clsh>`, use revision 6 to request the model decision.
 [Run a model-backed plan](docs/qemu-walkthroughs.md#run-a-model-backed-plan)
 
+### Call a read-only MCP server on the host
+
+Use the broker's `--mode mcp` with a stateless JSON MCP server on
+`127.0.0.1`. The broker uses the port given by `--mcp-port` and defaults
+to one call per VM. Revision 7 requires the goal's explicit
+`--allow-tool host.text.search@1` grant. The walkthrough starts a fixture
+server with the MCP Python SDK and shows the guest and journal commands.
+[Search a host MCP fixture](docs/qemu-walkthroughs.md#search-a-host-mcp-fixture)
+
 ## Limit file reads to a directory
 
 At a fresh `clsh>` prompt, give `hello` a file that the shell can read but

@@ -1,35 +1,40 @@
 pub use clv_abi::bridge::{
-    BUDGET_EXHAUSTED, MODEL_UNAVAILABLE, PlanFailure, SEARCH_GREETING, SKIP,
+    BUDGET_EXHAUSTED, BridgeFailure, MAX_FRAME_BYTES, MODEL_UNAVAILABLE, SEARCH_GREETING, SKIP,
 };
 use clv_abi::{
     SYS_HOST_BRIDGE,
-    bridge::{MAX_FRAME_BYTES, POLL_PLAN, SUBMIT_PLAN},
+    bridge::{POLL, SUBMIT},
 };
 
 use super::{ecall, syscall_result};
 
 /// Requests one plan for the active pinned agent launch.
-pub fn plan_action() -> Result<u8, PlanFailure> {
-    let id = call(SUBMIT_PLAN, 0, 0)? as u64;
+pub fn plan_action() -> Result<u8, BridgeFailure> {
     let mut frame = [0; MAX_FRAME_BYTES];
+    let (bytes, id) = exchange(&mut frame)?;
+    clv_abi::bridge::plan_action(bytes, id).ok_or(BridgeFailure::InvalidReply)
+}
+
+/// Returns the bounded text of the active pinned host tool call.
+pub fn tool_text(frame: &mut [u8; MAX_FRAME_BYTES]) -> Result<&[u8], BridgeFailure> {
+    let (bytes, id) = exchange(frame)?;
+    clv_abi::bridge::tool_text(bytes, id)
+}
+
+fn exchange(frame: &mut [u8; MAX_FRAME_BYTES]) -> Result<(&[u8], u64), BridgeFailure> {
+    let id = call(SUBMIT, 0, 0)? as u64;
     loop {
-        let count = call(
-            POLL_PLAN,
-            frame.as_mut_ptr().expose_provenance(),
-            frame.len(),
-        )?;
+        let count = call(POLL, frame.as_mut_ptr().expose_provenance(), frame.len())?;
         if count != 0 {
-            return frame
-                .get(..count)
-                .and_then(|bytes| clv_abi::bridge::plan_action(bytes, id))
-                .ok_or(PlanFailure::InvalidReply);
+            let bytes = frame.get(..count).ok_or(BridgeFailure::InvalidReply)?;
+            return Ok((bytes, id));
         }
         core::hint::spin_loop();
     }
 }
 
-fn call(operation: usize, address: usize, capacity: usize) -> Result<usize, PlanFailure> {
+fn call(operation: usize, address: usize, capacity: usize) -> Result<usize, BridgeFailure> {
     let (value, reason, ..) = ecall(SYS_HOST_BRIDGE, operation, address, capacity, 0, 0);
     syscall_result(value)
-        .ok_or_else(|| PlanFailure::from_raw(reason).unwrap_or(PlanFailure::Unavailable))
+        .ok_or_else(|| BridgeFailure::from_raw(reason).unwrap_or(BridgeFailure::Unavailable))
 }

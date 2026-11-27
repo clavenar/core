@@ -1,0 +1,4 @@
+name = "find-greeting"
+revision = 7
+agent = "hello"
+host_tool = "host.text.search@1"

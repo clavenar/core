@@ -1,5 +1,5 @@
 use clv::{ChildReply, ChildStatus, agent, pipe, print};
-use clv_abi::bridge::PlanFailure;
+use clv_abi::bridge::BridgeFailure;
 use clv_abi::{
     ChildEvent, CompletionKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PIPE_CAPACITY,
     PROGRAM_HELLO, PROGRAMS, Program, ReplyKind, RequestKind,
@@ -410,7 +410,11 @@ fn agent_run_args(
             }
             option @ (GoalFlag::Mock | GoalFlag::Plan) => {
                 let definition = greeting_definition(args)?;
-                if matches!(option, GoalFlag::Plan) != (definition == agent::FIND_GREETING_V6) {
+                let live = matches!(
+                    definition,
+                    agent::FIND_GREETING_V6 | agent::FIND_GREETING_V7
+                );
+                if matches!(option, GoalFlag::Plan) != live {
                     return None;
                 }
                 agent::RunRequest::Definition(definition)
@@ -533,17 +537,25 @@ fn display_reply(kind: ReplyKind, bytes: &[u8]) {
         ReplyKind::ReadFailed => print(b"cannot read requested file\r\n"),
         ReplyKind::ResultTooLarge => print(b"grep result exceeds 64 bytes\r\n"),
         ReplyKind::DelegationFailed => print(b"cannot delegate child\r\n"),
-        ReplyKind::HostPlanFailed => {
+        ReplyKind::HostPlanFailed | ReplyKind::HostToolFailed => {
+            use BridgeFailure::*;
+            use ReplyKind::HostToolFailed;
+
             let reason = bytes
                 .first()
-                .and_then(|&byte| PlanFailure::from_raw(byte.into()));
-            print(match reason {
-                Some(PlanFailure::Unavailable) => b"host bridge unavailable\r\n",
-                Some(PlanFailure::TimedOut) => b"host plan timed out\r\n",
-                Some(PlanFailure::BudgetExhausted) => b"host plan budget exhausted\r\n",
-                Some(PlanFailure::Skipped) => b"host plan skipped the search\r\n",
-                Some(PlanFailure::ModelUnavailable) => b"host model unavailable\r\n",
-                Some(PlanFailure::InvalidReply) | None => b"invalid host plan reply\r\n",
+                .and_then(|&byte| BridgeFailure::from_raw(byte.into()));
+            print(match (kind, reason) {
+                (HostToolFailed, Some(ToolNotAllowed)) => b"host tool grant required\r\n",
+                (HostToolFailed, Some(Unavailable)) => b"host MCP tool unavailable\r\n",
+                (HostToolFailed, Some(TimedOut)) => b"host MCP tool timed out\r\n",
+                (HostToolFailed, Some(BudgetExhausted)) => b"host tool budget exhausted\r\n",
+                (HostToolFailed, _) => b"invalid host tool reply\r\n",
+                (_, Some(Unavailable)) => b"host bridge unavailable\r\n",
+                (_, Some(TimedOut)) => b"host plan timed out\r\n",
+                (_, Some(BudgetExhausted)) => b"host plan budget exhausted\r\n",
+                (_, Some(Skipped)) => b"host plan skipped the search\r\n",
+                (_, Some(ModelUnavailable)) => b"host model unavailable\r\n",
+                _ => b"invalid host plan reply\r\n",
             });
         }
         ReplyKind::GoalObservation => super::goal::print_observation(bytes),

@@ -12,6 +12,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
 - [Mock planning and registered tools](#mock-planning-and-registered-tools)
   - [Run a host-backed mock plan](#run-a-host-backed-mock-plan)
   - [Run a model-backed plan](#run-a-model-backed-plan)
+  - [Search a host MCP fixture](#search-a-host-mcp-fixture)
 - [Reviewed renames](#reviewed-renames)
   - [Review a staged rename through echo](#review-a-staged-rename-through-echo)
   - [Require a supervisor review before commit](#require-a-supervisor-review-before-commit)
@@ -1363,6 +1364,95 @@ with closing(sqlite3.connect(path + "?mode=ro", uri=True)) as journal:
         print(*row)
 PY
 ```
+
+### Search a host MCP fixture
+
+In a host terminal, start a separate loopback server using the MCP Python
+SDK. The fixture server searches its own two lines. The broker uses
+stateless JSON responses over Streamable HTTP and sends the fixed literal
+`Hello` to `text.search`.
+[MCP Python SDK](https://pypi.org/project/mcp/1.26.0/) · [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http)
+
+```sh
+mcp_fixture_deps="$(mktemp -d)"
+python3 -m pip install --target "$mcp_fixture_deps" 'mcp==1.26.0'
+PYTHONPATH="$mcp_fixture_deps" python3 - <<'PY'
+from mcp.server.fastmcp import FastMCP
+
+server = FastMCP("clavenar-fixture", host="127.0.0.1", port=8765,
+                 stateless_http=True, json_response=True)
+fixture = ("Hello from MCP", "Goodbye from MCP")
+
+@server.tool(name="text.search", structured_output=False)
+def search(pattern: str) -> str:
+    if pattern != "Hello":
+        raise ValueError("fixture only accepts the Hello literal")
+    print("tools/call text.search", flush=True)
+    return next(line for line in fixture if pattern in line)
+
+server.run(transport="streamable-http")
+PY
+```
+
+After building the kernel, run the broker from `core` in a second host
+terminal. This VM receives a one-call allowance.
+
+```sh
+bridge_journal="$(mktemp -d)/host-bridge.sqlite3"
+python3 platforms/qemu-riscv64-virt/host_bridge.py \
+  --mode mcp --mcp-port 8765 --budget-calls 1 --journal "$bridge_journal"
+```
+
+Enter these commands at `clsh>`.
+
+```text
+goal create --children 1 --allow-tool host.text.search@1 --read-bytes 0 --reply-bytes 20
+agent run hello --plan find-greeting@7
+wait hello
+recv hello
+goal audit --reads
+goal budget
+goal close
+```
+
+`recv hello` prints `Hello from MCP`. The server prints one
+`tools/call text.search` line. The guest audit shows `read_bytes=0`, and
+the guest spends 14 reply bytes. Repeat the commands in the same VM to
+see `host tool budget exhausted` with zero additional calls. Omit
+`--allow-tool host.text.search@1` to see `host tool grant required`.
+[Revision 7 definition](../userspace/hello/definitions/find-greeting-v7.toml)
+
+The broker commits a reservation before contacting the MCP server. A
+failure before `tools/call` settles zero calls. A correlated tool response
+settles one call. A timeout or lost result after dispatch leaves the call
+`in_flight` and keeps its reservation. The same VM session and launch ID
+reuse the recorded outcome.
+
+Quit QEMU with `Ctrl+a`, then `x`. In the broker's host terminal, inspect
+the journal after the successful and exhausted runs.
+
+```sh
+python3 - "$bridge_journal" <<'PY'
+from contextlib import closing
+from pathlib import Path
+import sqlite3
+import sys
+
+path = Path(sys.argv[1]).resolve().as_uri()
+with closing(sqlite3.connect(path + "?mode=ro", uri=True)) as journal:
+    print("session goal launch state max_calls used_calls result")
+    for row in journal.execute("""
+        SELECT session_id, goal_id, request_id, state, max_units, used_units, result
+        FROM mcp_calls JOIN requests USING (session_id, request_id)
+        ORDER BY session_id, request_id
+    """):
+        print(*row)
+PY
+```
+
+Expect one `settled` row with `1 1 b'Hello from MCP'` and one `denied` row
+with `1 0 None`. Match the goal and launch columns to the handles shown
+in the guest. Stop the fixture server with `Ctrl+c` in its host terminal.
 
 ### Require an exact tool revision for a goal
 

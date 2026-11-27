@@ -1,6 +1,4 @@
-use clv_abi::bridge::{
-    HEADER_BYTES, HostPlan, MAX_FRAME_BYTES, PlanFailure, plan_request, request_id,
-};
+use clv_abi::bridge::{BridgeFailure, HEADER_BYTES, HostRequest, MAX_FRAME_BYTES, request_id};
 
 use crate::arch::monotonic_nanos;
 use crate::drivers::virtio::console::Port;
@@ -36,22 +34,23 @@ impl HostBridge {
     pub(crate) fn submit(
         &mut self,
         launch: usize,
-        plan: HostPlan,
+        request: HostRequest,
         deadline: u64,
-    ) -> Result<usize, PlanFailure> {
+    ) -> Result<usize, BridgeFailure> {
         if self.failed || self.exchange.is_some() || launch <= self.last_launch {
-            return Err(PlanFailure::Unavailable);
+            return Err(BridgeFailure::Unavailable);
         }
         if monotonic_nanos() >= deadline {
-            return Err(PlanFailure::TimedOut);
+            return Err(BridgeFailure::TimedOut);
         }
-        let frame = plan_request(launch as u64, plan);
+        let mut buffer = [0; MAX_FRAME_BYTES];
+        let frame = request.encode(launch as u64, &mut buffer);
         if !self
             .port
-            .try_send(&frame)
-            .map_err(|_| PlanFailure::Unavailable)?
+            .try_send(frame)
+            .map_err(|_| BridgeFailure::Unavailable)?
         {
-            return Err(PlanFailure::Unavailable);
+            return Err(BridgeFailure::Unavailable);
         }
         self.last_launch = launch;
         self.exchange = Some(Exchange { launch, deadline });
@@ -63,14 +62,14 @@ impl HostBridge {
         &mut self,
         launch: usize,
         copy: impl FnOnce(&[u8]) -> bool,
-    ) -> Result<usize, PlanFailure> {
+    ) -> Result<usize, BridgeFailure> {
         let exchange = self
             .exchange
             .filter(|exchange| exchange.launch == launch)
-            .ok_or(PlanFailure::Unavailable)?;
+            .ok_or(BridgeFailure::Unavailable)?;
         if monotonic_nanos() >= exchange.deadline {
             self.release(launch);
-            return Err(PlanFailure::TimedOut);
+            return Err(BridgeFailure::TimedOut);
         }
         let length = match self.next_frame() {
             Ok(Some(length)) => length,
@@ -85,7 +84,7 @@ impl HostBridge {
         };
         if monotonic_nanos() >= exchange.deadline {
             self.release(launch);
-            return Err(PlanFailure::TimedOut);
+            return Err(BridgeFailure::TimedOut);
         }
         let frame = &self.incoming[..length];
         if request_id(frame) != Some(launch as u64) {
@@ -93,7 +92,7 @@ impl HostBridge {
             return Ok(0);
         }
         if !copy(frame) {
-            return Err(PlanFailure::Unavailable);
+            return Err(BridgeFailure::Unavailable);
         }
         self.consume(length);
         self.release(launch);
@@ -113,7 +112,7 @@ impl HostBridge {
         self.exchange.is_some()
     }
 
-    fn next_frame(&mut self) -> Result<Option<usize>, PlanFailure> {
+    fn next_frame(&mut self) -> Result<Option<usize>, BridgeFailure> {
         if let Some(length) = self.complete_length()? {
             return Ok(Some(length));
         }
@@ -121,7 +120,7 @@ impl HostBridge {
         let Some(count) = self
             .port
             .try_read(&mut chunk)
-            .map_err(|_| PlanFailure::Unavailable)?
+            .map_err(|_| BridgeFailure::Unavailable)?
         else {
             return Ok(None);
         };
@@ -132,13 +131,13 @@ impl HostBridge {
         self.complete_length()
     }
 
-    fn complete_length(&self) -> Result<Option<usize>, PlanFailure> {
+    fn complete_length(&self) -> Result<Option<usize>, BridgeFailure> {
         if self.received == 0 {
             return Ok(None);
         }
         let length = usize::from(self.incoming[0]);
         if !(HEADER_BYTES..=MAX_FRAME_BYTES).contains(&length) {
-            return Err(PlanFailure::InvalidReply);
+            return Err(BridgeFailure::InvalidReply);
         }
         Ok((length <= self.received).then_some(length))
     }

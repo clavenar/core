@@ -1,7 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.62 adds a pinned plan that requests a local model decision from the host.
+Kernel 0.0.63 adds a pinned plan that calls a read-only host MCP tool with an explicit goal grant.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -208,6 +208,7 @@ queued reply.
 | 9 `AgentResumed` | 32 bytes | Kernel receipt for a supervisor's successful call 70. Call 26 rejects this tag. |
 | 10 `RenameReviewed` | 40 bytes | Kernel receipt for a passing or blocked delegated review through call 75. Call 26 rejects this tag. |
 | 11 `HostPlanFailed` | 1 byte | Reason the agent could not obtain an approved host plan. |
+| 12 `HostToolFailed` | 1 byte | Reason the agent could not obtain a host tool result. |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -345,15 +346,15 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 75 `goal_review_batch_granted` | `a0` reviewer's stack destination, `a1` capacity in bytes | Total bytes in `a0`, number of renames in `a1`, verdict (1–4) in `a2`. Failure to deliver returns -1 in `a0`. |
 | 76 `host_bridge` | `a0` operations 0 submit or 1 poll. Submit takes zeros in `a1` and `a2`. Poll takes a stack address in `a1` and capacity 32 in `a2`. | Submit returns the request ID. Poll returns the length copied or zero while pending. An error returns -1 in `a0` with a reason in `a1`. |
 
-### Host plan requests
+### Host bridge requests
 
-Call 76 accepts live agent launches pinned to `find-greeting@5` or
-`find-greeting@6`. A successful submit produces one request for that launch
-using the selector from its pin. The boot-unique launch handle serves as the
-request ID. There is one exchange at a time. Both operations return without
-waiting for the host. Revision 5 has a two-second exchange deadline and
-revision 6 has a 30-second deadline. An earlier goal deadline takes priority.
-Stopping the launch releases the exchange.
+Call 76 accepts live agent launches pinned to `find-greeting@5`,
+`find-greeting@6` or `find-greeting@7`. A successful submit produces one
+request for that launch using the selector from its pin. The boot-unique
+launch handle serves as the request ID. There is one exchange at a time.
+Both operations return without waiting for the host. Revisions 5, 6 and 7
+have exchange deadlines of 2, 30 and 10 seconds respectively. An earlier
+goal deadline takes priority. Stopping the launch releases the exchange.
 
 The optional VirtIO console carries the following byte stream after the
 boot probe. Each frame starts with its total length in bytes.
@@ -362,20 +363,23 @@ boot probe. Each frame starts with its total length in bytes.
 | --- | --- |
 | 0 | Frame length (11–32 bytes) |
 | 1 | Version (1) |
-| 2 | Kind (1 plan request or 2 plan reply) |
+| 2 | Kind (1 plan request, 2 plan reply, 3 tool request, or 4 tool reply) |
 | 3–10 | Request ID as a little-endian 64-bit integer |
-| 11 | Selector for version 1 plan frames, which are 12 bytes long |
+| 11 | Request selector or reply status |
 
-Plan requests use selector 1 for revision 5 and selector 2 for revision 6.
+The kernel assembles frames across reads, discards complete frames addressed
+to another launch and retires the port if a length falls outside the frame
+bounds. The guest client checks the returned version, kind and request ID.
+
+#### Host plan requests
+
+Plan frames are 12 bytes. Requests use selector 1 for revision 5 and 2 for
+revision 6.
 The host broker handles the selector for its configured planner.
-In a reply, selector 1 chooses the pinned search, selector 0 reports host
-budget exhaustion, selector 2 reports an invalid decision, selector 3
-skips the search and selector 4 reports an unavailable model.
-The kernel assembles frames across reads, discards
-complete frames addressed to another launch and retires the port for plan
-requests if a length falls outside the frame bounds. The guest client checks
-the returned version, kind, request ID and action before asking the kernel
-to invoke the existing registered file tool.
+In a reply, status 1 chooses the pinned search, 0 reports host budget
+exhaustion, 2 reports an invalid decision, 3 skips the search and 4
+reports an unavailable model. The guest client must accept the action
+before it asks the kernel to invoke the registered file tool.
 
 Failure codes in `a1` are 1 for unavailable or denied, 2 for timeout and 3
 for an invalid reply. The agent uses the same codes in a `HostPlanFailed`
@@ -383,6 +387,23 @@ reply, code 4 for host budget exhaustion, code 5 for a skipped search and
 code 6 for an unavailable model. The typed reply spends one byte of the
 agent's reply allowance.
 [Mock planner walkthrough](qemu-walkthroughs.md#run-a-host-backed-mock-plan) · [Model planner walkthrough](qemu-walkthroughs.md#run-a-model-backed-plan)
+
+#### Host MCP tool requests
+
+Revision 7 requires exact tool ID `0x0000000200000001`
+(`host.text.search@1`) in the goal's creation policy. The kernel returns
+reason 7 for a missing grant. The 20-byte tool request has selector 3
+and carries the goal ID as a little-endian 64-bit integer at offsets 12–19.
+The kernel supplies both handles from the live agent's membership.
+
+The broker selects its configured endpoint, tool and argument. The tool
+reply uses status 1 for success, 0 for host call budget exhaustion,
+2 for an invalid tool result and 4 for an unavailable tool or unconfirmed
+outcome. A successful reply appends up to 20 printable ASCII bytes with
+an optional final line feed. Other statuses have no trailing bytes. The
+agent forwards successful text as `Matches`, spending its reply allowance,
+or sends a one-byte `HostToolFailed` with reason 1, 2, 3, 4 or 7.
+[Host MCP walkthrough](qemu-walkthroughs.md#search-a-host-mcp-fixture)
 
 ### Goal creation
 
@@ -405,7 +426,8 @@ first eleven little-endian 64-bit words. Version 2 adds word 11.
 | 11 | Optional second preserved-file descriptor (version 2) |
 
 Bits 1 and 4 are mutually exclusive. With neither set, the goal allows
-any helper permitted by its grants. Each budget word applies only when its
+any helper permitted by its grants. A host tool always requires bit 4 and
+its exact tool ID. Each budget word applies only when its
 flag is set, and zero then means a zero-byte budget. Bit 5 requires a
 supervisor rename review. Bit 6 allows two staged renames.
 

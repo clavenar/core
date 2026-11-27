@@ -2,7 +2,7 @@ use crate::command::GoalFlag;
 use crate::{number, split_literal, split_word};
 use clv_abi::Program;
 use clv_abi::goal::{MAX_CHILDREN, MAX_GOAL_RENAMES, ReadLimits};
-use clv_abi::tool::{FileTool, ToolId};
+use clv_abi::tool::ToolId;
 
 pub(crate) enum GoalCommand {
     Create,
@@ -61,7 +61,7 @@ impl<'a> GoalOptions<'a> {
                 {
                     let (name, rest) = split_word(rest);
                     if matches!(flag, GoalFlag::AllowTool) {
-                        options.allowed_tool = Some(FileTool::named(name)?.id);
+                        options.allowed_tool = Some(ToolId::named(name)?);
                     } else {
                         options.allowed_helper = Some(Program::named(name)?);
                     }

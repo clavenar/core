@@ -107,6 +107,7 @@ entries! {
         "  --stage-rename <new-name>" => "Stage in grant order (repeat for two files)",
         "  --mock find-greeting[@REV]" => "Run revision 1 (default), 2, 3 (stdio), 4 (MCP) or 5 (host)",
         "  --plan find-greeting@6" => "Use the host model to choose the pinned search",
+        "  --plan find-greeting@7" => "Call host.text.search@1 with an explicit goal grant",
         "  --delegate --with-file --reply-bytes N grep -F <pattern>" =>
             "Ask grep to search the file",
     },

@@ -1,9 +1,11 @@
 """Ask a locally running model to choose one action for the greeting plan."""
 
 from contextlib import closing
-from http.client import HTTPConnection, HTTPException
+from http.client import HTTPConnection
 import json
 from typing import NamedTuple
+
+from host_json import HTTP_ERRORS, decode_json
 
 MAX_PROMPT_TOKENS = 2048
 MAX_GENERATION_TOKENS = 32
@@ -35,7 +37,6 @@ MESSAGES = [
         ),
     },
 ]
-HTTP_ERRORS = (OSError, HTTPException, ValueError, RecursionError)
 
 
 class TokenUsage(NamedTuple):
@@ -98,7 +99,7 @@ def read_decision(reply: dict) -> str | None:
     if not isinstance(content, str):
         return None
     try:
-        decision = json.loads(content, object_pairs_hook=unique_fields)
+        decision = decode_json(content)
     except (ValueError, RecursionError):
         return None
     if decision == {"action": "search"}:
@@ -122,11 +123,4 @@ def request_json(port: int, path: str, timeout: int, body: dict | None = None) -
             payload = response.read(RESPONSE_BYTES + 1)
     if len(payload) > RESPONSE_BYTES:
         raise ValueError("Ollama reply exceeds the response limit")
-    return json.loads(payload.decode("utf-8"), object_pairs_hook=unique_fields)
-
-
-def unique_fields(pairs: list[tuple[str, object]]) -> dict:
-    result = dict(pairs)
-    if len(result) != len(pairs):
-        raise ValueError("duplicate JSON field")
-    return result
+    return decode_json(payload)

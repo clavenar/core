@@ -186,7 +186,7 @@ fn switch_task(scheduler: &Scheduler, previous: usize, reason: SwitchReason) {
     let trace: &[u8] = match reason {
         SwitchReason::Fault => b"fault switch ",
         SwitchReason::Expiry => return,
-        _ if scheduler.has_active_pipe_reader() || scheduler.host_plan_pending() => return,
+        _ if scheduler.has_active_pipe_reader() || scheduler.host_request_pending() => return,
         SwitchReason::Timer => b"timer switch ",
         SwitchReason::Wait => b"wait switch ",
         SwitchReason::Exit => b"exit switch ",

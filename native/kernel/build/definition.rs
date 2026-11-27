@@ -1,10 +1,10 @@
 use clv_abi::Program;
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, DefinitionId, DefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2,
-    FIND_GREETING_V3, FIND_GREETING_V4, FIND_GREETING_V5, FIND_GREETING_V6, FileDelegation,
-    FileToolInvocation,
+    FIND_GREETING_V3, FIND_GREETING_V4, FIND_GREETING_V5, FIND_GREETING_V6, FIND_GREETING_V7,
+    FileDelegation, FileToolInvocation,
 };
-use clv_abi::tool::FileTool;
+use clv_abi::tool::{FileTool, HOST_TEXT_SEARCH_NAME};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
@@ -19,7 +19,8 @@ struct Definition {
     host_mock: bool,
     #[serde(default)]
     host_model: bool,
-    delegate_with_file: Delegation,
+    host_tool: Option<String>,
+    delegate_with_file: Option<Delegation>,
 }
 
 #[derive(Deserialize)]
@@ -50,7 +51,25 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
         "wrong planner for {stem}"
     );
 
-    let step = definition.delegate_with_file;
+    assert_eq!(
+        definition.host_tool.as_deref(),
+        (id == FIND_GREETING_V7).then_some(HOST_TEXT_SEARCH_NAME),
+        "wrong host tool for {stem}"
+    );
+    match definition.delegate_with_file {
+        None if id == FIND_GREETING_V7 => {}
+        Some(step) if id != FIND_GREETING_V7 => build_delegation(output, &stem, id, step),
+        _ => panic!("wrong file delegation for {stem}"),
+    }
+    let sha256 = Sha256::digest(source.as_bytes()).into();
+    let pin = DefinitionPin {
+        id,
+        sha256: &sha256,
+    };
+    fs::write(output.join(format!("{stem}.pin")), pin.encode()).unwrap();
+}
+
+fn build_delegation(output: &Path, stem: &str, id: DefinitionId, step: Delegation) {
     assert_eq!(
         (step.stdio, step.mcp),
         (
@@ -86,10 +105,4 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
     }
     .expect("definition argument exceeds the IPC limit");
     fs::write(output.join(format!("{stem}.action")), action).unwrap();
-    let sha256 = Sha256::digest(source.as_bytes()).into();
-    let pin = DefinitionPin {
-        id,
-        sha256: &sha256,
-    };
-    fs::write(output.join(format!("{stem}.pin")), pin.encode()).unwrap();
 }

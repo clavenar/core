@@ -223,7 +223,7 @@ impl Scheduler {
         self.host_bridge = port.map(HostBridge::new);
     }
 
-    pub(crate) fn host_plan_pending(&self) -> bool {
+    pub(crate) fn host_request_pending(&self) -> bool {
         self.host_bridge
             .as_ref()
             .is_some_and(HostBridge::is_pending)

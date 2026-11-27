@@ -9,6 +9,20 @@ pub const FILE_TOOL_MCP: usize = 2;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ToolId(pub u64);
 
+/// The broker searches its own fixture under a separate grant from local file tools.
+pub const HOST_TEXT_SEARCH_V1: ToolId = ToolId((2 << 32) | 1);
+pub const HOST_TEXT_SEARCH_NAME: &str = "host.text.search@1";
+
+impl ToolId {
+    pub fn named(name: &[u8]) -> Option<Self> {
+        if name == HOST_TEXT_SEARCH_NAME.as_bytes() {
+            Some(HOST_TEXT_SEARCH_V1)
+        } else {
+            FileTool::named(name).map(|tool| tool.id)
+        }
+    }
+}
+
 /// Each file tool receives one delegated read-only file and a bounded literal argument.
 pub struct FileTool {
     pub id: ToolId,
