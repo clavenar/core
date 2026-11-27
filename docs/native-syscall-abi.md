@@ -255,7 +255,7 @@ Call 32 (`event_wait`) takes no arguments. Only the shell can collect events.
 It receives the oldest pending completion's launch handle in `a0` and its
 kind in `a1` (0 for exit, 1 for fault, 2 for cancellation). While the shell
 is alive, the kernel records one notification per completed shell-owned launch,
-up to three at a time. Agent-launched helpers deliver replies and wait results
+up to four at a time. Agent-launched helpers deliver replies and wait results
 to their agent. The boot greeting has no parent launch and produces no event.
 Other callers receive -1 in `a0`.
 
@@ -359,8 +359,14 @@ Reading this assignment through call 25 leaves the inspection grant live.
 
 An observer starts with an empty RamFS handle table. It runs outside the
 goal's membership and budgets. The grant works in every state of an open
-goal, including after expiry. The observer occupies the selected program's
-normal slot. A failed launch preserves the previous child and its results.
+goal, including after expiry. Calls 84 and 86 share one dedicated slot when
+the selected program is `echo`. The kernel reports task 5 as the sender of
+its replies. Ordinary `echo` launches, agents and helpers use task 3. Each
+launch has its own handle, request and reply mailboxes, and RamFS handle
+table. The two slots have separate stacks and Sv39 roots and share the
+read/execute image pages. Other program selectors use their ordinary slot.
+A busy report slot rejects another `echo` report launch. Reusing either
+slot replaces only that slot's previous results.
 
 Call 85 takes one atomic sample from the goal bound to the calling launch.
 The record contains eight little-endian RV64 words. The first four encode
@@ -383,9 +389,10 @@ caller checks.
 
 The owner uses call 86 to give a separate process one resume of a live,
 suspended agent. It binds the grant to the agent's original child launch
-and queues an empty `ResumeAgent` request (kind 9). The supervisor occupies
-the selected program's normal slot, starts with an empty RamFS handle table
-and runs outside the goal's child limit and reply budget.
+and queues an empty `ResumeAgent` request (kind 9). An `echo` supervisor
+uses the same separate slot as an `echo` observer, so it can resume an
+agent that is itself running `echo`. The supervisor starts with an empty
+RamFS handle table and runs outside the goal's child limit and reply budget.
 
 Call 87 takes its target from the calling launch's grant. On success, it
 makes the child runnable at its saved frame and queues an `AgentResumed`

@@ -38,16 +38,18 @@ The loader allocates one to sixteen pages based on the segment's memory size
 program's validated entry address. If loading fails, it prints
 `User ELF load failed` with the program name and idles.
 
-The kernel activates paging, prints `Sv39 paging enabled`, and starts hello
-as task 1 and the shell as task 2. Tasks 3 and 4 start on the first launch of
-`echo` and `grep`, respectively. Each receives its task ID in `a0` and runs
-with its own Sv39 root and read/execute image. Each task has a 4 KiB
-read/write, non-executable stack. It starts at `0x00402000` for one- and
-two-page images and immediately after the image for larger programs. The
-initial stack pointer is at the top of that page. Nonempty syscall buffers
+The kernel activates paging, prints `Sv39 paging enabled`, and starts `hello`
+as task 1 and the shell as task 2. Task 3 runs ordinary `echo` launches,
+including agents and helpers. Task 4 runs `grep`. Task 5 runs `echo` when
+the shell launches a goal observer or resume supervisor. Tasks 3 and 5
+share the read/execute pages of one ELF. Each task receives its ID in `a0`
+and has its own Sv39 root and 4 KiB read/write, non-executable stack.
+The stack starts at `0x00402000` for one- and two-page images and immediately
+after the image for larger programs. The initial stack pointer is at the
+top of that page. Nonempty syscall buffers
 must fit within the calling task's stack. The kernel and UART mappings are
-shared in supervisor mode. The 83-frame boot pool has room for four full-size
-images, their stacks and the page tables. The pool, kernel and 48 KiB
+shared in supervisor mode. The 87-frame boot pool has room for four full-size
+images, five task stacks and the page tables. The pool, kernel and 48 KiB
 supervisor stack fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
@@ -198,14 +200,36 @@ goal close
 
 The first status prints `Suspended child=<handle>`. The resume prints
 `resumed by supervisor=<handle>` alongside the goal, agent and original
-child handles. After `hello` exits with status 0, `goal diff` shows
+child handles. The grant covers one suspension. After `hello` exits with
+status 0, `goal diff` shows
 `rename /draft.txt -> final.txt` and `ready to commit`. The first two
 reads print `keep` and `cannot open path`. Once the owner commits, reading
 `/final.txt` prints `keep`.
 
-The grant covers one suspension. The command needs a suspended agent and
-an available `echo` slot. If the agent is itself `echo`, use `agent resume`
-to resume it directly.
+### Observe and resume a suspended echo agent
+
+At a fresh `clsh>` prompt, give the agent just enough reply bytes to send
+`echo ready`. The shell uses a second instance of the same executable for
+the observation and again for the resume.
+
+```text
+goal create --reply-bytes 10
+agent run --suspended echo
+goal observe echo
+agent resume --via echo
+wait echo
+recv echo
+goal budget
+goal close
+```
+
+The observer reports `Running` for the original child and
+`available=0 reserved=10 spent=0`. The resume receipt identifies a
+supervisor launch and the same agent and child handles printed at launch.
+`wait echo` reports exit 0, `recv echo` prints `echo ready`, and the final
+budget shows `available=0 reserved=0 spent=10`. The shell collects each
+report by its own handle. `event` labels the two kinds of completion
+`echo report exited` and `echo exited`.
 
 ### Reserve reply bytes for children
 
@@ -582,8 +606,9 @@ goal close
 The second report shows `Cancelled` for the same child, `deadline=expired`
 and `available=24 reserved=0 spent=0`. The reply audit shows `entries=0`
 and `wait hello` reports `hello cancelled`. Each observation launches a
-fresh `echo` and collects its reply and exit status. If `echo` is already
-running, the command reports `cannot start goal observer`.
+fresh `echo` and collects its reply and exit status. A running ordinary
+`echo` can continue while the observer runs. The observer and resume
+supervisor share one report slot, which admits one live launch at a time.
 
 ## Requests, replies and file streams
 
@@ -1494,8 +1519,8 @@ running for at least 61 seconds between `goal diff` and `goal commit`.
 
 ### Share a read allowance across two helper launches
 
-Two different helper programs can run at the same time. Each program has
-one task slot, so two launches of `grep` run in sequence.
+Two different helper programs can run at the same time. Each has one slot
+for helper launches, so two launches of `grep` run in sequence.
 At a fresh `clsh>` prompt, let the shell launch the first `grep` while
 `hello` is suspended. Collect its wait result, reply and completion event
 so the running agent can reuse the `grep` program slot for the second search.

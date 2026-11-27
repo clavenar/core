@@ -14,6 +14,7 @@ use super::{
 
 pub(super) struct Children {
     handles: [usize; PROGRAMS.len()],
+    echo_report_handle: usize,
 }
 
 struct Helper<'a> {
@@ -60,6 +61,7 @@ impl Children {
     pub(super) fn new() -> Self {
         Self {
             handles: [NO_CHILD_HANDLE; PROGRAMS.len()],
+            echo_report_handle: NO_CHILD_HANDLE,
         }
     }
 
@@ -126,7 +128,8 @@ impl Children {
     }
 
     fn collect_echo_report(&mut self, handle: usize, expected: ReplyKind) -> bool {
-        self.handles[Program::Echo as usize] = handle;
+        // Keep the report handle for its completion event. Named waits use the ordinary child.
+        self.echo_report_handle = handle;
         let mut buffer = [0; MESSAGE_MAX_BYTES];
         if matches!(clv::wait(handle), Some(ChildStatus::Exited(0)))
             && let Some(ChildReply::Received { kind, bytes, .. }) =
@@ -269,7 +272,11 @@ impl Children {
             Some(ChildEvent::Empty) => return print(b"no child event\r\n"),
             None => return print(b"event wait failed\r\n"),
         };
-        let Some(index) = self.handles.iter().position(|&saved| saved == handle) else {
+        let name = if handle == self.echo_report_handle {
+            b"echo report".as_slice()
+        } else if let Some(index) = self.handles.iter().position(|&saved| saved == handle) {
+            PROGRAMS[index].1.as_bytes()
+        } else {
             return print(b"unknown child handle\r\n");
         };
         let status: &[u8] = match kind {
@@ -277,7 +284,7 @@ impl Children {
             CompletionKind::Faulted => b" faulted",
             CompletionKind::Cancelled => b" cancelled",
         };
-        print_line(&[PROGRAMS[index].1.as_bytes(), status]);
+        print_line(&[name, status]);
     }
 
     pub(super) fn wait(&self, name: &[u8]) {

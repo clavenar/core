@@ -77,12 +77,12 @@ fn supervisor_status() -> usize {
 ///
 /// Only the boot hart may start the scheduler, after installing the trap
 /// vector and preparing all user address spaces.
-pub(crate) unsafe fn start(programs: [(AddressSpace, usize); TASK_COUNT]) -> ! {
+pub(crate) unsafe fn start(tasks: [(AddressSpace, usize); TASK_COUNT]) -> ! {
     // SAFETY: No user task has run, and only this hart accesses the state.
     let state = unsafe { &mut *(&raw mut KERNEL_STATE) };
     let scheduler = state
         .scheduler
-        .insert(Scheduler::new(programs, supervisor_status()));
+        .insert(Scheduler::new(tasks, supervisor_status()));
     let space = scheduler.address_space();
     uart::write(b"boot frame=");
     write_hex(space.root_address());

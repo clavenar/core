@@ -14,7 +14,9 @@ pub(crate) fn file_tool(id: ToolId) -> Option<(Program, &'static [u8; SHA256_BYT
 }
 
 pub(crate) const SHELL_TASK_INDEX: usize = 1;
-pub(crate) const TASK_COUNT: usize = PROGRAMS.len() + 1;
+pub(crate) const BOOT_IMAGE_COUNT: usize = PROGRAMS.len() + 1;
+pub(crate) const ECHO_REPORT_TASK_INDEX: usize = BOOT_IMAGE_COUNT;
+pub(crate) const TASK_COUNT: usize = BOOT_IMAGE_COUNT + 1;
 
 /// The boot shell occupies task 2, between the original hello and echo slots.
 pub(crate) const fn task_index(program: Program) -> usize {
@@ -26,12 +28,21 @@ pub(crate) const fn task_index(program: Program) -> usize {
     }
 }
 
-pub(crate) const BOOT_IMAGES: [(&str, &[u8]); TASK_COUNT] = {
+/// A program's ordinary slot has the same index as its boot image.
+pub(crate) const fn task_image_index(task: usize) -> usize {
+    if task == ECHO_REPORT_TASK_INDEX {
+        task_index(Program::Echo)
+    } else {
+        task
+    }
+}
+
+pub(crate) const BOOT_IMAGES: [(&str, &[u8]); BOOT_IMAGE_COUNT] = {
     let tools: [&[u8]; PROGRAMS.len()] = include!(concat!(env!("OUT_DIR"), "/program-images.rs"));
     let mut images = [(
         "shell",
         include_bytes!(concat!(env!("OUT_DIR"), "/shell.elf")) as &[u8],
-    ); TASK_COUNT];
+    ); BOOT_IMAGE_COUNT];
     let mut i = 0;
     while i < PROGRAMS.len() {
         let (program, name) = PROGRAMS[i];

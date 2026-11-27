@@ -38,7 +38,7 @@ impl Scheduler {
             Err(DelegationDenial::AgentFinished)
         } else {
             goal.helper_program(request.program, tool.as_ref().map(|requested| requested.id))
-                .and_then(|program| self.prepare_launch(program, None, owner))
+                .and_then(|program| self.prepare_launch(program, None, owner, None))
         };
         let goal = self.goal.as_mut()?;
         let admission = launch.and_then(|launch| {

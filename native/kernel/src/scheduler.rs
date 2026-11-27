@@ -17,7 +17,7 @@ use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::ipc::pipe::Pipe;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::sv39::AddressSpace;
-use crate::programs::{SHELL_TASK_INDEX, TASK_COUNT, task_index};
+use crate::programs::{ECHO_REPORT_TASK_INDEX, SHELL_TASK_INDEX, TASK_COUNT, task_index};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TaskState {
@@ -89,6 +89,7 @@ struct ChildLaunch {
 
 struct PreparedLaunch {
     program: Program,
+    slot: usize,
     handle: usize,
     next_handle: usize,
     parent: LaunchParent,
@@ -179,10 +180,10 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
-    pub(crate) fn new(programs: [(AddressSpace, usize); TASK_COUNT], sstatus: usize) -> Self {
+    pub(crate) fn new(tasks: [(AddressSpace, usize); TASK_COUNT], sstatus: usize) -> Self {
         Self {
             tasks: core::array::from_fn(|index| {
-                let (space, entry) = programs[index];
+                let (space, entry) = tasks[index];
                 Task::boot(index, space, entry, sstatus)
             }),
             initial_status: sstatus,
@@ -268,8 +269,14 @@ impl Scheduler {
         program: Program,
         agent: Option<usize>,
         parent: LaunchParent,
+        grant: Option<LaunchGrant>,
     ) -> Result<PreparedLaunch, DelegationDenial> {
-        let task = &self.tasks[task_index(program)];
+        let slot = if program == Program::Echo && grant.is_some() {
+            ECHO_REPORT_TASK_INDEX
+        } else {
+            task_index(program)
+        };
+        let task = &self.tasks[slot];
         // Relaunching can discard one's own results, but never another live parent's.
         let other_results = task.launch.as_ref().is_some_and(|previous| {
             previous.parent != parent
@@ -294,10 +301,11 @@ impl Scheduler {
             .ok_or(DelegationDenial::LaunchHandlesExhausted)?;
         Ok(PreparedLaunch {
             program,
+            slot,
             handle,
             next_handle,
             parent,
-            grant: None,
+            grant,
         })
     }
 
@@ -313,24 +321,26 @@ impl Scheduler {
         if self.current != SHELL_TASK_INDEX {
             return None;
         }
-        let mut launch = self
+        let grant = match scope {
+            LaunchScope::GoalObserver(handle) => {
+                self.shell_goal(handle)?;
+                Some(LaunchGrant::ObserveGoal(handle))
+            }
+            LaunchScope::ResumeSupervisor(agent) => Some(self.agent_resume_grant(agent)?),
+            _ => None,
+        };
+        let launch = self
             .prepare_launch(
                 Program::from_raw(program)?,
                 agent.map(|binding| binding.handle),
                 LaunchParent::Shell,
+                grant,
             )
             .ok()?;
         let task_fs = match scope {
-            LaunchScope::Plain => TaskFs::empty(),
-            LaunchScope::GoalObserver(handle) => {
-                self.shell_goal(handle)?;
-                launch.grant = Some(LaunchGrant::ObserveGoal(handle));
-                TaskFs::empty()
-            }
-            LaunchScope::ResumeSupervisor(agent) => {
-                launch.grant = Some(self.agent_resume_grant(agent)?);
-                TaskFs::empty()
-            }
+            LaunchScope::Plain
+            | LaunchScope::GoalObserver(_)
+            | LaunchScope::ResumeSupervisor(_) => TaskFs::empty(),
             LaunchScope::Goal {
                 handle: goal,
                 reply_bytes,
@@ -360,18 +370,18 @@ impl Scheduler {
         initial_state: TaskState,
     ) -> usize {
         let PreparedLaunch {
-            program,
+            slot,
             handle,
             next_handle,
             parent,
             grant,
+            ..
         } = launch;
-        let index = task_index(program);
-        let task = &mut self.tasks[index];
+        let task = &mut self.tasks[slot];
         let mut frame = TrapFrame::new_user(
             task.entry,
             task.address_space.stack.top(),
-            index + 1,
+            slot + 1,
             self.initial_status,
         );
         let startup_grant = task_fs.startup_grant();

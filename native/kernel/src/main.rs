@@ -39,16 +39,17 @@ extern "C" fn kernel_main() -> ! {
     let pages = images.each_ref().map(|image| image.pages);
     let mappings = sv39::BootMappings::new(&mut frames, pages, uart::BASE)
         .expect("boot frame pool cannot hold supervisor mappings");
-    let programs = core::array::from_fn(|index| {
+    let tasks = core::array::from_fn(|task| {
+        let image = programs::task_image_index(task);
         (
             mappings
-                .task_address_space(&mut frames, index)
+                .task_address_space(&mut frames, image)
                 .expect("boot frame pool cannot hold user mappings"),
-            images[index].entry,
+            images[image].entry,
         )
     });
     // SAFETY: The boot hart installed the trap vector and built every task's address space.
-    unsafe { trap::start(programs) }
+    unsafe { trap::start(tasks) }
 }
 
 fn load_user_program<'a>(
