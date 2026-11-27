@@ -38,7 +38,7 @@ SECTIONS
 
     .stack ALIGN(16) (NOLOAD) : {
         /* Unoptimized boot code builds the registered task array on this stack. */
-        . += 48K;
+        . += 64K;
         __stack_top = .;
     } :data
 

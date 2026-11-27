@@ -74,7 +74,11 @@ entries! {
     },
     RevokeFile { "goal revoke-file" => "Revoke the grant and discard its staged rename" },
     GoalRun { "goal run [--reply-bytes N] <program>" => "Start a child in the goal" },
-    GoalObserve { "goal observe echo" => "Read goal state, deadline and reply budget through echo" },
+    GoalObserve {
+        "goal observe echo" => "Read goal state, deadline and reply budget through echo",
+        "goal observe --on-finish echo" => "Start a monitor for the final goal state and budget",
+        "goal observe --collect" => "Collect the monitor's report or show pending",
+    },
     StageRename { "goal stage-rename <source> <new-name>" => "Stage a file rename" },
     GoalActions {
         "goal diff" => "Preview or review a staged rename",

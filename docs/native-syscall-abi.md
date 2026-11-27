@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements calls 0–87. The caller places the call number in
+The RV64 prototype implements calls 0–88. The caller places the call number in
 `a7`, passes up to six arguments in `a0`–`a5`, and executes `ecall`.
 The per-call descriptions give the result registers and error values.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -12,6 +12,7 @@ The per-call descriptions give the result registers and error values.
 - [Goal and agent calls](#goal-and-agent-calls)
   - [Goal deadlines](#goal-deadlines)
   - [Read-only goal observers](#read-only-goal-observers)
+  - [Background goal monitors](#background-goal-monitors)
   - [Delegating one agent resume](#delegating-one-agent-resume)
 - [Rename review and publication](#rename-review-and-publication)
 - [Goal membership and delegated authority](#goal-membership-and-delegated-authority)
@@ -255,13 +256,14 @@ Call 32 (`event_wait`) takes no arguments. Only the shell can collect events.
 It receives the oldest pending completion's launch handle in `a0` and its
 kind in `a1` (0 for exit, 1 for fault, 2 for cancellation). While the shell
 is alive, the kernel records one notification per completed shell-owned launch,
-up to four at a time. Agent-launched helpers deliver replies and wait results
+up to five at a time. Agent-launched helpers deliver replies and wait results
 to their agent. The boot greeting has no parent launch and produces no event.
 Other callers receive -1 in `a0`.
 
 With an empty queue, the call sleeps while a shell-owned child can make progress.
-If every outstanding child is suspended or blocked writing to a full pipe,
-or there are no outstanding children, it returns zero in both registers.
+The call returns zero in both registers when there are no outstanding
+children or all of them are suspended, waiting for a goal to finish or
+blocked writing to a full pipe.
 The shell can resume an agent, drain or close a pipe, and retry. Reading an
 event preserves the child's reply, buffered pipe data and wait result.
 Collecting any of those first also leaves the event available. A successful
@@ -326,6 +328,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 85 `goal_observe` | `a0` observer's stack destination, `a1` capacity in bytes | 64 after copying the snapshot and queuing the same record for the parent, or -1 on failure |
 | 86 `agent_launch_supervisor` | `a0` suspended agent handle, `a1` program selector | Fresh shell-owned supervisor launch handle, or -1 on rejection |
 | 87 `agent_resume_granted` | None | 0 after resuming the bound child and queuing its receipt, or -1 on failure |
+| 88 `goal_launch_finish_monitor` | `a0` open goal handle | Fresh shell-owned monitor launch handle, or -1 on rejection |
 
 ### Goal deadlines
 
@@ -354,7 +357,7 @@ or successful publication.
 
 The goal owner uses call 84 to start an ordinary child in a separate address
 space. The kernel binds a one-use inspection grant to the new launch and the
-open goal. Only call 84 queues the zero-byte `ObserveGoal` request (kind 8).
+open goal. Calls 84 and 88 queue the zero-byte `ObserveGoal` request (kind 8).
 Reading this assignment through call 25 leaves the inspection grant live.
 
 An observer starts with an empty RamFS handle table. It runs outside the
@@ -368,7 +371,7 @@ read/execute image pages. Other program selectors use their ordinary slot.
 A busy report slot rejects another `echo` report launch. Reusing either
 slot replaces only that slot's previous results.
 
-Call 85 takes one atomic sample from the goal bound to the calling launch.
+For a call 84 launch, call 85 takes one atomic sample from the bound goal.
 The record contains eight little-endian RV64 words. The first four encode
 the state tag, representative child, exit status or fault detail and deadline
 as in call 35. The next four encode the budget flags, available reply bytes,
@@ -381,9 +384,31 @@ unchanged.
 A successful sample consumes the grant. A short buffer, invalid destination
 range or occupied reply mailbox returns -1 before delivery and allows a
 retry. Closing the goal, owner exit or observer exit invalidates an unused
-grant. A later goal or launch in the same slot gets a fresh identity.
+call 84 grant. A later goal or launch in the same slot gets a fresh identity.
 Goal control, audit, review and publication calls retain their existing
 caller checks.
+
+### Background goal monitors
+
+The goal owner uses call 88 to start one background `echo` in task 6. The
+monitor has its own stack, Sv39 root and mailboxes, an empty RamFS handle
+table and one read-only observation grant. The ordinary `echo` and
+synchronous report slots remain available. A second launch returns -1
+while the monitor is live or its parent still has a reply or status to collect.
+
+For a ready or running goal the monitor sleeps at its entry point. Call 16
+on its handle returns -1 immediately and call 27 returns an empty mailbox.
+Once the goal completes, fails or is cancelled, the kernel freezes the
+64-byte observation after settling member reservations, then makes the
+monitor runnable. Deadline cancellation includes the expired deadline. For
+an already terminal goal, the kernel captures the snapshot during call 88.
+
+The monitor uses call 85 to receive and send that frozen record once. The
+owner can wait for its exit and receive the typed `GoalObservation` reply
+from task 6 by its launch handle. The report survives closing the finished
+goal and records the deadline as it stood at capture. Closing a ready goal
+before capture cancels the waiting monitor. Its wait result is cancellation
+and its reply mailbox is empty. Owner exit stops any live monitor.
 
 ### Delegating one agent resume
 

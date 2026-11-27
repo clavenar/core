@@ -40,16 +40,17 @@ program's validated entry address. If loading fails, it prints
 
 The kernel activates paging, prints `Sv39 paging enabled`, and starts `hello`
 as task 1 and the shell as task 2. Task 3 runs ordinary `echo` launches,
-including agents and helpers. Task 4 runs `grep`. Task 5 runs `echo` when
-the shell launches a goal observer or resume supervisor. Tasks 3 and 5
-share the read/execute pages of one ELF. Each task receives its ID in `a0`
-and has its own Sv39 root and 4 KiB read/write, non-executable stack.
+including agents and helpers. Task 4 runs `grep`. Task 5 runs `echo` for
+an immediate goal observation or a delegated resume. Task 6 runs `echo` for
+a background goal monitor. Tasks 3, 5 and 6 share the read/execute pages
+of one ELF. Each task receives its ID in `a0` and has its own Sv39 root
+and 4 KiB read/write, non-executable stack.
 The stack starts at `0x00402000` for one- and two-page images and immediately
 after the image for larger programs. The initial stack pointer is at the
-top of that page. Nonempty syscall buffers
-must fit within the calling task's stack. The kernel and UART mappings are
-shared in supervisor mode. The 87-frame boot pool has room for four full-size
-images, five task stacks and the page tables. The pool, kernel and 48 KiB
+top of that page. Nonempty syscall buffers must fit within the calling
+task's stack. The kernel and UART mappings are
+shared in supervisor mode. The 91-frame boot pool has room for four full-size
+images, six task stacks and the page tables. The pool, kernel and 64 KiB
 supervisor stack fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
@@ -230,6 +231,50 @@ supervisor launch and the same agent and child handles printed at launch.
 budget shows `available=0 reserved=0 spent=10`. The shell collects each
 report by its own handle. `event` labels the two kinds of completion
 `echo report exited` and `echo exited`.
+
+### Monitor a goal in the background
+
+At a fresh `clsh>` prompt, arm a monitor while the filesystem agent is
+suspended. The prompt returns immediately. The supervisor can resume the
+agent while the monitor waits for the goal to finish.
+
+```text
+write /draft.txt keep
+goal create --preserve-file /draft.txt --reply-bytes 0
+goal grant-file --stage-rename /draft.txt
+agent run --suspended hello --stage-rename final.txt
+goal observe --on-finish echo
+goal observe --collect
+agent resume --via echo
+wait hello
+goal observe --collect
+goal diff
+goal commit
+cat /final.txt
+goal close
+```
+
+The first collection prints `pending`. The second prints `Completed` with the
+child handle from `agent run`, exit 0 and `available=0 reserved=0 spent=0`.
+The rename stays private until the owner reviews and commits it. The final
+read prints `keep`. Collecting again prints `no goal monitor to collect`.
+
+To see cancellation, repeat on a fresh boot through the first collection,
+then enter
+
+```text
+goal cancel
+goal observe --collect
+wait hello
+goal diff
+cat /draft.txt
+goal close
+```
+
+The monitor reports `Cancelled` for that child, the wait prints
+`hello cancelled`, the diff is empty and the original file contains `keep`.
+A deadline that expires while the agent is suspended also wakes the monitor
+and the report includes `deadline=expired`.
 
 ### Reserve reply bytes for children
 
@@ -607,8 +652,9 @@ The second report shows `Cancelled` for the same child, `deadline=expired`
 and `available=24 reserved=0 spent=0`. The reply audit shows `entries=0`
 and `wait hello` reports `hello cancelled`. Each observation launches a
 fresh `echo` and collects its reply and exit status. A running ordinary
-`echo` can continue while the observer runs. The observer and resume
-supervisor share one report slot, which admits one live launch at a time.
+`echo` can continue while the observer runs. Immediate observations and
+delegated resumes share task 5. A background monitor can wait in task 6
+while either runs.
 
 ## Requests, replies and file streams
 

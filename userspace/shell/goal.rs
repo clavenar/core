@@ -53,11 +53,7 @@ pub(super) fn command(
             (_, None) => print(b"no current goal\r\n"),
         },
         (Subcommand::Run, arguments) => children.run_in_goal(handle, arguments),
-        (Subcommand::Observe, b"echo") => match handle {
-            Some(handle) => children.observe_goal(handle),
-            None => print(b"no current goal\r\n"),
-        },
-        (Subcommand::Observe, _) => Entry::GoalObserve.usage(),
+        (Subcommand::Observe, arguments) => children.observe_goal(handle, arguments),
         (Subcommand::Audit, option) => audit::show(handle, option),
         (Subcommand::Budget, b"") => match handle.and_then(goal::budget) {
             Some(budget) => print_budget(budget),

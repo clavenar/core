@@ -7,6 +7,7 @@ use self::goal::Goal;
 pub(crate) use self::goal::{DelegationAudit, DelegationTarget, PublicationAudit, ReadAudit};
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
+use clv_abi::goal::GoalObservation;
 use clv_abi::{
     ChildEvent, CompletionKind, GrantKind, LaunchParent, Program, ReplyKind, RequestKind,
     TaskCompletion,
@@ -17,7 +18,9 @@ use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::ipc::pipe::Pipe;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::sv39::AddressSpace;
-use crate::programs::{ECHO_REPORT_TASK_INDEX, SHELL_TASK_INDEX, TASK_COUNT, task_index};
+use crate::programs::{
+    ECHO_REPORT_TASK_INDEX, GOAL_MONITOR_TASK_INDEX, SHELL_TASK_INDEX, TASK_COUNT, task_index,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TaskState {
@@ -25,6 +28,8 @@ enum TaskState {
     Suspended,
     WaitingForChild(usize),
     WaitingForEvent,
+    /// A finish monitor starts at its entry point when this goal reaches a terminal state.
+    WaitingForGoal(usize),
     WaitingForMessage(usize),
     WaitingForPipeData(usize),
     WaitingForPipeSpace,
@@ -71,6 +76,7 @@ struct PendingEvent {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LaunchGrant {
     ObserveGoal(usize),
+    ObserveOnFinish,
     /// The agent's original child launch. Every resume ends this suspension's grants.
     ResumeAgent(usize),
 }
@@ -173,6 +179,8 @@ pub(crate) struct Scheduler {
     tasks: [Task; TASK_COUNT],
     initial_status: usize,
     goal: Option<Goal>,
+    /// The dedicated monitor owns this snapshot from wakeup until its grant is used or revoked.
+    monitor_report: Option<GoalObservation>,
     // Child launches, goals and agents share a boot-unique handle sequence.
     next_handle: usize,
     next_event_sequence: usize,
@@ -188,6 +196,7 @@ impl Scheduler {
             }),
             initial_status: sstatus,
             goal: None,
+            monitor_report: None,
             next_handle: 1,
             next_event_sequence: 0,
             current: task_index(Program::Hello),
@@ -271,10 +280,10 @@ impl Scheduler {
         parent: LaunchParent,
         grant: Option<LaunchGrant>,
     ) -> Result<PreparedLaunch, DelegationDenial> {
-        let slot = if program == Program::Echo && grant.is_some() {
-            ECHO_REPORT_TASK_INDEX
-        } else {
-            task_index(program)
+        let slot = match (program, grant) {
+            (Program::Echo, Some(LaunchGrant::ObserveOnFinish)) => GOAL_MONITOR_TASK_INDEX,
+            (Program::Echo, Some(_)) => ECHO_REPORT_TASK_INDEX,
+            _ => task_index(program),
         };
         let task = &self.tasks[slot];
         // Relaunching can discard one's own results, but never another live parent's.
@@ -569,9 +578,13 @@ impl Scheduler {
         } else if let Some(launch) = &self.tasks[self.current].launch {
             self.cancel_delegated_helpers(launch.handle, fs);
         }
+        self.wake_goal_monitor();
     }
 
     fn stop_task(&mut self, index: usize, fs: &mut RamFs, completion: TaskCompletion) {
+        if index == GOAL_MONITOR_TASK_INDEX {
+            self.monitor_report = None;
+        }
         let shell_live = self.tasks[SHELL_TASK_INDEX].state != TaskState::Stopped;
         let task = &mut self.tasks[index];
         task.state = TaskState::Stopped;

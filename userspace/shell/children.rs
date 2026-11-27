@@ -15,6 +15,12 @@ use super::{
 pub(super) struct Children {
     handles: [usize; PROGRAMS.len()],
     echo_report_handle: usize,
+    monitor: Option<GoalMonitor>,
+}
+
+struct GoalMonitor {
+    handle: usize,
+    collected: bool,
 }
 
 struct Helper<'a> {
@@ -62,6 +68,7 @@ impl Children {
         Self {
             handles: [NO_CHILD_HANDLE; PROGRAMS.len()],
             echo_report_handle: NO_CHILD_HANDLE,
+            monitor: None,
         }
     }
 
@@ -111,12 +118,47 @@ impl Children {
         }
     }
 
-    pub(super) fn observe_goal(&mut self, goal: usize) {
+    pub(super) fn observe_goal(&mut self, goal: Option<usize>, arguments: &[u8]) {
+        let on_finish = match split_word(arguments) {
+            (b"--collect", b"") => return self.collect_goal_monitor(),
+            (b"--on-finish", b"echo") => true,
+            (b"echo", b"") => false,
+            _ => return Entry::GoalObserve.usage(),
+        };
+        let Some(goal) = goal else {
+            return print(b"no current goal\r\n");
+        };
+        if on_finish {
+            let Some(handle) = clv::goal::launch_finish_monitor(goal) else {
+                return print(b"cannot start goal monitor\r\n");
+            };
+            self.monitor = Some(GoalMonitor {
+                handle,
+                collected: false,
+            });
+            return print_handle(b"goal monitor=", handle);
+        }
         let Some(handle) = clv::goal::launch_observer(goal, Program::Echo) else {
             return print(b"cannot start goal observer\r\n");
         };
         if !self.collect_echo_report(handle, ReplyKind::GoalObservation) {
             print(b"goal observation unavailable\r\n");
+        }
+    }
+
+    fn collect_goal_monitor(&mut self) {
+        let Some(monitor) = self.monitor.as_mut().filter(|monitor| !monitor.collected) else {
+            return print(b"no goal monitor to collect\r\n");
+        };
+        let Some(status) = clv::wait(monitor.handle) else {
+            return print(b"pending\r\n");
+        };
+        monitor.collected = true;
+        if !print_report(monitor.handle, status, ReplyKind::GoalObservation) {
+            print(match status {
+                ChildStatus::Cancelled => b"goal monitor cancelled\r\n",
+                _ => b"goal observation unavailable\r\n",
+            });
         }
     }
 
@@ -130,17 +172,7 @@ impl Children {
     fn collect_echo_report(&mut self, handle: usize, expected: ReplyKind) -> bool {
         // Keep the report handle for its completion event. Named waits use the ordinary child.
         self.echo_report_handle = handle;
-        let mut buffer = [0; MESSAGE_MAX_BYTES];
-        if matches!(clv::wait(handle), Some(ChildStatus::Exited(0)))
-            && let Some(ChildReply::Received { kind, bytes, .. }) =
-                clv::receive_reply(handle, &mut buffer)
-            && kind == expected
-        {
-            display_reply(kind, bytes);
-            true
-        } else {
-            false
-        }
+        clv::wait(handle).is_some_and(|status| print_report(handle, status, expected))
     }
 
     pub(super) fn run_agent(
@@ -274,6 +306,12 @@ impl Children {
         };
         let name = if handle == self.echo_report_handle {
             b"echo report".as_slice()
+        } else if self
+            .monitor
+            .as_ref()
+            .is_some_and(|monitor| monitor.handle == handle)
+        {
+            b"goal monitor".as_slice()
         } else if let Some(index) = self.handles.iter().position(|&saved| saved == handle) {
             PROGRAMS[index].1.as_bytes()
         } else {
@@ -381,6 +419,20 @@ fn spawn_scoped(
         print_line(&[b"cannot run scoped ", program.name().as_bytes()]);
     }
     handle
+}
+
+fn print_report(handle: usize, status: ChildStatus, expected: ReplyKind) -> bool {
+    let mut buffer = [0; MESSAGE_MAX_BYTES];
+    let reply = clv::receive_reply(handle, &mut buffer);
+    if matches!(status, ChildStatus::Exited(0))
+        && let Some(ChildReply::Received { kind, bytes, .. }) = reply
+        && kind == expected
+    {
+        display_reply(kind, bytes);
+        true
+    } else {
+        false
+    }
 }
 
 fn print_reply(handle: usize) {

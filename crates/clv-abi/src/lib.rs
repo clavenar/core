@@ -98,6 +98,7 @@ pub const SYS_GOAL_LAUNCH_OBSERVER: usize = 84;
 pub const SYS_GOAL_OBSERVE: usize = 85;
 pub const SYS_AGENT_LAUNCH_SUPERVISOR: usize = 86;
 pub const SYS_AGENT_RESUME_GRANTED: usize = 87;
+pub const SYS_GOAL_LAUNCH_FINISH_MONITOR: usize = 88;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_RAMFS_HANDLE: usize = usize::MAX;
@@ -113,7 +114,7 @@ pub enum RequestKind {
     PlanIntent = 5,
     PlanDefinition = 6,
     StageRename = 7,
-    /// Empty assignment queued by the owner through `goal_launch_observer`.
+    /// Empty assignment to report a goal snapshot using the calling launch's grant.
     ObserveGoal = 8,
     /// Empty assignment to resume the agent bound to this launch.
     ResumeAgent = 9,
