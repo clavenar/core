@@ -177,6 +177,7 @@ impl Goal {
             completion: None,
         });
         if slot + 1 == self.options.child_limit {
+            // Launch slots are never reused. Issued handles keep their own file references.
             self.release_file(fs);
         }
     }

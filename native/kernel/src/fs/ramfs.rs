@@ -101,7 +101,8 @@ struct WritableFile {
     contents: [u8; WRITABLE_FILE_CAPACITY],
     length: usize,
     linked: bool,
-    open_handles: usize,
+    // Task handles, goal grants, preserved inputs and staged renames keep an unlinked file alive.
+    references: usize,
 }
 
 impl WritableFile {
@@ -112,7 +113,7 @@ impl WritableFile {
             contents: [0; WRITABLE_FILE_CAPACITY],
             length: 0,
             linked: true,
-            open_handles: 0,
+            references: 0,
         })
     }
 }
@@ -248,7 +249,7 @@ impl RamFs {
         let slot = &mut self.writable[index];
         let file = slot.as_mut()?;
         self.revision.advance()?;
-        if file.open_handles == 0 {
+        if file.references == 0 {
             *slot = None;
         } else {
             file.linked = false;
@@ -361,8 +362,8 @@ impl RamFs {
         if let Node::WritableFile(index) = node {
             let file = self.writable[index]
                 .as_mut()
-                .expect("open handle refers to a writable file");
-            file.open_handles += 1;
+                .expect("writable file must exist when retained");
+            file.references += 1;
         }
     }
 
@@ -371,9 +372,9 @@ impl RamFs {
             let slot = &mut self.writable[index];
             let file = slot
                 .as_mut()
-                .expect("open handle refers to a writable file");
-            file.open_handles -= 1;
-            if file.open_handles == 0 && !file.linked {
+                .expect("retained writable file must still occupy its slot");
+            file.references -= 1;
+            if file.references == 0 && !file.linked {
                 *slot = None;
             }
         }

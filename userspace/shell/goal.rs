@@ -7,7 +7,7 @@ use clv::goal::{
     self, CancelResult, CloseResult, CommitResult, DiscardResult, FileRecipient, GoalStatus,
     PublicationError, ReplyBudget, ReviewToken, TimedRenameReview,
 };
-use clv::{agent, fs, print};
+use clv::{agent, print};
 use clv_abi::agent::{NO_DEFINITION, SHA256_BYTES};
 use clv_abi::{CompletionKind, OPEN_READ, Program};
 pub(super) use options::{GoalCommand, GoalOptions};
@@ -15,6 +15,7 @@ pub(super) use options::{GoalCommand, GoalOptions};
 use super::{
     HEX_DIGITS,
     children::Children,
+    files::OpenHandle,
     help::{self, Entry},
     hex, print_handle, print_line, split_literal, split_word,
 };
@@ -148,13 +149,11 @@ fn with_goal_file(
         print(b"no current goal\r\n");
         return None;
     };
-    let Some(fd) = fs::open(path, OPEN_READ) else {
+    let Some(file) = OpenHandle::open(path, OPEN_READ) else {
         print(b"cannot open path\r\n");
         return None;
     };
-    let result = operation(goal, fd);
-    fs::close(fd);
-    Some(result)
+    Some(operation(goal, file.id()))
 }
 
 fn stage_rename(goal: Option<usize>, arguments: &[u8]) {
@@ -260,37 +259,30 @@ fn create_goal(options: GoalOptions<'_>) -> Option<usize> {
         reply_limit: options.reply_bytes,
         allowed_helper: options.allowed_helper,
     };
-    with_optional_handle(options.read_under, |read_directory| {
-        with_optional_handle(options.rename_under, |directory| {
-            with_optional_handle(options.preserve_file, |preserve_file| {
-                goal::create_with_file_options(
-                    create,
-                    options.read_limits,
-                    options.allowed_tool,
-                    goal::FileOptions {
-                        read_directory,
-                        rename: goal::RenameOptions {
-                            directory,
-                            preserve_file,
-                        },
-                    },
-                )
-            })
-        })
-    })
+    // Keep all three descriptors open until the kernel has resolved the goal's policies.
+    let read_directory = open_policy_handle(options.read_under)?;
+    let rename_directory = open_policy_handle(options.rename_under)?;
+    let preserve_file = open_policy_handle(options.preserve_file)?;
+    goal::create_with_file_options(
+        create,
+        options.read_limits,
+        options.allowed_tool,
+        goal::FileOptions {
+            read_directory: read_directory.as_ref().map(OpenHandle::id),
+            rename: goal::RenameOptions {
+                directory: rename_directory.as_ref().map(OpenHandle::id),
+                preserve_file: preserve_file.as_ref().map(OpenHandle::id),
+            },
+        },
+    )
 }
 
-fn with_optional_handle(
-    path: Option<&[u8]>,
-    operation: impl FnOnce(Option<usize>) -> Option<usize>,
-) -> Option<usize> {
-    let Some(path) = path else {
-        return operation(None);
-    };
-    let fd = fs::open(path, OPEN_READ)?;
-    let result = operation(Some(fd));
-    fs::close(fd);
-    result
+// An omitted path leaves its policy unset. An unreadable supplied path fails goal creation.
+fn open_policy_handle(path: Option<&[u8]>) -> Option<Option<OpenHandle>> {
+    match path {
+        Some(path) => OpenHandle::open(path, OPEN_READ).map(Some),
+        None => Some(None),
+    }
 }
 
 const DIGITS: usize = usize::MAX.ilog10() as usize + 1;

@@ -1,4 +1,4 @@
-use clv::{ChildReply, ChildStatus, agent, fs, pipe, print};
+use clv::{ChildReply, ChildStatus, agent, pipe, print};
 use clv_abi::{
     ChildEvent, CompletionKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PIPE_CAPACITY,
     PROGRAM_HELLO, PROGRAMS, Program, ReplyKind, RequestKind,
@@ -6,6 +6,7 @@ use clv_abi::{
 
 use super::{
     command::GoalFlag,
+    files::OpenHandle,
     goal::{GoalCommand, GoalOptions},
     help::Entry,
     hex, print_handle, print_line, split_literal, split_word,
@@ -333,12 +334,11 @@ fn spawn_scoped(
     path: &[u8],
     spawn: impl FnOnce(usize, usize) -> Option<usize>,
 ) -> Option<usize> {
-    let Some(fd) = fs::open(path, OPEN_READ) else {
+    let Some(file) = OpenHandle::open(path, OPEN_READ) else {
         print(b"cannot open path\r\n");
         return None;
     };
-    let handle = spawn(program as usize, fd);
-    fs::close(fd);
+    let handle = spawn(program as usize, file.id());
     if handle.is_none() {
         print_line(&[b"cannot run scoped ", program.name().as_bytes()]);
     }

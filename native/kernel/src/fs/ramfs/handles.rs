@@ -34,6 +34,7 @@ enum Access {
 }
 
 struct Handle {
+    // Reusing a table slot assigns it a fresh ID, so a closed descriptor stays invalid.
     id: usize,
     node: Node,
     cursor: usize,
@@ -203,7 +204,7 @@ impl TaskFs {
         granting_goal: Option<usize>,
         policy: &RenamePolicy,
     ) -> Result<StagedRename, RenameDenial> {
-        let handle = self.slots.iter().flatten().find(|handle| handle.id == fd);
+        let handle = self.handle(fd);
         let source = if let Some(goal) = granting_goal {
             let required = Access::GoalFile {
                 goal,
@@ -253,14 +254,18 @@ impl TaskFs {
     }
 
     pub(super) fn node_for_handle(&self, fd: usize) -> Option<Node> {
-        let slot = self.handle_slot(fd)?;
-        Some(self.slots[slot].as_ref()?.node)
+        Some(self.handle(fd)?.node)
     }
 
-    fn handle_slot(&self, fd: usize) -> Option<usize> {
+    fn handle(&self, fd: usize) -> Option<&Handle> {
+        self.slots.iter().flatten().find(|handle| handle.id == fd)
+    }
+
+    fn handle_mut(&mut self, fd: usize) -> Option<&mut Handle> {
         self.slots
-            .iter()
-            .position(|slot| slot.as_ref().is_some_and(|handle| handle.id == fd))
+            .iter_mut()
+            .flatten()
+            .find(|handle| handle.id == fd)
     }
 
     fn open_path(
@@ -329,8 +334,7 @@ impl TaskFs {
         length: usize,
         deliver: impl FnOnce(Option<DirectoryId>, &[u8]) -> bool,
     ) -> Option<usize> {
-        let slot = self.handle_slot(fd)?;
-        let handle = self.slots[slot].as_mut()?;
+        let handle = self.handle_mut(fd)?;
         // Another handle can truncate the file below this cursor.
         let (contents, parent) = fs.readable_file(handle.node)?;
         let remaining = contents.get(handle.cursor..).unwrap_or(&[]);
@@ -343,8 +347,7 @@ impl TaskFs {
     }
 
     pub(crate) fn write(&mut self, fs: &mut RamFs, fd: usize, bytes: &[u8]) -> Option<usize> {
-        let slot = self.handle_slot(fd)?;
-        let handle = self.slots[slot].as_mut()?;
+        let handle = self.handle_mut(fd)?;
         if handle.access != Access::ReadWrite {
             return None;
         }
@@ -359,8 +362,7 @@ impl TaskFs {
         fd: usize,
         deliver: impl FnOnce(&[u8]) -> bool,
     ) -> Option<usize> {
-        let slot = self.handle_slot(fd)?;
-        let handle = self.slots[slot].as_mut()?;
+        let handle = self.handle_mut(fd)?;
         let Node::Directory(directory) = handle.node else {
             return None;
         };
@@ -375,8 +377,10 @@ impl TaskFs {
     }
 
     pub(crate) fn close(&mut self, fs: &mut RamFs, fd: usize) -> Option<usize> {
-        let slot = self.handle_slot(fd)?;
-        let handle = self.slots[slot].take()?;
+        let handle = self
+            .slots
+            .iter_mut()
+            .find_map(|slot| slot.take_if(|handle| handle.id == fd))?;
         fs.release(handle.node);
         Some(0)
     }

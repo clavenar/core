@@ -3,6 +3,25 @@ use clv_abi::{OPEN_READ, OPEN_WRITE_TRUNCATE};
 
 use super::{LINE_LIMIT, help::Entry, split_word};
 
+/// Owns one RamFS descriptor in the shell's handle table until it leaves scope.
+pub(super) struct OpenHandle(usize);
+
+impl OpenHandle {
+    pub(super) fn open(path: &[u8], mode: usize) -> Option<Self> {
+        fs::open(path, mode).map(Self)
+    }
+
+    pub(super) fn id(&self) -> usize {
+        self.0
+    }
+}
+
+impl Drop for OpenHandle {
+    fn drop(&mut self) {
+        fs::close(self.0);
+    }
+}
+
 pub(super) fn cd(path: &[u8]) {
     path_command(fs::chdir, path, Entry::Cd, b"cannot change directory\r\n");
 }
@@ -61,13 +80,13 @@ pub(super) fn cat(path: &[u8]) {
 }
 
 fn show(path: &[u8], list_entries: bool) {
-    let Some(handle) = fs::open(path, OPEN_READ) else {
+    let Some(handle) = OpenHandle::open(path, OPEN_READ) else {
         return print(b"cannot open path\r\n");
     };
     let mut buffer = [0; 64];
     let read = if list_entries { fs::readdir } else { fs::read };
     loop {
-        match read(handle, &mut buffer) {
+        match read(handle.id(), &mut buffer) {
             Some([]) => break,
             Some(bytes) => {
                 clv::write_console(bytes);
@@ -81,7 +100,6 @@ fn show(path: &[u8], list_entries: bool) {
             }
         }
     }
-    fs::close(handle);
 }
 
 pub(super) fn write_file(arguments: &[u8]) {
@@ -93,12 +111,10 @@ pub(super) fn write_file(arguments: &[u8]) {
     buffer[..text.len()].copy_from_slice(text);
     let length = text.len() + 2;
     buffer[text.len()..length].copy_from_slice(b"\r\n");
-    let Some(handle) = fs::open(path, OPEN_WRITE_TRUNCATE) else {
+    let Some(handle) = OpenHandle::open(path, OPEN_WRITE_TRUNCATE) else {
         return print(b"cannot open path\r\n");
     };
-    let count = fs::write(handle, &buffer[..length]);
-    fs::close(handle);
-    if count != Some(length) {
+    if fs::write(handle.id(), &buffer[..length]) != Some(length) {
         print(b"cannot write path\r\n");
     }
 }
