@@ -37,7 +37,7 @@ extern "C" fn kernel_main() -> ! {
     );
     uart::write(banner.as_bytes());
 
-    let durable_disk = probe_block();
+    let journal = probe_block();
     // SAFETY: QEMU virt supplies the MMIO windows, and paging is still disabled.
     let bridge = unsafe { Console::discover() };
     // SAFETY: The single boot hart claims the frame pool here once.
@@ -51,7 +51,7 @@ extern "C" fn kernel_main() -> ! {
         uart::BASE,
         [
             bridge.as_ref().map(Console::base),
-            durable_disk.as_ref().map(block::JournalDevice::base),
+            journal.as_ref().map(block::JournalDevice::base),
         ]
         .into_iter()
         .flatten(),
@@ -67,7 +67,13 @@ extern "C" fn kernel_main() -> ! {
         )
     });
     let after_paging = |scheduler: &mut Scheduler, fs: &mut RamFs| {
-        scheduler.attach_durable_disk(durable_disk.and_then(|disk| recover_durable_disk(disk, fs)));
+        if let Some(disk) = journal {
+            if disk.is_checkpoint() {
+                scheduler.attach_checkpoint_disk(disk);
+            } else {
+                scheduler.attach_durable_disk(recover_durable_disk(disk, fs));
+            }
+        }
         scheduler.attach_host_bridge(bridge.and_then(probe_bridge));
     };
     // SAFETY: The boot hart installed the trap vector and built every task's address space.

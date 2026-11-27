@@ -100,6 +100,20 @@ impl FileGrant {
         self.node == other.node
     }
 
+    pub(crate) fn delegates_boot_file(
+        &self,
+        name: &[u8],
+        helper: Program,
+        argument: &[u8],
+    ) -> bool {
+        matches!(self.node, Node::BootFile(index) if super::BOOT_FILES[index].name == name)
+            && self.mode == FileGrantMode::Delegate(FileRecipient::Program(helper))
+            && self
+                .argument
+                .as_ref()
+                .is_some_and(|pinned| pinned.as_bytes() == argument)
+    }
+
     pub(crate) fn open_for_child(
         &self,
         fs: &mut RamFs,

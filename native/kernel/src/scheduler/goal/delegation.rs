@@ -117,7 +117,7 @@ impl DelegationTarget {
 }
 
 impl Goal {
-    fn helper_program(
+    pub(super) fn helper_program(
         &self,
         selector: usize,
         requested_tool: Option<ToolId>,

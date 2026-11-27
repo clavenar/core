@@ -27,6 +27,7 @@ const DEMO_HEADER: Sector = padded_sector(b"CLVDEMO1");
 const DEMO_MARKER: Sector = padded_sector(b"CLVSAVE1");
 const DURABLE_HEADER: Sector = padded_sector(b"CLVRNM01");
 const DURABLE_PAIR_HEADER: Sector = padded_sector(b"CLVRNM02");
+const CHECKPOINT_HEADER: Sector = padded_sector(b"CLVCHK01");
 
 const fn padded_sector(prefix: &[u8; 8]) -> Sector {
     let mut sector = BLANK_SECTOR;
@@ -137,7 +138,22 @@ struct Block {
 
 pub(crate) struct JournalDevice {
     block: Block,
-    format: Format,
+    kind: JournalKind,
+}
+
+#[derive(Clone, Copy)]
+enum JournalKind {
+    Renames(Format),
+    Checkpoint,
+}
+
+impl JournalKind {
+    fn format(self) -> Format {
+        match self {
+            Self::Renames(format) => format,
+            Self::Checkpoint => Format::Single,
+        }
+    }
 }
 
 impl JournalDevice {
@@ -146,7 +162,11 @@ impl JournalDevice {
     }
 
     pub(crate) fn file_count(&self) -> usize {
-        self.format.file_count()
+        self.kind.format().file_count()
+    }
+
+    pub(crate) fn is_checkpoint(&self) -> bool {
+        matches!(self.kind, JournalKind::Checkpoint)
     }
 
     pub(crate) fn open_journal<T>(
@@ -154,7 +174,13 @@ impl JournalDevice {
         decode: impl Fn(&[u8]) -> Option<T>,
     ) -> Result<(JournalDisk, Option<T>), JournalLoadError> {
         self.block.deadline = io_deadline();
-        let (journal, recovered) = match Journal::load(&mut self.block, self.format, decode) {
+        let require_intact_slots = self.is_checkpoint();
+        let (journal, recovered) = match Journal::load(
+            &mut self.block,
+            self.kind.format(),
+            require_intact_slots,
+            decode,
+        ) {
             Ok(loaded) => loaded,
             Err(error) => {
                 self.block.device.reset(self.block.deadline);
@@ -243,8 +269,8 @@ pub(crate) unsafe fn probe() -> Option<Result<Probe, ProbeError>> {
     };
     let result = block.start().and_then(|()| block.inspect());
     Some(match result {
-        Ok((mut probe, Some(format))) => {
-            probe.durable_disk = Some(JournalDevice { block, format });
+        Ok((mut probe, Some(kind))) => {
+            probe.durable_disk = Some(JournalDevice { block, kind });
             Ok(probe)
         }
         result if block.device.reset(deadline) => result.map(|(probe, _)| probe),
@@ -270,7 +296,7 @@ impl Block {
         Ok(())
     }
 
-    fn inspect(&mut self) -> Result<(Probe, Option<Format>), ProbeError> {
+    fn inspect(&mut self) -> Result<(Probe, Option<JournalKind>), ProbeError> {
         let first = self.read_sector(0)?;
         let scratch = match first {
             DEMO_HEADER => Some(ScratchProbe::Marker(self.persist_marker())),
@@ -285,8 +311,9 @@ impl Block {
                 durable_disk: None,
             },
             match first {
-                DURABLE_HEADER => Some(Format::Single),
-                DURABLE_PAIR_HEADER => Some(Format::Pair),
+                DURABLE_HEADER => Some(JournalKind::Renames(Format::Single)),
+                DURABLE_PAIR_HEADER => Some(JournalKind::Renames(Format::Pair)),
+                CHECKPOINT_HEADER => Some(JournalKind::Checkpoint),
                 _ => None,
             },
         ))

@@ -175,6 +175,7 @@ impl Journal {
     pub(super) fn load<T>(
         block: &mut Block,
         format: Format,
+        require_intact_slots: bool,
         decode: impl Fn(&[u8]) -> Option<T>,
     ) -> Result<(Self, Option<T>), JournalLoadError> {
         if block.sectors < 1 + 2 * format.file_count() as u64 {
@@ -186,6 +187,15 @@ impl Journal {
             let value = decode(record.payload)?;
             Some((record.report(format.slot_start(slot), checksum), value))
         });
+        // A damaged checkpoint slot may have contained a consumption record.
+        if require_intact_slots
+            && slots
+                .iter()
+                .zip(&records)
+                .any(|(slot, record)| record.is_none() && *slot != [0; MAX_SLOT_BYTES])
+        {
+            return Err(JournalLoadError::InvalidSlots);
+        }
         if matches!(&records, [Some((first, _)), Some((second, _))]
             if first.generation == second.generation)
         {
@@ -259,7 +269,7 @@ impl Journal {
 }
 
 pub(super) fn run(block: &mut Block) -> Result<JournalProbe, JournalLoadError> {
-    let (mut journal, _) = Journal::load(block, Format::Single, |_| Some(()))?;
+    let (mut journal, _) = Journal::load(block, Format::Single, false, |_| Some(()))?;
     let recovered = journal.latest;
     let payload = DEMO_PAYLOADS[journal.next_slot()];
     let update = journal.append(block, payload);

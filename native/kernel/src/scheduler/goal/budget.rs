@@ -18,6 +18,13 @@ impl ReplyReservation {
         })
     }
 
+    pub(super) fn restored(remaining: usize, spent: usize) -> Self {
+        Self {
+            remaining: Some(remaining),
+            spent,
+        }
+    }
+
     /// Compute both shares so the caller can commit them after acquiring any file grant.
     pub(super) fn split(&self, bytes: usize) -> Option<(Self, Self)> {
         let helper = Self::new(self.remaining, Some(bytes))?;

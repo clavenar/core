@@ -4,7 +4,7 @@ mod pipe;
 
 use self::definition::AgentBinding;
 pub(crate) use self::goal::DelegationTarget;
-use self::goal::{Goal, MonitorReport, ReadDenialWatch};
+use self::goal::{CheckpointJournal, Goal, MonitorReport, ReadDenialWatch};
 use self::pipe::LaunchPipes;
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
@@ -195,6 +195,7 @@ pub(crate) struct Scheduler {
     initial_status: usize,
     goal: Option<Goal>,
     durable_disk: Option<JournalDisk>,
+    checkpoint_disk: Option<CheckpointJournal>,
     host_bridge: Option<HostBridge>,
     /// The dedicated monitor owns this snapshot from wakeup until its grant is used or revoked.
     monitor_report: Option<MonitorReport>,
@@ -215,6 +216,7 @@ impl Scheduler {
             initial_status: sstatus,
             goal: None,
             durable_disk: None,
+            checkpoint_disk: None,
             host_bridge: None,
             monitor_report: None,
             read_denial_watch: None,
@@ -291,9 +293,13 @@ impl Scheduler {
         suspended: bool,
         reply_bytes: Option<usize>,
         request: Option<Message>,
+        checkpoint: bool,
     ) -> Option<AgentLaunch> {
         let agent = self.next_handle;
         let binding = AgentBinding::resolve(agent, program, request.as_ref())?;
+        if checkpoint {
+            self.check_checkpoint_launch(goal, binding, reply_bytes)?;
+        }
         let child = self.start_child(
             fs,
             program,
@@ -305,6 +311,9 @@ impl Scheduler {
             Some(binding),
             TaskState::for_agent(suspended),
         )?;
+        if checkpoint {
+            self.arm_checkpoint(child);
+        }
         Some(AgentLaunch { agent, child })
     }
 
@@ -630,6 +639,7 @@ impl Scheduler {
 
     pub(crate) fn stop_current(&mut self, fs: &mut RamFs, completion: TaskCompletion) {
         self.stop_task(self.current, fs, completion);
+        self.checkpoint_after_helper_exit(self.current, completion, fs);
         if self.current == SHELL_TASK_INDEX {
             self.release_shell_goal(fs);
             for task in &mut self.tasks {

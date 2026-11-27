@@ -5,7 +5,7 @@ pub use clv_abi::agent::{
     PlanIntent, ResumeReceipt,
 };
 use clv_abi::agent::{
-    DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES,
+    DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES, RUN_CHECKPOINT,
     RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR,
     RUN_SUSPENDED, encode_rename_pair,
 };
@@ -77,6 +77,7 @@ pub enum RunRequest<'a> {
     DelegateWithFile(FileDelegation<'a>),
     Plan(PlanIntent),
     Definition(DefinitionId),
+    Checkpoint,
     StageRename(&'a [u8]),
     StageRenamePair([&'a [u8]; 2]),
 }
@@ -107,6 +108,11 @@ pub fn launch(
         RunRequest::Definition(id) => {
             flags |= RUN_PLAN_DEFINITION;
             buffer[..2].copy_from_slice(&id.encode());
+            &buffer[..2]
+        }
+        RunRequest::Checkpoint => {
+            flags |= RUN_PLAN_DEFINITION | RUN_CHECKPOINT;
+            buffer[..2].copy_from_slice(&FIND_GREETING_V2.encode());
             &buffer[..2]
         }
         RunRequest::StageRename(name) => {
@@ -266,6 +272,18 @@ pub fn suspend(agent: usize) -> Option<ControlResult> {
 
 pub fn resume(agent: usize) -> Option<ControlResult> {
     control(SYS_AGENT_RESUME, agent)
+}
+
+/// Completes a recovered checkpoint and returns its new goal and launch handles.
+pub fn resume_checkpoint() -> Option<(usize, AgentLaunch)> {
+    let (agent, child, goal, _) = ecall(SYS_AGENT_RESUME, CURRENT_AGENT, 0, 0, 0, 0);
+    Some((
+        goal,
+        AgentLaunch {
+            agent: syscall_result(agent)?,
+            child,
+        },
+    ))
 }
 
 /// Starts a shell-owned supervisor for this agent's current suspension.

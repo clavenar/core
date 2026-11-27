@@ -6,6 +6,9 @@ use clv_abi::agent::{
 
 use crate::ipc::{Message, MessageKind};
 
+pub(super) const FIND_GREETING_V2_PIN: &EncodedDefinitionPin =
+    include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v2.pin"));
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct AgentBinding {
     pub(super) handle: usize,
@@ -29,10 +32,7 @@ impl AgentBinding {
                     env!("OUT_DIR"),
                     "/find-greeting-v1.pin"
                 ))),
-                Some(FIND_GREETING_V2) => Some(include_bytes!(concat!(
-                    env!("OUT_DIR"),
-                    "/find-greeting-v2.pin"
-                ))),
+                Some(FIND_GREETING_V2) => Some(FIND_GREETING_V2_PIN),
                 Some(FIND_GREETING_V3) => Some(include_bytes!(concat!(
                     env!("OUT_DIR"),
                     "/find-greeting-v3.pin"

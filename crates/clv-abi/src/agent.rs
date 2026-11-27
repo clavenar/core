@@ -13,6 +13,8 @@ pub const RUN_PLAN_DEFINITION: usize = 8;
 pub const RUN_STAGE_RENAME: usize = 16;
 /// Selects two destination basenames in rename grant order.
 pub const RUN_STAGE_RENAME_PAIR: usize = 32;
+/// Pause the pinned local search after durably saving its completed reply.
+pub const RUN_CHECKPOINT: usize = 64;
 /// A zero agent handle on a delegation call selects the calling task's live agent.
 pub const CURRENT_AGENT: usize = 0;
 

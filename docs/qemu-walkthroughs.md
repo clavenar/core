@@ -15,6 +15,7 @@ handles and ordinary RamFS changes live for one boot.
 - [Delegation and read limits](#delegation-and-read-limits)
   - [Watch for a read-scope denial](#watch-for-a-read-scope-denial)
 - [Mock planning and registered tools](#mock-planning-and-registered-tools)
+  - [Resume a local search checkpoint](#resume-a-local-search-checkpoint)
   - [Run a host-backed mock plan](#run-a-host-backed-mock-plan)
   - [Run a model-backed plan](#run-a-model-backed-plan)
   - [Search a host MCP fixture](#search-a-host-mcp-fixture)
@@ -1344,6 +1345,84 @@ The audit identifies the same tool and image and reports
 The only reply is the agent's zero-byte failure, and all 36 reply bytes are
 available when the agent exits. The shorthand `find-greeting` still selects
 revision 1, whose ordinary program delegation has no tool identity.
+
+### Resume a local search checkpoint
+
+After building the kernel, run this block at the Linux prompt in `core`.
+It creates a dedicated image for one checkpoint.
+
+```sh
+checkpoint_disk="$(mktemp -t clavenar-checkpoint.XXXXXX)"
+truncate -s 1M "$checkpoint_disk"
+printf 'CLVCHK01' | dd of="$checkpoint_disk" conv=notrunc status=none
+
+boot_checkpoint() {
+  qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
+    -kernel target/riscv64gc-unknown-none-elf/release/clavenar-kernel \
+    -global virtio-mmio.force-legacy=off \
+    -drive "file=$checkpoint_disk,format=raw,if=none,id=checkpoint,cache=writeback" \
+    -device virtio-blk-device,drive=checkpoint
+}
+
+boot_checkpoint
+```
+
+Look for `agent checkpoint journal ready`. At `clsh>`, start the local search.
+
+```text
+goal create --children 2 --allow-tool text.search@1 --read-bytes 18 --reply-bytes 36
+goal grant-file --delegate-to grep --argument Hello /hello.txt
+agent run --checkpoint hello --mock find-greeting@2
+```
+
+Wait for `agent checkpoint saved (paused)`, then run the checks below.
+
+```text
+agent status
+goal audit
+goal audit --reads
+goal budget
+```
+
+Expect a suspended agent, one `grep` delegation, `read_bytes=18` and
+`available=0 reserved=18 spent=18`. Quit QEMU with `Ctrl+a`, then `x`, and run
+`boot_checkpoint` again in the same Linux terminal. The boot line says
+`agent checkpoint recovered (paused)`. At `clsh>`, resume with the saved image.
+
+```text
+agent resume
+wait hello
+recv hello
+goal audit
+goal audit --reads
+goal budget
+goal close
+```
+
+`recv hello` prints `Hello from RamFS`. The recovered goal has zero new
+delegations and zero new read audit entries. It still reports
+`read_bytes=18`, and its reply budget shows `available=0 reserved=0 spent=36`.
+The original search was already charged for its reply, and this resume
+charged for forwarding the result.
+
+Quit and run `boot_checkpoint` a third time. Look for
+`agent checkpoint consumed`. At `clsh>`, `agent resume` reports
+`no current agent`. Prepare a fresh checkpoint image to repeat the example.
+
+Sector 0 contains `CLVCHK01` followed by zeros. Slots 1 and 2 use the
+512-byte journal format. The generation 1 payload starts with byte 1 and
+the 34-byte definition pin. Five little-endian 64-bit words follow in
+order for the read limit, read bytes spent, reply limit, reply bytes spent
+and remaining reply reservation. The last 18 bytes hold the saved
+`Matches` reply. The generation 2 payload is byte 2, which marks the
+checkpoint consumed. An invalid nonblank slot blocks recovery because it
+may have held the consumption record.
+[Journal record format](#recover-a-previous-journal-record)
+
+The kernel flushes consumption before queueing the saved reply. A crash
+in that interval can interrupt delivery. In the boot that saved the
+checkpoint, `agent resume` can finish directly and `goal cancel` can
+consume the checkpoint and discard the reply.
 
 ### Invoke a registered file tool over stdio
 

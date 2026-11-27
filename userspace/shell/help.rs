@@ -107,8 +107,9 @@ entries! {
     },
 
     AgentRun {
-        "agent run [--suspended] [--reply-bytes N] <program> [request]" =>
+        "agent run [--suspended] [--checkpoint] [--reply-bytes N] <program> [request]" =>
             "Start an agent. Requests below apply to hello",
+        "  --checkpoint" => "Pause find-greeting@2 after saving its search result",
         "  --stage-rename <new-name>" => "Stage in grant order (repeat for two files)",
         "  --mock find-greeting[@REV]" => "Run revision 1 (default), 2, 3 (stdio), 4 (MCP) or 5 (host)",
         "  --plan find-greeting@6" => "Use the host model to choose the pinned search",
@@ -126,7 +127,7 @@ entries! {
     AgentActions {
         "agent status" => "Show agent state and handles",
         "agent suspend" => "Pause the agent",
-        "agent resume [--via echo]" => "Resume directly or grant echo one resume",
+        "agent resume [--via echo]" => "Resume an agent or a recovered checkpoint",
     },
 }
 

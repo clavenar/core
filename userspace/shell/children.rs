@@ -276,6 +276,12 @@ impl Children {
         Some(launch)
     }
 
+    pub(super) fn resume_checkpoint(&mut self) -> Option<(usize, agent::AgentLaunch)> {
+        let (goal, launch) = agent::resume_checkpoint()?;
+        self.handles[Program::Hello as usize] = launch.child;
+        Some((goal, launch))
+    }
+
     pub(super) fn delegate(&mut self, agent: Option<usize>, arguments: &[u8]) {
         let Some(helper) = Helper::parse(arguments) else {
             return Entry::Delegate.usage();
@@ -444,7 +450,7 @@ fn agent_run_args(
     arguments: &[u8],
 ) -> Option<(GoalOptions<'_>, Program, Option<agent::RunRequest<'_>>)> {
     let (options, program, rest) = goal_program(arguments, GoalCommand::AgentRun)?;
-    let request = if rest.is_empty() {
+    let mut request = if rest.is_empty() {
         None
     } else {
         let (flag, args) = split_word(rest);
@@ -484,6 +490,13 @@ fn agent_run_args(
             _ => return None,
         })
     };
+    if options.checkpoint {
+        if !matches!(request, Some(agent::RunRequest::Definition(id)) if id == agent::FIND_GREETING_V2)
+        {
+            return None;
+        }
+        request = Some(agent::RunRequest::Checkpoint);
+    }
     Some((options, program, request))
 }
 

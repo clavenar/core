@@ -13,6 +13,7 @@ const DIRECTORY_COUNT: usize = 4;
 const NAME_LIMIT: usize = 64;
 const CWD_PATH_CAPACITY: usize = DIRECTORY_COUNT * (NAME_LIMIT + 1);
 pub(crate) const WRITABLE_FILE_CAPACITY: usize = 256;
+pub(crate) const HELLO_FILE_CONTENTS: &[u8] = b"Hello from RamFS\r\n";
 
 struct BootFile {
     name: &'static [u8],
@@ -22,7 +23,7 @@ struct BootFile {
 const BOOT_FILES: [BootFile; 2] = [
     BootFile {
         name: b"hello.txt",
-        contents: b"Hello from RamFS\r\n",
+        contents: HELLO_FILE_CONTENTS,
     },
     BootFile {
         name: b"about.txt",

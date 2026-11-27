@@ -54,6 +54,22 @@ impl GoalReads {
         }
     }
 
+    pub(super) fn checkpoint_counts(&self) -> Option<(usize, usize)> {
+        Some((self.goal_limit?, self.spent))
+    }
+
+    pub(super) fn restored(limit: usize, spent: usize) -> Self {
+        let mut reads = Self::new(
+            ReadLimits {
+                goal: Some(limit),
+                helpers: None,
+            },
+            None,
+        );
+        reads.spent = spent;
+        reads
+    }
+
     pub(super) fn pins_directory(&self, directory: DirectoryId) -> bool {
         self.scope
             .as_ref()

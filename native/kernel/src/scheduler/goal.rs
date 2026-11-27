@@ -1,5 +1,6 @@
 mod audit;
 mod budget;
+mod checkpoint;
 mod delegation;
 mod monitor;
 mod reads;
@@ -7,6 +8,7 @@ mod rename;
 
 use self::audit::{AuditHistory, PublicationHistory};
 use self::budget::ReplyReservation;
+pub(super) use self::checkpoint::CheckpointJournal;
 pub(super) use self::monitor::{MonitorReport, ReadDenialWatch};
 use self::reads::GoalReads;
 use self::rename::PendingRenames;
@@ -92,6 +94,7 @@ pub(super) struct Goal {
     allowed_tools: [Option<ToolId>; 2],
     reads: GoalReads,
     members: [Option<Member>; MAX_CHILDREN],
+    checkpoint_child: Option<usize>,
     cancelled_before_launch: bool,
     file_grants: [Option<FileGrant>; MAX_GOAL_RENAMES],
     rename_policy: RenamePolicy,
@@ -106,6 +109,35 @@ pub(super) struct Goal {
 }
 
 impl Goal {
+    fn new(
+        handle: usize,
+        policy: CreatePolicy,
+        deadline: GoalDeadline,
+        reads: GoalReads,
+        rename_policy: RenamePolicy,
+    ) -> Self {
+        Self {
+            handle,
+            options: policy.options,
+            deadline,
+            allowed_tools: policy.allowed_tools,
+            reads,
+            members: [const { None }; MAX_CHILDREN],
+            checkpoint_child: None,
+            cancelled_before_launch: false,
+            file_grants: [const { None }; MAX_GOAL_RENAMES],
+            rename_policy,
+            require_rename_review: policy.require_rename_review || policy.durable,
+            rename_limit: policy.rename_limit,
+            rename: None,
+            publication_report: None,
+            delegation_audit: AuditHistory::default(),
+            reply_audit: AuditHistory::default(),
+            rename_audit: AuditHistory::default(),
+            publication_audit: PublicationHistory::default(),
+        }
+    }
+
     pub(super) fn pins_directory(&self, directory: DirectoryId) -> bool {
         self.rename_policy.directory == directory || self.reads.pins_directory(directory)
     }
@@ -160,7 +192,7 @@ impl Goal {
         request: Option<&Message>,
         fs: &mut RamFs,
     ) -> Option<TaskFs> {
-        if self.handle != handle || !self.is_active() {
+        if self.handle != handle || !self.is_active() || self.checkpoint_child.is_some() {
             return None;
         }
         if agent.is_some()
@@ -275,27 +307,21 @@ impl Scheduler {
         timeout_ms: Option<usize>,
         fs: &mut RamFs,
     ) -> Option<usize> {
-        let CreatePolicy {
-            options,
-            read_limits,
-            allowed_tools,
-            require_rename_review,
-            rename_limit,
-            durable,
-        } = policy;
+        let durable_renames = policy.durable.then_some(policy.rename_limit);
         if self.current != SHELL_TASK_INDEX
             || self.goal.is_some()
-            || !(1..=MAX_CHILDREN).contains(&options.child_limit)
-            || files.rename.preserve_files.iter().flatten().count() > rename_limit
-            || (durable
-                && !self
+            || !(1..=MAX_CHILDREN).contains(&policy.options.child_limit)
+            || files.rename.preserve_files.iter().flatten().count() > policy.rename_limit
+            || durable_renames.is_some_and(|count| {
+                !self
                     .durable_disk
                     .as_ref()
-                    .is_some_and(|disk| disk.supports_renames(rename_limit)))
+                    .is_some_and(|disk| disk.supports_renames(count))
+            })
         {
             return None;
         }
-        for id in allowed_tools.into_iter().flatten() {
+        for id in policy.allowed_tools.into_iter().flatten() {
             if id != HOST_TEXT_SEARCH_V1 {
                 crate::programs::file_tool(id)?;
             }
@@ -311,28 +337,10 @@ impl Scheduler {
             Some(ms) => GoalDeadline::after_millis(monotonic_nanos(), ms)?,
             None => GoalDeadline::Unlimited,
         };
-        let rename_policy =
-            RenamePolicy::capture(caller, fs, files.rename, durable.then_some(rename_limit))?;
+        let rename_policy = RenamePolicy::capture(caller, fs, files.rename, durable_renames)?;
+        let reads = GoalReads::new(policy.read_limits, read_directory);
         self.next_handle = next_handle;
-        self.goal = Some(Goal {
-            handle,
-            options,
-            deadline,
-            allowed_tools,
-            reads: GoalReads::new(read_limits, read_directory),
-            members: [const { None }; MAX_CHILDREN],
-            cancelled_before_launch: false,
-            file_grants: [const { None }; MAX_GOAL_RENAMES],
-            rename_policy,
-            require_rename_review: require_rename_review || durable,
-            rename_limit,
-            rename: None,
-            publication_report: None,
-            delegation_audit: AuditHistory::default(),
-            reply_audit: AuditHistory::default(),
-            rename_audit: AuditHistory::default(),
-            publication_audit: PublicationHistory::default(),
-        });
+        self.goal = Some(Goal::new(handle, policy, deadline, reads, rename_policy));
         Some(handle)
     }
 
@@ -560,6 +568,7 @@ impl Scheduler {
 
     pub(crate) fn set_agent_suspended(
         &mut self,
+        fs: &mut RamFs,
         handle: usize,
         suspended: bool,
     ) -> Option<ControlResult> {
@@ -576,7 +585,11 @@ impl Scheduler {
         if suspended {
             self.tasks[index].state = TaskState::Suspended;
         } else if state == TaskState::Suspended {
-            self.resume_suspended_child(index, child);
+            if self.has_live_checkpoint(child) {
+                self.complete_live_checkpoint(index, fs)?;
+            } else {
+                self.resume_suspended_child(index, child);
+            }
         }
         Some(ControlResult::Applied)
     }
@@ -585,8 +598,10 @@ impl Scheduler {
         let (_, member, _) = self.agent_member(agent)?;
         let child = member.handle;
         let index = self.launch_index(child)?;
-        (member.completion.is_none() && self.tasks[index].state == TaskState::Suspended)
-            .then_some(LaunchGrant::ResumeAgent(child))
+        (member.completion.is_none()
+            && self.tasks[index].state == TaskState::Suspended
+            && !self.has_live_checkpoint(child))
+        .then_some(LaunchGrant::ResumeAgent(child))
     }
 
     pub(crate) fn resume_granted_agent(&mut self) -> Option<()> {
@@ -596,7 +611,7 @@ impl Scheduler {
         };
         let (goal, _, binding) = self.live_agent_member(child)?;
         let index = self.launch_index(child)?;
-        if self.tasks[index].state != TaskState::Suspended {
+        if self.tasks[index].state != TaskState::Suspended || self.has_live_checkpoint(child) {
             return None;
         }
         let receipt = ResumeReceipt {
@@ -644,7 +659,13 @@ impl Scheduler {
     }
 
     pub(crate) fn cancel_goal(&mut self, handle: usize, fs: &mut RamFs) -> Option<CancelOutcome> {
-        self.shell_goal(handle)?;
+        if self
+            .shell_goal(handle)?
+            .checkpoint_child
+            .is_some_and(|child| self.has_live_checkpoint(child))
+        {
+            self.consume_checkpoint()?;
+        }
         self.stop_goal_work(fs, PublicationOutcome::DiscardedByCancel)
     }
 

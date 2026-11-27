@@ -26,6 +26,7 @@ pub(crate) struct GoalOptions<'a> {
     pub require_rename_review: bool,
     pub durable: bool,
     pub suspended: bool,
+    pub checkpoint: bool,
     pub with_file: bool,
 }
 
@@ -109,6 +110,12 @@ impl<'a> GoalOptions<'a> {
                     if matches!(command, GoalCommand::AgentRun) && !options.suspended =>
                 {
                     options.suspended = true;
+                    rest
+                }
+                GoalFlag::Checkpoint
+                    if matches!(command, GoalCommand::AgentRun) && !options.checkpoint =>
+                {
+                    options.checkpoint = true;
                     rest
                 }
                 GoalFlag::WithFile

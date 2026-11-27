@@ -78,6 +78,7 @@ keywords!(GoalFlag {
     RequireRenameReview => "--require-rename-review",
     Durable => "--durable",
     Suspended => "--suspended",
+    Checkpoint => "--checkpoint",
     WithFile => "--with-file",
     Delegable => "--delegable",
     DelegateTo => "--delegate-to",

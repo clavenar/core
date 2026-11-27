@@ -533,6 +533,19 @@ pub(super) fn agent_command(
             Some(agent) => children.resume_via_echo(agent),
             None => print(b"no current agent\r\n"),
         },
+        (Subcommand::Resume, b"") if current.is_none() => {
+            let Some((handle, launch)) = children.resume_checkpoint() else {
+                return print(b"no current agent\r\n");
+            };
+            *current = Some(CurrentGoal {
+                handle,
+                agent: Some(launch.agent),
+                review: None,
+                require_rename_review: false,
+            });
+            print(b"agent checkpoint resumed\r\n");
+            print_handles(b"agent=", launch.agent, b" child=", launch.child);
+        }
         (action @ (Subcommand::Suspend | Subcommand::Resume), b"") => {
             let suspending = matches!(action, Subcommand::Suspend);
             let control = if suspending {

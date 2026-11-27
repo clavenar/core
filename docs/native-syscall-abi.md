@@ -1,7 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.76 reports the journal generation and checksum for durable commits.
+Kernel 0.0.77 adds a durable checkpoint for the local `find-greeting@2` reply.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -20,6 +20,7 @@ The caller places the call number in `a7`, passes up to six arguments in
 - [Rename review and publication](#rename-review-and-publication)
   - [Delegating a rename review](#delegating-a-rename-review)
 - [Goal membership and delegated authority](#goal-membership-and-delegated-authority)
+  - [Local search checkpoint](#local-search-checkpoint)
 - [Audit records](#audit-records)
   - [Read audit](#read-audit)
   - [Publication audit](#publication-audit)
@@ -797,7 +798,8 @@ The agent run calls also create and bind the agent in that operation.
 Call 56 queues a typed request before the agent starts. Bit 0 starts it
 suspended. Bit 1 selects the explicit agent reply allowance in `a3`.
 Otherwise the agent inherits the available balance. Bits 2–5 select the
-request format.
+request format. Bit 6 requests a durable checkpoint for the revision 2
+`PlanDefinition` request.
 
 | Format flags | Request kind | Payload |
 | --- | --- | --- |
@@ -914,6 +916,34 @@ Calls 53, 54 and 60 copy up to 64 literal argument bytes into the launch mailbox
 before the child can run. The child reads the argument with call 25. The
 selected delivery mode determines the tag even for an empty argument.
 Invalid arguments fail before admission or reservation.
+
+### Local search checkpoint
+
+With bits 3 and 6 set, call 56 admits `find-greeting@2` to a ready,
+untimed goal with two child slots and a writable, empty `CLVCHK01` journal.
+The goal needs finite read and reply budgets with at least 18 read bytes
+and 36 bytes reserved for the agent. Its file grant must pin the built-in
+`/hello.txt` to `grep` with the argument `Hello`, and goal policy must allow
+`text.search@1`. Normal helper authorization and charging apply to the search.
+
+When the helper exits successfully, the kernel saves its `Matches` reply
+and the actual budget counts, then suspends the parent before forwarding.
+An owner waiting for the child can issue another command when the child
+parks. The owner resumes the checkpoint. Call 41 with the live agent
+handle consumes the journal record and completes the reply step on that
+launch. Goal cancellation also consumes a live checkpoint before discarding
+the reply.
+
+After reboot the shell can use call 41 with `a0` set to zero and no open
+goal. The kernel validates the saved definition pin and the reply reservation,
+flushes the consumption record, and completes the reply step under fresh
+handles. On success `a0`, `a1` and `a2` contain the agent, child and goal handles
+respectively. The new goal carries forward the recorded read and reply
+spending and charges for forwarding the saved result. Its continuation
+has reply authority and fresh audit histories. A failed or unconfirmed
+consumption leaves the reply private. A crash after confirmed consumption
+can interrupt delivery, and the checkpoint stays consumed on reboot.
+[Checkpoint walkthrough](qemu-walkthroughs.md#resume-a-local-search-checkpoint)
 
 ## Audit records
 

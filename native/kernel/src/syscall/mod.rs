@@ -1,6 +1,7 @@
 use clv_abi::agent::{
-    AgentLaunch, NO_DEFINITION, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
-    RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED, decode_rename_pair,
+    AgentLaunch, CURRENT_AGENT, NO_DEFINITION, RUN_CHECKPOINT, RUN_PLAN_DEFINITION,
+    RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED,
+    decode_rename_pair,
 };
 use clv_abi::audit::{
     DelegationDenial, EncodedReadDenialSnapshot, PublicationAuditView, ReadAuditView,
@@ -325,14 +326,22 @@ pub(crate) fn dispatch(
             }),
         SYS_AGENT_RUN | SYS_AGENT_RUN_SUSPENDED => write_agent_launch(
             frame,
-            scheduler.run_agent(fs, a0, a1, number == SYS_AGENT_RUN_SUSPENDED, None, None),
+            scheduler.run_agent(
+                fs,
+                a0,
+                a1,
+                number == SYS_AGENT_RUN_SUSPENDED,
+                None,
+                None,
+                false,
+            ),
         ),
         SYS_AGENT_RUN_WITH_REPLY_BUDGET if a3 <= 1 => write_agent_launch(
             frame,
-            scheduler.run_agent(fs, a0, a1, a3 == 1, Some(a2), None),
+            scheduler.run_agent(fs, a0, a1, a3 == 1, Some(a2), None, false),
         ),
         SYS_AGENT_RUN_WITH_REQUEST => {
-            let kind = match a2 & !(RUN_SUSPENDED | RUN_REPLY_LIMIT) {
+            let kind = match a2 & !(RUN_SUSPENDED | RUN_REPLY_LIMIT | RUN_CHECKPOINT) {
                 0 => Some(RequestKind::DelegateWithFile),
                 RUN_PLAN_INTENT => Some(RequestKind::PlanIntent),
                 RUN_PLAN_DEFINITION => Some(RequestKind::PlanDefinition),
@@ -360,6 +369,7 @@ pub(crate) fn dispatch(
                         a2 & RUN_SUSPENDED != 0,
                         (a2 & RUN_REPLY_LIMIT != 0).then_some(a3),
                         Some(request),
+                        a2 & RUN_CHECKPOINT != 0,
                     )
                 });
             write_agent_launch(frame, launch)
@@ -426,8 +436,17 @@ pub(crate) fn dispatch(
                     write_status(frame, agent.registers())
                 })
         }
+        SYS_AGENT_RESUME if a0 == CURRENT_AGENT => {
+            let launch = scheduler
+                .resume_recovered_checkpoint(fs)
+                .map(|(goal, launch)| {
+                    frame.registers[REG_A2] = goal;
+                    launch
+                });
+            write_agent_launch(frame, launch)
+        }
         SYS_AGENT_SUSPEND | SYS_AGENT_RESUME => scheduler
-            .set_agent_suspended(a0, number == SYS_AGENT_SUSPEND)
+            .set_agent_suspended(fs, a0, number == SYS_AGENT_SUSPEND)
             .map_or(SYSCALL_ERROR, |result| result as usize),
         SYS_AGENT_LAUNCH_SUPERVISOR => spawn_with_request(
             scheduler,
