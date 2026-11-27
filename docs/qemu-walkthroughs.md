@@ -7,6 +7,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
 - [Boot and shell](#boot-and-shell)
   - [Probe a VirtIO block device](#probe-a-virtio-block-device)
   - [Recover a VirtIO block marker after reboot](#recover-a-virtio-block-marker-after-reboot)
+  - [Recover a previous journal record](#recover-a-previous-journal-record)
   - [Probe the QEMU host bridge](#probe-the-qemu-host-bridge)
 - [Goals and file grants](#goals-and-file-grants)
 - [Requests, replies and file streams](#requests-replies-and-file-streams)
@@ -142,6 +143,63 @@ Look for `virtio block demo recovered` before `clsh>`. That line confirms
 the full marker sector matched. In the first boot, a read-only attachment
 with a blank sector 1 prints `virtio block demo read-only`, and an
 unrecognized, nonblank sector 1 prints `virtio block demo sector 1 occupied`.
+
+### Recover a previous journal record
+
+After building the kernel, run this block at the Linux prompt in `core`.
+It creates a scratch image whose sector 0 contains `CLVJNL01` followed by
+zeros. The journal uses sectors 1 and 2.
+
+```sh
+journal_disk="$(mktemp -t clavenar-journal.XXXXXX)"
+truncate -s 1M "$journal_disk"
+printf 'CLVJNL01' | dd of="$journal_disk" conv=notrunc status=none
+
+boot_journal() {
+  qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
+    -kernel target/riscv64gc-unknown-none-elf/release/clavenar-kernel \
+    -global virtio-mmio.force-legacy=off \
+    -drive "file=$journal_disk,format=raw,if=none,id=journal,cache=writeback,readonly=$1" \
+    -device virtio-blk-device,drive=journal
+}
+
+boot_journal off
+```
+
+Before paging, expect `virtio block journal flushed` for generation 1 in
+sector 1. Exit QEMU with `Ctrl+a`, then `x`, and run `boot_journal off`
+again in the same Linux terminal. The next boot recovers generation 1,
+writes generation 2 to sector 2 and reports it flushed.
+
+Exit and run `boot_journal on` from the same terminal. Expect
+`virtio block journal recovered` for generation 2 in sector 2 with
+`payload_prefix=0x434c56534c4f5432` (`CLVSLOT2`).
+
+Exit QEMU again, change one payload byte in sector 2, then boot read-only.
+
+```sh
+printf '\000' | dd of="$journal_disk" bs=1 seek=1040 conv=notrunc status=none
+boot_journal on
+```
+
+Recovery now reports generation 1 in sector 1 with
+`payload_prefix=0x434c56534c4f5431` (`CLVSLOT1`). Each boot selects the
+highest valid generation. A writable boot with negotiated flush support
+updates the other slot and reports success after the flush. A blank journal
+starts at generation 1. Duplicate generations or a nonblank journal with
+no valid record produce `virtio block journal invalid slots`.
+
+Each record occupies one 512-byte sector. Integers are little-endian.
+
+| Offset | Field |
+| --- | --- |
+| 0 | 32-bit format version, currently 1 |
+| 4 | 32-bit payload length, up to 492 bytes |
+| 8 | 64-bit nonzero generation |
+| 16 | Payload followed by zero padding |
+| 508 | CRC-32 over bytes 0 through 507 |
+
+[CRC-32 algorithm](https://www.rfc-editor.org/rfc/rfc1952.txt)
 
 ### Probe the QEMU host bridge
 

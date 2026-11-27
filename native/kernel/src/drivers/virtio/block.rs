@@ -1,6 +1,10 @@
+mod journal;
+
 use super::mmio::Device;
 use super::queue::{DEVICE_WRITES, Descriptor, NEXT, Ring, RingMemory};
 use crate::arch::monotonic_nanos;
+
+pub(crate) use journal::{JournalProbe, JournalRecord, JournalUpdate};
 
 const BLOCK_DEVICE: u32 = 2;
 const BLOCK_READ_ONLY: u32 = 1 << 5;
@@ -74,16 +78,25 @@ static mut DMA: BlockMemory = BlockMemory {
 pub(crate) struct Probe {
     pub(crate) sectors: u64,
     pub(crate) prefix: [u8; 8],
-    pub(crate) demo: Option<Result<DemoOutcome, ProbeError>>,
+    pub(crate) scratch: Option<ScratchProbe>,
+}
+
+pub(crate) enum ScratchProbe {
+    Marker(Result<DemoOutcome, ProbeError>),
+    Journal(Result<JournalProbe, ProbeError>),
 }
 
 pub(crate) enum DemoOutcome {
     Flushed,
     Recovered,
-    ReadOnly,
-    FlushUnavailable,
+    Blocked(WriteRestriction),
     Occupied,
     TooSmall,
+}
+
+pub(crate) enum WriteRestriction {
+    ReadOnly,
+    FlushUnavailable,
 }
 
 pub(crate) enum ProbeError {
@@ -152,11 +165,15 @@ unsafe fn probe_device(device: &Device, deadline: u64) -> Result<Probe, ProbeErr
     }
     let first = block.read_sector(0)?;
     let prefix = *first.first_chunk().expect("a sector holds eight bytes");
-    let demo = (first == DEMO_HEADER).then(|| block.persist_marker());
+    let scratch = match first {
+        DEMO_HEADER => Some(ScratchProbe::Marker(block.persist_marker())),
+        journal::HEADER => Some(ScratchProbe::Journal(journal::run(&mut block))),
+        _ => None,
+    };
     Ok(Probe {
         sectors,
         prefix,
-        demo,
+        scratch,
     })
 }
 
@@ -178,16 +195,27 @@ impl Block<'_> {
         if sector != BLANK_SECTOR {
             return Ok(DemoOutcome::Occupied);
         }
-        if self.features & BLOCK_READ_ONLY != 0 {
-            return Ok(DemoOutcome::ReadOnly);
-        }
-        if self.features & BLOCK_FLUSH == 0 {
-            return Ok(DemoOutcome::FlushUnavailable);
+        if let Some(restriction) = self.write_restriction() {
+            return Ok(DemoOutcome::Blocked(restriction));
         }
 
-        self.transfer(Request::Write(DEMO_SECTOR, &DEMO_MARKER))?;
-        self.transfer(Request::Flush)?;
+        self.write_and_flush(DEMO_SECTOR, &DEMO_MARKER)?;
         Ok(DemoOutcome::Flushed)
+    }
+
+    fn write_restriction(&self) -> Option<WriteRestriction> {
+        if self.features & BLOCK_READ_ONLY != 0 {
+            Some(WriteRestriction::ReadOnly)
+        } else if self.features & BLOCK_FLUSH == 0 {
+            Some(WriteRestriction::FlushUnavailable)
+        } else {
+            None
+        }
+    }
+
+    fn write_and_flush(&mut self, sector: u64, data: &Sector) -> Result<(), ProbeError> {
+        self.transfer(Request::Write(sector, data))?;
+        self.transfer(Request::Flush)
     }
 
     fn transfer(&mut self, request: Request<'_>) -> Result<(), ProbeError> {

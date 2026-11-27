@@ -34,7 +34,7 @@ ELF entry addresses for `hello`, `shell`, `echo` and `grep`, then
 `Sv39 paging enabled` and the green `clsh>` prompt. Type `help` for the
 command reference. Press `Ctrl+a`, then `x`, to quit QEMU.
 
-[Boot with a read-only VirtIO block image](docs/qemu-walkthroughs.md#probe-a-virtio-block-device) · [Recover a marker after reboot](docs/qemu-walkthroughs.md#recover-a-virtio-block-marker-after-reboot)
+[Boot with a read-only VirtIO block image](docs/qemu-walkthroughs.md#probe-a-virtio-block-device) · [Recover a marker after reboot](docs/qemu-walkthroughs.md#recover-a-virtio-block-marker-after-reboot) · [Recover a previous journal record](docs/qemu-walkthroughs.md#recover-a-previous-journal-record)
 
 ## Run the QEMU host broker
 

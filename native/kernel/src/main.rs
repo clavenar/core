@@ -93,22 +93,64 @@ fn probe_block() {
             uart::write(b" sector0=");
             write_hex(u64::from_be_bytes(probe.prefix) as usize);
             uart::write(b"\r\n");
-            if let Some(demo) = probe.demo {
-                use block::DemoOutcome::*;
-
-                uart::write(match demo {
-                    Ok(Flushed) => b"virtio block demo flushed\r\n",
-                    Ok(Recovered) => b"virtio block demo recovered\r\n",
-                    Ok(ReadOnly) => b"virtio block demo read-only\r\n",
-                    Ok(FlushUnavailable) => b"virtio block demo flush unavailable\r\n",
-                    Ok(Occupied) => b"virtio block demo sector 1 occupied\r\n",
-                    Ok(TooSmall) => b"virtio block demo needs two sectors\r\n",
+            use block::{DemoOutcome, ScratchProbe, WriteRestriction};
+            match probe.scratch {
+                Some(ScratchProbe::Marker(demo)) => uart::write(match demo {
+                    Ok(DemoOutcome::Flushed) => b"virtio block demo flushed\r\n",
+                    Ok(DemoOutcome::Recovered) => b"virtio block demo recovered\r\n",
+                    Ok(DemoOutcome::Blocked(WriteRestriction::ReadOnly)) => {
+                        b"virtio block demo read-only\r\n"
+                    }
+                    Ok(DemoOutcome::Blocked(WriteRestriction::FlushUnavailable)) => {
+                        b"virtio block demo flush unavailable\r\n"
+                    }
+                    Ok(DemoOutcome::Occupied) => b"virtio block demo sector 1 occupied\r\n",
+                    Ok(DemoOutcome::TooSmall) => b"virtio block demo needs two sectors\r\n",
                     Err(error) => block_error_message(error),
-                });
+                }),
+                Some(ScratchProbe::Journal(Ok(probe))) => report_journal(probe),
+                Some(ScratchProbe::Journal(Err(error))) => uart::write(block_error_message(error)),
+                None => {}
             }
         }
         Err(error) => uart::write(block_error_message(error)),
     }
+}
+
+fn report_journal(probe: block::JournalProbe) {
+    use block::{JournalUpdate, WriteRestriction};
+
+    if let Some(record) = &probe.recovered {
+        write_journal_record(b"recovered", record);
+    }
+    match probe.update {
+        JournalUpdate::Flushed(record) => write_journal_record(b"flushed", &record),
+        JournalUpdate::Blocked(WriteRestriction::ReadOnly) if probe.recovered.is_none() => {
+            uart::write(b"virtio block journal empty\r\n");
+        }
+        JournalUpdate::Blocked(WriteRestriction::ReadOnly) => {}
+        JournalUpdate::Blocked(WriteRestriction::FlushUnavailable) => {
+            uart::write(b"virtio block journal flush unavailable\r\n");
+        }
+        JournalUpdate::TooSmall => uart::write(b"virtio block journal needs three sectors\r\n"),
+        JournalUpdate::InvalidSlots => uart::write(b"virtio block journal invalid slots\r\n"),
+        JournalUpdate::GenerationExhausted => {
+            uart::write(b"virtio block journal generation exhausted\r\n");
+        }
+        JournalUpdate::Failed(error) => uart::write(block_error_message(error)),
+    }
+}
+
+fn write_journal_record(action: &[u8], record: &block::JournalRecord) {
+    uart::write(b"virtio block journal ");
+    uart::write(action);
+    uart::write(b" generation=");
+    write_hex(record.generation as usize);
+    uart::write(b" sector=");
+    write_hex(record.sector as usize);
+    uart::write(b" payload_prefix=");
+    write_hex(u64::from_be_bytes(record.prefix) as usize);
+    uart::write(b"\r\n");
 }
 
 fn block_error_message(error: block::ProbeError) -> &'static [u8] {
