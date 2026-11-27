@@ -4,11 +4,11 @@ mod pipe;
 
 use self::definition::AgentBinding;
 pub(crate) use self::goal::DelegationTarget;
-use self::goal::Goal;
+use self::goal::{Goal, MonitorReport, ReadDenialWatch};
 use self::pipe::LaunchPipes;
 use clv_abi::agent::AgentLaunch;
-use clv_abi::audit::{DelegationDenial, PublicationObservation};
-use clv_abi::goal::{GoalMonitorKind, GoalObservation};
+use clv_abi::audit::DelegationDenial;
+use clv_abi::goal::GoalMonitorKind;
 use clv_abi::{
     ChildEvent, CompletionKind, GrantKind, LaunchParent, Program, ReplyKind, RequestKind,
     TaskCompletion,
@@ -91,12 +91,6 @@ enum LaunchGrant {
     ReviewRename,
     /// The agent's original child launch. Every resume ends this suspension's grants.
     ResumeAgent(usize),
-}
-
-#[derive(Clone, Copy)]
-enum MonitorReport {
-    Goal(GoalObservation),
-    Publication(PublicationObservation),
 }
 
 struct ChildLaunch {
@@ -202,6 +196,7 @@ pub(crate) struct Scheduler {
     host_bridge: Option<HostBridge>,
     /// The dedicated monitor owns this snapshot from wakeup until its grant is used or revoked.
     monitor_report: Option<MonitorReport>,
+    read_denial_watch: Option<ReadDenialWatch>,
     // Child launches, goals and agents share a boot-unique handle sequence.
     next_handle: usize,
     next_event_sequence: usize,
@@ -219,6 +214,7 @@ impl Scheduler {
             goal: None,
             host_bridge: None,
             monitor_report: None,
+            read_denial_watch: None,
             next_handle: 1,
             next_event_sequence: 0,
             current: task_index(Program::Hello),
@@ -640,6 +636,12 @@ impl Scheduler {
     fn stop_task(&mut self, index: usize, fs: &mut RamFs, completion: TaskCompletion) {
         if index == GOAL_MONITOR_TASK_INDEX {
             self.monitor_report = None;
+            // A sent alert keeps its suppression count until the owner collects it.
+            if self.tasks[index].launch.as_ref().is_some_and(|launch| {
+                launch.grant == Some(LaunchGrant::Monitor(GoalMonitorKind::ReadDenial))
+            }) {
+                self.read_denial_watch = None;
+            }
         }
         let shell_live = self.tasks[SHELL_TASK_INDEX].state != TaskState::Stopped;
         let task = &mut self.tasks[index];

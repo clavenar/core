@@ -12,18 +12,19 @@ pub use clv_abi::goal::{
     GoalMonitorKind, GoalObservation, GoalStatus, PublicationError, ReadLimits, RenameBatchDiff,
     RenameOptions, RenameReviewReceipt, ReviewToken, TimedRenameReview, TimedReviewToken,
 };
-use clv_abi::goal::{GoalCreateRequest, decode_rename_batch};
+use clv_abi::goal::{
+    DISARM_READ_WATCH, GoalCreateRequest, TAKE_READ_WATCH_SUPPRESSED, decode_rename_batch,
+};
 use clv_abi::tool::ToolId;
 use clv_abi::{
     MESSAGE_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE,
     SYS_GOAL_COMMIT, SYS_GOAL_CREATE, SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE,
     SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO,
-    SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER,
-    SYS_GOAL_LAUNCH_RENAME_REVIEWER, SYS_GOAL_OBSERVE,
-    SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT, SYS_GOAL_RENAME_AUDIT,
-    SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW_BATCH_GRANTED,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS,
+    SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER,
+    SYS_GOAL_MONITOR, SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER,
+    SYS_GOAL_READ_AUDIT, SYS_GOAL_RENAME_AUDIT, SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT,
+    SYS_GOAL_REVIEW_BATCH_GRANTED, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, syscall, syscall_result, with_stack_bytes};
@@ -542,12 +543,26 @@ pub fn launch_publication_monitor(goal: usize) -> Option<usize> {
     launch_monitor(goal, GoalMonitorKind::Publication)
 }
 
+/// Arms the monitor for the first out-of-scope file read by a goal member.
+pub fn launch_read_denial_watch(goal: usize) -> Option<usize> {
+    launch_monitor(goal, GoalMonitorKind::ReadDenial)
+}
+
 fn launch_monitor(goal: usize, kind: GoalMonitorKind) -> Option<usize> {
+    syscall_result(syscall(SYS_GOAL_MONITOR, goal, kind as usize, 0))
+}
+
+pub fn disarm_read_denial_watch(handle: usize) -> bool {
+    syscall(SYS_GOAL_MONITOR, handle, 0, DISARM_READ_WATCH) == 0
+}
+
+/// Ends the watch after collecting both the alert and the monitor exit status.
+pub fn take_read_denial_suppressed(handle: usize) -> Option<usize> {
     syscall_result(syscall(
-        SYS_GOAL_LAUNCH_FINISH_MONITOR,
-        goal,
-        kind as usize,
+        SYS_GOAL_MONITOR,
+        handle,
         0,
+        TAKE_READ_WATCH_SUPPRESSED,
     ))
 }
 

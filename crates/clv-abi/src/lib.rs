@@ -82,7 +82,7 @@ pub const SYS_GOAL_LAUNCH_OBSERVER: usize = 67;
 pub const SYS_GOAL_OBSERVE: usize = 68;
 pub const SYS_AGENT_LAUNCH_SUPERVISOR: usize = 69;
 pub const SYS_AGENT_RESUME_GRANTED: usize = 70;
-pub const SYS_GOAL_LAUNCH_FINISH_MONITOR: usize = 71;
+pub const SYS_GOAL_MONITOR: usize = 71;
 pub const SYS_GOAL_LAUNCH_RENAME_REVIEWER: usize = 72;
 pub const SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER: usize = 73;
 pub const SYS_GOAL_RENAME_DIFF: usize = 74;
@@ -137,6 +137,8 @@ pub enum RequestKind {
     FileToolMcp = 13,
     /// Empty assignment to report the disposition of the bound rename transaction.
     ObservePublication = 14,
+    /// The first read-scope denial that woke the bound monitor.
+    ReadScopeDenied = 15,
 }
 
 impl RequestKind {
@@ -156,6 +158,7 @@ impl RequestKind {
             value if value == Self::FileToolStdio as usize => Some(Self::FileToolStdio),
             value if value == Self::FileToolMcp as usize => Some(Self::FileToolMcp),
             value if value == Self::ObservePublication as usize => Some(Self::ObservePublication),
+            value if value == Self::ReadScopeDenied as usize => Some(Self::ReadScopeDenied),
             _ => None,
         }
     }
@@ -184,6 +187,8 @@ pub enum ReplyKind {
     HostToolFailed = 12,
     /// Only `goal_observe` can queue this kernel-generated publication snapshot.
     PublicationObserved = 13,
+    /// The read-denial monitor's alert carrying the original event.
+    ReadDenialAlert = 14,
 }
 
 impl ReplyKind {
@@ -202,6 +207,7 @@ impl ReplyKind {
             value if value == Self::HostPlanFailed as usize => Some(Self::HostPlanFailed),
             value if value == Self::HostToolFailed as usize => Some(Self::HostToolFailed),
             value if value == Self::PublicationObserved as usize => Some(Self::PublicationObserved),
+            value if value == Self::ReadDenialAlert as usize => Some(Self::ReadDenialAlert),
             _ => None,
         }
     }

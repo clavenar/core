@@ -5,8 +5,8 @@ use clv_abi::agent::{
 use clv_abi::audit::{DelegationDenial, PublicationAuditView, ReadAuditView};
 use clv_abi::bridge::{BridgeFailure, MAX_FRAME_BYTES, POLL, SUBMIT, SUBMIT_TOOL};
 use clv_abi::goal::{
-    EncodedGoalCreate, FileRecipient, GoalCreateRequest, GoalMonitorKind, RENAME_DIFF_HEADER_BYTES,
-    ReviewToken,
+    DISARM_READ_WATCH, EncodedGoalCreate, FileRecipient, GoalCreateRequest, GoalMonitorKind,
+    RENAME_DIFF_HEADER_BYTES, ReviewToken, TAKE_READ_WATCH_SUPPRESSED,
 };
 use clv_abi::tool::{FILE_TOOL_MCP, FILE_TOOL_STDIO, ToolId};
 use clv_abi::{
@@ -20,8 +20,8 @@ use clv_abi::{
     SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL,
     SYS_GOAL_CLOSE, SYS_GOAL_COMMIT, SYS_GOAL_CREATE, SYS_GOAL_DISCARD,
     SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
-    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_LAUNCH_FINISH_MONITOR,
-    SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER, SYS_GOAL_OBSERVE,
+    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_LAUNCH_OBSERVER,
+    SYS_GOAL_LAUNCH_RENAME_REVIEWER, SYS_GOAL_MONITOR, SYS_GOAL_OBSERVE,
     SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT, SYS_GOAL_RENAME_AUDIT,
     SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW_BATCH_GRANTED,
     SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
@@ -162,9 +162,14 @@ pub(crate) fn dispatch(
             0,
         )
         .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_LAUNCH_FINISH_MONITOR => GoalMonitorKind::from_register(a1)
-            .and_then(|kind| scheduler.launch_goal_monitor(a0, kind))
-            .unwrap_or(SYSCALL_ERROR),
+        SYS_GOAL_MONITOR => match a2 {
+            0 => GoalMonitorKind::from_register(a1)
+                .and_then(|kind| scheduler.launch_goal_monitor(a0, kind)),
+            DISARM_READ_WATCH if a1 == 0 => scheduler.disarm_read_denial_watch(a0, fs),
+            TAKE_READ_WATCH_SUPPRESSED if a1 == 0 => scheduler.take_read_denial_suppressed(a0),
+            _ => None,
+        }
+        .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_LAUNCH_RENAME_REVIEWER => spawn_with_request(
             scheduler,
             fs,
@@ -500,20 +505,21 @@ pub(crate) fn dispatch(
         SYS_MESSAGE_SEND => scheduler
             .send_reply(None, a1, |bytes| stack.copy_from_user(a0, bytes))
             .unwrap_or(SYSCALL_ERROR),
-        SYS_REPLY_SEND => ReplyKind::from_raw(a2)
-            .filter(|kind| {
-                !matches!(
-                    kind,
+        SYS_REPLY_SEND => {
+            let copy = |bytes: &mut [u8]| stack.copy_from_user(a0, bytes);
+            match ReplyKind::from_raw(a2) {
+                Some(ReplyKind::ReadDenialAlert) => scheduler.send_read_denial_alert(a1, copy),
+                Some(
                     ReplyKind::GoalObservation
-                        | ReplyKind::PublicationObserved
-                        | ReplyKind::AgentResumed
-                        | ReplyKind::RenameReviewed
+                    | ReplyKind::PublicationObserved
+                    | ReplyKind::AgentResumed
+                    | ReplyKind::RenameReviewed,
                 )
-            })
-            .and_then(|kind| {
-                scheduler.send_reply(Some(kind), a1, |bytes| stack.copy_from_user(a0, bytes))
-            })
-            .unwrap_or(SYSCALL_ERROR),
+                | None => None,
+                Some(kind) => scheduler.send_reply(Some(kind), a1, copy),
+            }
+            .unwrap_or(SYSCALL_ERROR)
+        }
         SYS_MESSAGE_RECV | SYS_REQUEST_RECV | SYS_REPLY_RECV
             if (a1 > 0 || number == SYS_REPLY_RECV) && stack.contains(a0, a1) =>
         {

@@ -124,8 +124,10 @@ impl Children {
     pub(super) fn observe_goal(&mut self, goal: Option<usize>, arguments: &[u8]) {
         let monitor = match split_word(arguments) {
             (b"--collect", b"") => return self.collect_goal_monitor(),
+            (b"--disarm", b"") => return self.disarm_read_denial_watch(),
             (b"--on-finish", b"echo") => Some(GoalMonitorKind::Finish),
             (b"--on-publication", b"echo") => Some(GoalMonitorKind::Publication),
+            (b"--on-read-denial", b"echo") => Some(GoalMonitorKind::ReadDenial),
             (b"echo", b"") => None,
             _ => return Entry::GoalObserve.usage(),
         };
@@ -141,6 +143,10 @@ impl Children {
                 GoalMonitorKind::Publication => (
                     clv::goal::launch_publication_monitor(goal),
                     ReplyKind::PublicationObserved,
+                ),
+                GoalMonitorKind::ReadDenial => (
+                    clv::goal::launch_read_denial_watch(goal),
+                    ReplyKind::ReadDenialAlert,
                 ),
             };
             let Some(handle) = launch else {
@@ -161,6 +167,20 @@ impl Children {
         }
     }
 
+    fn disarm_read_denial_watch(&mut self) {
+        let Some(monitor) = self.monitor.as_mut().filter(|monitor| {
+            !monitor.collected && monitor.reply_kind == ReplyKind::ReadDenialAlert
+        }) else {
+            return print(b"no armed read-denial watch\r\n");
+        };
+        if !clv::goal::disarm_read_denial_watch(monitor.handle) {
+            return print(b"no armed read-denial watch\r\n");
+        }
+        let _ = clv::wait(monitor.handle);
+        monitor.collected = true;
+        print(b"read-denial watch disarmed\r\n");
+    }
+
     fn collect_goal_monitor(&mut self) {
         let Some(monitor) = self.monitor.as_mut().filter(|monitor| !monitor.collected) else {
             return print(b"no goal monitor to collect\r\n");
@@ -172,7 +192,7 @@ impl Children {
         let mut buffer = [0; MESSAGE_MAX_BYTES];
         if let Some(bytes) = receive_report(monitor.handle, status, monitor.reply_kind, &mut buffer)
         {
-            display_reply(monitor.reply_kind, bytes);
+            display_reply(monitor.handle, monitor.reply_kind, bytes);
         } else {
             print(match status {
                 ChildStatus::Cancelled => b"goal monitor cancelled\r\n",
@@ -193,7 +213,7 @@ impl Children {
         let Some(bytes) = self.wait_echo_report(handle, expected, &mut buffer) else {
             return false;
         };
-        display_reply(expected, bytes);
+        display_reply(handle, expected, bytes);
         true
     }
 
@@ -528,12 +548,12 @@ fn print_reply(handle: usize) {
     let mut buffer = [0; MESSAGE_MAX_BYTES];
     match clv::receive_reply(handle, &mut buffer) {
         Some(ChildReply::Empty) => print(b"no message\r\n"),
-        Some(ChildReply::Received { kind, bytes, .. }) => display_reply(kind, bytes),
+        Some(ChildReply::Received { kind, bytes, .. }) => display_reply(handle, kind, bytes),
         None => print(b"recv failed\r\n"),
     }
 }
 
-fn display_reply(kind: ReplyKind, bytes: &[u8]) {
+fn display_reply(handle: usize, kind: ReplyKind, bytes: &[u8]) {
     match kind {
         ReplyKind::FileData if bytes.is_empty() => print(b"empty file\r\n"),
         ReplyKind::Matches if bytes.is_empty() => {}
@@ -571,6 +591,7 @@ fn display_reply(kind: ReplyKind, bytes: &[u8]) {
         }
         ReplyKind::GoalObservation => super::goal::print_observation(bytes),
         ReplyKind::PublicationObserved => super::goal::print_publication_observation(bytes),
+        ReplyKind::ReadDenialAlert => super::goal::print_read_denial_alert(handle, bytes),
         ReplyKind::AgentResumed => super::goal::print_resume_receipt(bytes),
         ReplyKind::RenameReviewed => {
             if let Some(receipt) = clv::goal::RenameReviewReceipt::decode(bytes) {

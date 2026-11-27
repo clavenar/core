@@ -2,6 +2,7 @@
 #![no_main]
 
 use clv::{LaunchRequest, pipe};
+use clv_abi::audit::ReadDenialEvent;
 use clv_abi::{MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PIPE_CAPACITY, ReplyKind, RequestKind};
 use core::panic::PanicInfo;
 
@@ -23,6 +24,15 @@ extern "C" fn _start(_task: usize, _file: usize, grant_kind: usize, io: usize) -
             kind: RequestKind::ObservePublication,
             ..
         }) => clv::exit(usize::from(clv::goal::observe_publication().is_none())),
+        Some(LaunchRequest::Received {
+            kind: RequestKind::ReadScopeDenied,
+            bytes,
+            ..
+        }) => {
+            let sent = ReadDenialEvent::decode(bytes).is_some()
+                && clv::send_reply(ReplyKind::ReadDenialAlert, bytes);
+            clv::exit(usize::from(!sent));
+        }
         Some(LaunchRequest::Received {
             kind: RequestKind::ResumeAgent,
             ..

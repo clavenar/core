@@ -364,6 +364,35 @@ impl ReadDecision {
     }
 }
 
+pub type EncodedReadDenialEvent = [[u8; 8]; 3];
+
+/// Goal and launch identity from the first out-of-scope read after arming.
+#[derive(Clone, Copy)]
+pub struct ReadDenialEvent {
+    pub goal: usize,
+    pub child: usize,
+    pub requested: usize,
+}
+
+impl ReadDenialEvent {
+    pub fn encode(self) -> EncodedReadDenialEvent {
+        [self.goal, self.child, self.requested].map(|word| (word as u64).to_le_bytes())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let (words, []) = bytes.as_chunks::<8>() else {
+            return None;
+        };
+        let words: &EncodedReadDenialEvent = words.try_into().ok()?;
+        let [goal, child, requested] = words.map(u64::from_le_bytes);
+        Some(Self {
+            goal: goal.try_into().ok()?,
+            child: child.try_into().ok()?,
+            requested: requested.try_into().ok()?,
+        })
+    }
+}
+
 fn budget_flags(remaining: Option<usize>, allowed: bool) -> usize {
     usize::from(remaining.is_none()) | (usize::from(!allowed) << 1)
 }

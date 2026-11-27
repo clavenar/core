@@ -1,5 +1,5 @@
 use clv_abi::audit::{
-    EncodedReadDecision, ReadAuditView, ReadDecision, ReadLimitScope, ReadRecord,
+    EncodedReadDecision, ReadAuditView, ReadDecision, ReadDenialEvent, ReadLimitScope, ReadRecord,
     ReadRecordWithLimit,
 };
 use clv_abi::goal::ReadLimits;
@@ -114,8 +114,9 @@ impl Scheduler {
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<usize> {
         let task = &mut self.tasks[self.current];
+        let mut denial = None;
         // RamFS resolves the handle and file slice, then advances the cursor only on delivery.
-        task.fs.read(fs, fd, requested, |parent, bytes| {
+        let result = task.fs.read(fs, fd, requested, |parent, bytes| {
             if let Some(launch) = &task.launch
                 && let Some(goal) = &mut self.goal
                 && let Some(member) = goal.live_member_mut(launch.handle)
@@ -124,6 +125,11 @@ impl Scheduler {
                 if let Some(scope) = &mut goal.reads.scope
                     && !scope.permits(fs, parent, launch.handle, requested)
                 {
+                    denial = Some(ReadDenialEvent {
+                        goal: goal.handle,
+                        child: launch.handle,
+                        requested,
+                    });
                     return false;
                 }
                 goal.reads
@@ -131,7 +137,11 @@ impl Scheduler {
             } else {
                 copy(bytes)
             }
-        })
+        });
+        if let Some(event) = denial {
+            self.record_read_denial(event);
+        }
+        result
     }
 
     pub(crate) fn goal_read_audit(

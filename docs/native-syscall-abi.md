@@ -210,6 +210,7 @@ queued reply.
 | 11 `HostPlanFailed` | 1 byte | Reason the agent could not obtain an approved host plan. |
 | 12 `HostToolFailed` | 1 byte | Reason the agent could not obtain a host tool result. |
 | 13 `PublicationObserved` | 64 bytes | Kernel publication snapshot requested by the monitor through call 68. Call 26 rejects this tag. |
+| 14 `ReadDenialAlert` | 24 bytes | First [read-scope denial](#read-denial-watch) from the bound `echo` monitor. Call 26 requires the exact kernel-supplied event. |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -340,7 +341,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 68 `goal_observe` | `a0` observer's stack destination, `a1` capacity in bytes | 64 after copying the snapshot and queuing the same record for the parent, or -1 on failure |
 | 69 `agent_launch_supervisor` | `a0` suspended agent handle, `a1` program selector | Fresh shell-owned supervisor launch handle, or -1 on rejection |
 | 70 `agent_resume_granted` | None | 0 after resuming the bound child and queuing its receipt, or -1 on failure |
-| 71 `goal_launch_finish_monitor` | `a0` open goal handle, `a1` trigger (0 for goal finish or 1 for publication) | Fresh shell-owned monitor launch handle, or -1 on rejection |
+| 71 `goal_monitor` | `a2` operation (0 arm, 1 disarm read watch, 2 collect suppressed count). Arm takes the goal in `a0` and trigger in `a1` (0 finish, 1 publication, 2 read-scope denial). The other operations take the monitor launch in `a0` and zero in `a1`. | Fresh shell-owned launch handle, 0 after disarming, or the suppressed count, depending on the operation. Failure returns -1. |
 | 72 `goal_launch_rename_reviewer` | `a0` completed goal handle | Fresh shell-owned `echo` launch handle bound to the pending rename, or -1 on rejection |
 | 73 `goal_publication_decisions_with_reviewer` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` zero-based row index, `a4` [history view](#publication-audit) (0–3) | Retained row count (0–4) in `a0`, overwritten count in `a1`, reviewer in `a2` and goal handle in `a3`, or -1 in `a0` on failure |
 | 74 `goal_rename_diff` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` = 0 for a preview or 1 for a review | Total bytes in `a0`, number of renames in `a1`, approval token or zero in `a2`, deadline or verdict in `a3`. Failure returns -1 in `a0`. |
@@ -566,6 +567,27 @@ review, or the supervisor launch handle. The last four words contain the
 budget flags and available, reserved and spent reply bytes at resolution.
 The frozen report stays collectable after goal close.
 [Publication monitor walkthrough](qemu-walkthroughs.md#observe-a-reviewed-publication)
+
+#### Read-denial watch
+
+Trigger 2 arms `echo` for the first read-scope denial after registration on
+a ready or running goal. After RamFS records an `outside-read-scope`
+decision, the kernel wakes the watch with a `ReadScopeDenied` request
+(kind 15). Its three little-endian RV64 words contain the goal handle, the
+denied child's launch handle and the number of bytes requested.
+
+`echo` sends a `ReadDenialAlert` through call 26. The kernel checks the
+monitor's grant and accepts the exact event bytes after the monitor has
+received its request. A successful send consumes the grant. The owner can
+disarm a watch before it sends the alert with call 71, operation 1. Goal
+cancellation, expiry and closure revoke that pending grant as well.
+
+One watch holds one event. Further scope denials for that goal increment
+a saturating 32-bit count. The owner can take the count with call 71,
+operation 2 after receiving both the alert and exit status. Taking the
+count ends the watch. A completed alert and its count remain collectable
+after closing the goal.
+[Read-denial walkthrough](qemu-walkthroughs.md#watch-for-a-read-scope-denial)
 
 ### Delegating one agent resume
 

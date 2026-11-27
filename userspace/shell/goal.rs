@@ -10,7 +10,7 @@ use clv::goal::{
 };
 use clv::{agent, print};
 use clv_abi::agent::{NO_DEFINITION, SHA256_BYTES};
-use clv_abi::audit::PublicationObservation;
+use clv_abi::audit::{PublicationObservation, ReadDenialEvent};
 use clv_abi::{CompletionKind, OPEN_READ, Program};
 pub(super) use options::{GoalCommand, GoalOptions};
 
@@ -456,6 +456,26 @@ pub(super) fn print_publication_observation(bytes: &[u8]) {
     line.write(b"\r\n");
     write_budget(&mut line, snapshot.budget);
     line.finish(&[]);
+}
+
+#[inline(never)]
+pub(super) fn print_read_denial_alert(handle: usize, bytes: &[u8]) {
+    let (Some(event), Some(suppressed)) = (
+        ReadDenialEvent::decode(bytes),
+        goal::take_read_denial_suppressed(handle),
+    ) else {
+        return print(b"read-denial alert unavailable\r\n");
+    };
+    print_line(&[
+        b"read-denial alert goal=",
+        &hex(event.goal),
+        b" child=",
+        &hex(event.child),
+        b" requested=",
+        decimal(event.requested, &mut [0; DIGITS]),
+        b" denied=outside-read-scope suppressed=",
+        decimal(suppressed, &mut [0; DIGITS]),
+    ]);
 }
 
 pub(super) fn print_resume_receipt(bytes: &[u8]) {

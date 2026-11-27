@@ -616,6 +616,7 @@ impl GoalStatus {
 pub enum GoalMonitorKind {
     Finish = 0,
     Publication = 1,
+    ReadDenial = 2,
 }
 
 impl GoalMonitorKind {
@@ -623,10 +624,15 @@ impl GoalMonitorKind {
         match value {
             0 => Some(Self::Finish),
             1 => Some(Self::Publication),
+            2 => Some(Self::ReadDenial),
             _ => None,
         }
     }
 }
+
+/// Call 71's `a2` selects disarm or count collection for a read-denial monitor.
+pub const DISARM_READ_WATCH: usize = 1;
+pub const TAKE_READ_WATCH_SUPPRESSED: usize = 2;
 
 /// Call 35's four status words followed by call 43's four reply-budget words.
 pub type EncodedGoalObservation = [[u8; 8]; 8];
