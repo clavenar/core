@@ -41,19 +41,16 @@ pub(super) fn command(
             action @ (Subcommand::Diff
             | Subcommand::Commit
             | Subcommand::Discard
+            | Subcommand::RevokeFile
             | Subcommand::Cancel),
             b"",
         ) => match (action, current) {
             (Subcommand::Commit, Some(goal)) => commit(goal),
             (Subcommand::Discard, Some(goal)) => discard(goal),
+            (Subcommand::RevokeFile, Some(goal)) => revoke_file(goal),
             (Subcommand::Cancel, Some(goal)) => cancel(goal),
             (_, Some(goal)) => show_diff(goal),
             (_, None) => print(b"no current goal\r\n"),
-        },
-        (Subcommand::RevokeFile, b"") => match handle {
-            Some(handle) if goal::revoke_file(handle) => print(b"file revoked\r\n"),
-            Some(_) => print(b"cannot revoke file\r\n"),
-            None => print(b"no current goal\r\n"),
         },
         (Subcommand::Run, arguments) => children.run_in_goal(handle, arguments),
         (Subcommand::Audit, option) => audit::show(handle, option),
@@ -150,6 +147,17 @@ fn with_goal_file(
         return None;
     };
     Some(operation(goal, file.id()))
+}
+
+fn revoke_file(goal: &mut CurrentGoal) {
+    let Some(rename_discarded) = goal::revoke_file_with_outcome(goal.handle) else {
+        return print(b"cannot revoke file\r\n");
+    };
+    print(b"file revoked\r\n");
+    if rename_discarded {
+        goal.review = None;
+        print(b"staged rename discarded\r\n");
+    }
 }
 
 fn stage_rename(goal: Option<usize>, arguments: &[u8]) {

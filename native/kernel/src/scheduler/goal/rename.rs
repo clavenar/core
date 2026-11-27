@@ -101,14 +101,15 @@ impl Goal {
         DiscardResult::Discarded
     }
 
-    pub(super) fn discard_granted_rename(&mut self, fs: &mut RamFs) {
-        if self
+    pub(super) fn discard_granted_rename(&mut self, fs: &mut RamFs) -> bool {
+        let from_grant = self
             .rename
             .as_ref()
-            .is_some_and(|rename| rename.from_file_grant)
-        {
-            self.discard_rename(fs, None);
+            .is_some_and(|rename| rename.from_file_grant);
+        if from_grant {
+            self.discard_rename(fs, Some(PublicationOutcome::DiscardedByRevoke));
         }
+        from_grant
     }
 
     pub(super) fn release_transaction(

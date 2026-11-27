@@ -10,6 +10,7 @@ pub enum PublicationOutcome {
     Unavailable,
     Discarded,
     DiscardedByCancel,
+    DiscardedByRevoke,
 }
 
 impl PublicationOutcome {
@@ -19,6 +20,7 @@ impl PublicationOutcome {
             Self::Unavailable => 4,
             Self::Discarded => 5,
             Self::DiscardedByCancel => 6,
+            Self::DiscardedByRevoke => 7,
         }
     }
 
@@ -27,6 +29,7 @@ impl PublicationOutcome {
             4 => Self::Unavailable,
             5 => Self::Discarded,
             6 => Self::DiscardedByCancel,
+            7 => Self::DiscardedByRevoke,
             _ => Self::Commit(CommitResult::from_register(code.try_into().ok()?)?),
         })
     }

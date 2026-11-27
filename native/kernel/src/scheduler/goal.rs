@@ -4,6 +4,7 @@ mod delegation;
 mod reads;
 mod rename;
 
+pub(crate) use self::audit::PublicationAudit;
 use self::audit::{AuditHistory, PublicationHistory};
 use self::budget::ReplyReservation;
 use self::reads::GoalReads;
@@ -317,16 +318,16 @@ impl Scheduler {
         Some(())
     }
 
-    pub(crate) fn revoke_goal_file(&mut self, handle: usize, fs: &mut RamFs) -> Option<()> {
+    pub(crate) fn revoke_goal_file(&mut self, handle: usize, fs: &mut RamFs) -> Option<bool> {
         self.shell_goal(handle)?;
         let goal = self.goal.as_mut()?;
         goal.release_file(fs);
-        goal.discard_granted_rename(fs);
+        let rename_discarded = goal.discard_granted_rename(fs);
         // A full goal has already released its pin. Its issued handles still carry its ID.
         for task in &mut self.tasks {
             task.fs.revoke_goal_file(fs, handle);
         }
-        Some(())
+        Some(rename_discarded)
     }
 
     fn agent_member(&self, handle: usize) -> Option<(&Goal, &Member, AgentBinding)> {

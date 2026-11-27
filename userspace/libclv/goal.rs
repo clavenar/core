@@ -18,10 +18,11 @@ use clv_abi::{
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_DISCARD,
     SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
     SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_PUBLICATION_AUDIT,
-    SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION, SYS_GOAL_READ_AUDIT,
-    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
-    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE,
-    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
+    SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION, SYS_GOAL_PUBLICATION_DECISIONS,
+    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS,
+    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE,
+    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
+    SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -204,7 +205,16 @@ pub fn grant_file_to_with_arg(goal: usize, fd: usize, program: Program, argument
 
 /// Closes all derived handles and discards any pending rename staged through the grant.
 pub fn revoke_file(goal: usize) -> bool {
-    syscall(SYS_GOAL_REVOKE_FILE, goal, 0, 0) == 0
+    revoke_file_with_outcome(goal).is_some()
+}
+
+/// On success, reports whether this revocation discarded a grant-staged rename.
+pub fn revoke_file_with_outcome(goal: usize) -> Option<bool> {
+    match ecall(SYS_GOAL_REVOKE_FILE, goal, 0, 0, 0, 0) {
+        (0, 0, ..) => Some(false),
+        (0, 1, ..) => Some(true),
+        _ => None,
+    }
 }
 
 /// Retains the file behind the owner's descriptor and stages a same-directory rename.
@@ -355,6 +365,15 @@ pub fn publication_audit_row_with_cancellation(
         index,
         record,
     )
+}
+
+/// Reads a publication decision, including a rename discarded by file grant revocation.
+pub fn publication_decision_row(
+    goal: usize,
+    index: usize,
+    record: &mut EncodedPublicationRecord,
+) -> Option<(usize, usize)> {
+    read_publication_row(SYS_GOAL_PUBLICATION_DECISIONS, goal, index, record)
 }
 
 fn read_publication_row(

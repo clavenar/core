@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements calls 0–80. The caller places the call number in
+The RV64 prototype implements calls 0–81. The caller places the call number in
 `a7`, passes up to six arguments in `a0`–`a5`, and executes `ecall`.
 The per-call descriptions give the result registers and error values.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -293,7 +293,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 57 `goal_read_audit` | Same arguments as call 52 | Retained read entry count (0–4), overwritten count in `a1` and lifetime bytes delivered in `a2`, or -1 on failure |
 | 58 `agent_run_with_request` | `a0` goal, `a1` program, `a2` flags, `a3` optional agent reply allowance, `a4` request address, `a5` request length | Fresh agent handle, with its child launch handle in `a1` |
 | 59 `goal_audit_with_caller` | Same arguments as call 52 | Retained delegation entry count (0–4), with overwritten count in `a1`, or -1 on failure |
-| 60 `goal_revoke_file` | `a0` goal handle | 0 for an owned goal, including a repeat call, or -1 for an invalid handle or caller |
+| 60 `goal_revoke_file` | `a0` goal handle | `a0` is 0 for an owned goal, including a repeat call, or -1 for an invalid handle or caller. On success, `a1` is 1 if this call discarded a rename staged through the grant, 0 otherwise. |
 | 61 `goal_read_audit_with_limit` | Same arguments as call 57 | Same count, overwritten count and lifetime read bytes as call 57, with the effective limit identified in each entry |
 | 62 `goal_grant_file_to_with_arg` | `a0` goal handle, `a1` shell file handle, `a2` helper selector, `a3` literal address, `a4` literal length (0–64 bytes) | 0 when the file and its argument restriction are attached, -1 on rejection |
 | 63 `agent_status_with_definition` | `a0` agent handle, `a1` shell stack destination, `a2` capacity in bytes | Same status registers as call 39, plus a 34-byte definition record in the buffer |
@@ -314,6 +314,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 78 `goal_create_with_read_scope` | `a0` owner's read-directory handle, `a1` and `a2` option block as in call 77, `a3` preserved-file handle, `a4` rename-directory handle (each optional handle takes `NO_RAMFS_HANDLE` when absent) | Fresh goal handle, or -1 on rejection |
 | 79 `goal_read_decisions` | Same arguments as call 57 | Retained read decision count (0–4), overwritten count in `a1` and lifetime bytes delivered in `a2`, or -1 on failure |
 | 80 `goal_publication_audit_with_cancellation` | Same arguments as call 76 | Same row format and result registers as call 76. Includes a pending rename discarded by call 37. |
+| 81 `goal_publication_decisions` | Same arguments as call 76 | Same row format and result registers as call 76. Includes renames discarded by calls 37 and 60. |
 
 ## Rename review and publication
 
@@ -353,6 +354,7 @@ with a new deadline. A rejected review clears the token and leaves the frozen
 diff available. A failed copy returns -1 before checking the change or
 altering its token. Call 67 reads the diff without changing review state.
 Discard, cancellation, successful close and owner exit invalidate the token.
+Revoking a file grant invalidates the token for a rename staged through that grant.
 
 Call 69 checks the caller, goal state and token. It consumes a matching token
 and returns 3 if the deadline has been reached. The rename remains staged for
@@ -458,9 +460,12 @@ closes any handle it still holds.
 
 Call 60 withdraws the goal's retained file and closes all descriptors
 derived from that grant, including copies already held by helpers. It also
-discards any unpublished rename staged through that grant and invalidates
-its review token. Owner-staged renames and the goal's preserved input survive
-revocation. Only the owning shell can call it. Each read and revocation runs
+discards any unpublished rename staged through that grant, invalidates
+its review token and appends the discard to the history read by call 81.
+The discard flag in `a1` describes that same revocation. An owner-staged
+rename of the same file keeps its review token, and the goal retains its
+preserved input.
+Only the owning shell can call it. Each read and revocation runs
 to completion on the boot hart. Bytes delivered earlier stay charged. A later
 read using a revoked descriptor fails before copying or charging bytes. Other
 opens of the same file keep their own authority and cursor.
@@ -617,12 +622,15 @@ shell path open ends before a staging call. Revocation, cancellation and
 publication preserve earlier decisions. Closing the goal releases its history.
 
 Call 76 reads commit decisions made by call 69 with a matching review token
-and explicit discards made by call 74. Call 80 also includes the rename
-discarded by call 37, if one existed. Cancellation is terminal, so that
-decision is the final row. Each view reports its own last four decisions and
-overwritten count, which saturates at the largest RV64 unsigned value.
-Previews, reviews, invalid or replayed tokens, empty discards and repeated
-cancellations add no rows. Revocation and goal teardown add no publication rows.
+and explicit discards made by call 74. Call 80 also includes a rename
+discarded by cancellation (call 37). Call 81 includes all decisions from
+call 80 plus any rename discarded by file grant revocation (call 60). Later
+decisions can follow a revocation. A cancellation discard is always the
+final row. Each view reports its own last four decisions, oldest first,
+and its own overwritten count, which saturates at the largest RV64 unsigned
+value. A discard, cancellation or revocation adds a row only when it removes a
+proposal. Previews, reviews, invalid or replayed tokens and goal teardown add
+no rows.
 
 Each 552-byte row starts with five little-endian 64-bit words giving the
 outcome, base revision, observed revision, source path length and destination
@@ -638,12 +646,14 @@ bytes. A published rename advances the revision by one.
 | 3 | `review-expired` |
 | 4 | `unavailable` |
 | 5 | `discarded` |
-| 6 | `discarded-by-cancel` (call 80) |
+| 6 | `discarded-by-cancel` (calls 80 and 81) |
+| 7 | `discarded-by-revoke` (call 81) |
 
 The owner can reuse a single stack buffer to read indices zero through
 `count - 1`. Only the owner can cause a publication decision, so consecutive
-reads see the same history until the owner commits, discards, cancels or closes the
-goal. Index zero on an empty history returns zero and accepts zero capacity.
+reads see the same history until the owner commits, discards, revokes a file
+grant, cancels or closes the goal. Index zero on an empty history returns zero
+and accepts zero capacity.
 An invalid index, a short buffer for a retained row, or an invalid destination
 range fails before copying any bytes.
 

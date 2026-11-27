@@ -51,9 +51,16 @@ impl<const WORDS: usize> AuditHistory<[[u8; 8]; WORDS]> {
 #[derive(Default)]
 pub(super) struct PublicationHistory {
     explicit: AuditHistory<EncodedPublicationRecord>,
-    // Cancellation is terminal. Keep its final row separate so call 76 can still read
-    // the last four explicit decisions and their original overwritten count.
+    // A revocation can precede later owner decisions. Older readers retain their own four rows.
+    with_revocations: AuditHistory<EncodedPublicationRecord>,
+    // Cancellation is terminal, so both views that include it can share its final row.
     cancellation: Option<EncodedPublicationRecord>,
+}
+
+pub(crate) enum PublicationAudit {
+    Explicit,
+    WithCancellation,
+    Decisions,
 }
 
 impl PublicationHistory {
@@ -64,37 +71,42 @@ impl PublicationHistory {
         outcome: PublicationOutcome,
     ) {
         let row = change.publication_record(fs, outcome);
-        if outcome == PublicationOutcome::DiscardedByCancel {
-            self.cancellation = Some(row);
-        } else {
-            self.explicit.record(row);
+        match outcome {
+            PublicationOutcome::DiscardedByCancel => self.cancellation = Some(row),
+            PublicationOutcome::DiscardedByRevoke => self.with_revocations.record(row),
+            PublicationOutcome::Commit(_)
+            | PublicationOutcome::Unavailable
+            | PublicationOutcome::Discarded => {
+                self.explicit.record(row);
+                self.with_revocations.record(row);
+            }
         }
     }
 
     fn read_row(
         &self,
         index: usize,
-        include_cancellation: bool,
+        view: PublicationAudit,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize)> {
-        let cancellation = if include_cancellation {
-            self.cancellation.as_slice()
-        } else {
-            &[]
+        let (history, cancellation) = match view {
+            PublicationAudit::Explicit => (&self.explicit, &[][..]),
+            PublicationAudit::WithCancellation => (&self.explicit, self.cancellation.as_slice()),
+            PublicationAudit::Decisions => (&self.with_revocations, self.cancellation.as_slice()),
         };
-        let total = self.explicit.len + cancellation.len();
+        let total = history.len + cancellation.len();
         let skipped = total.saturating_sub(AUDIT_CAPACITY);
         let count = total - skipped;
         let bytes = if index == 0 && count == 0 {
             &[][..]
         } else {
-            self.explicit.entries[skipped..self.explicit.len]
+            history.entries[skipped..history.len]
                 .iter()
                 .chain(cancellation)
                 .nth(index)?
                 .as_flattened()
         };
-        copy(bytes).then_some((count, self.explicit.overwritten.saturating_add(skipped)))
+        copy(bytes).then_some((count, history.overwritten.saturating_add(skipped)))
     }
 }
 
@@ -137,11 +149,11 @@ impl Scheduler {
         &self,
         handle: usize,
         index: usize,
-        include_cancellation: bool,
+        view: PublicationAudit,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize)> {
         self.shell_goal(handle)?
             .publication_audit
-            .read_row(index, include_cancellation, copy)
+            .read_row(index, view, copy)
     }
 }

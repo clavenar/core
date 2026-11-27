@@ -71,7 +71,7 @@ entries! {
         "  --delegate-to <program> [--argument <literal>]" =>
             "Choose the helper and optionally its argument",
     },
-    RevokeFile { "goal revoke-file" => "Revoke the goal's file grant" },
+    RevokeFile { "goal revoke-file" => "Revoke the grant and discard its staged rename" },
     GoalRun { "goal run [--reply-bytes N] <program>" => "Start a child in the goal" },
     StageRename { "goal stage-rename <source> <new-name>" => "Stage a file rename" },
     GoalActions {

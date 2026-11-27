@@ -1181,21 +1181,57 @@ and `ls /work` still lists only `draft.txt`. After `goal commit` reports
 `rename committed`, `cat` prints `hello`. The request uses zero file-read
 and reply bytes.
 
-To try revocation, repeat from a fresh boot through `ls /work`, then run
+To check a read-only grant, repeat from a fresh boot through `goal diff`
+using `goal grant-file /work/draft.txt`. The agent exits with status 1
+and the diff is empty.
+
+### Revoke a rename grant after review
+
+At a fresh `clsh>` prompt, let the agent propose a rename. Read the diff
+after the agent exits to obtain a commit token, then revoke the grant twice.
 
 ```text
+write /draft.txt keep
+goal create --preserve-file /draft.txt
+goal grant-file --stage-rename /draft.txt
+agent run hello --stage-rename final.txt
+wait hello
+goal diff
+goal revoke-file
 goal revoke-file
 goal commit
-goal diff
-cat /work/draft.txt
+goal audit --publication
+cat /draft.txt
 goal close
 ```
 
-The saved review token fails with `cannot commit goal`. The diff says
-`no staged changes` and the original file still contains `hello`.
-To check a read-only grant, repeat the first sequence through `goal diff`
-using `goal grant-file /work/draft.txt`. The agent exits with status 1
-and the diff is empty.
+Both revocations print `file revoked`. Only the first also prints
+`staged rename discarded`. Commit asks for a new passing review, the file
+still contains `keep`, and the audit shows one row.
+
+```text
+source="/draft.txt" new_name="final.txt" base=2 revision=2 outcome=discarded-by-revoke
+```
+
+In the same boot, give a new goal the same grant and stage the rename from
+the shell. Revoke after review and commit using the token already issued.
+
+```text
+goal create --preserve-file /draft.txt
+goal grant-file --stage-rename /draft.txt
+goal stage-rename /draft.txt final.txt
+goal run echo
+wait echo
+goal diff
+goal revoke-file
+goal commit
+goal audit --publication
+cat /final.txt
+goal close
+```
+
+Revocation prints only `file revoked`. Commit prints `rename committed`,
+`cat` prints `keep`, and the sole audit row has `base=2 revision=3 outcome=published`.
 
 ### Discard a staged rename
 
@@ -1283,9 +1319,9 @@ history available until the owner closes the goal.
 
 `goal audit --publication` shows the current goal's last four publication
 decisions, oldest first. These include commits, explicit discards and renames
-discarded by cancellation. Each row gives the absolute source path
-and destination basename captured at staging. `base` is the RamFS revision at
-staging. `revision` is the public revision when the kernel made the decision.
+discarded by cancellation or file grant revocation. Each row gives the absolute
+source path and destination basename captured at staging. `base` is the RamFS
+revision at staging. `revision` is the public revision when the kernel made the decision.
 Only the owner can read the history. Closing the goal releases it.
 
 At a fresh QEMU prompt, edit the source after reviewing its rename.
