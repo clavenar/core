@@ -610,6 +610,24 @@ impl GoalStatus {
     }
 }
 
+/// Selects the event the shell's dedicated monitor waits for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum GoalMonitorKind {
+    Finish = 0,
+    Publication = 1,
+}
+
+impl GoalMonitorKind {
+    pub const fn from_register(value: usize) -> Option<Self> {
+        match value {
+            0 => Some(Self::Finish),
+            1 => Some(Self::Publication),
+            _ => None,
+        }
+    }
+}
+
 /// Call 35's four status words followed by call 43's four reply-budget words.
 pub type EncodedGoalObservation = [[u8; 8]; 8];
 

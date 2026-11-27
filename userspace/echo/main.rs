@@ -20,6 +20,10 @@ extern "C" fn _start(_task: usize, _file: usize, grant_kind: usize, io: usize) -
             ..
         }) => clv::exit(usize::from(clv::goal::observe().is_none())),
         Some(LaunchRequest::Received {
+            kind: RequestKind::ObservePublication,
+            ..
+        }) => clv::exit(usize::from(clv::goal::observe_publication().is_none())),
+        Some(LaunchRequest::Received {
             kind: RequestKind::ResumeAgent,
             ..
         }) => clv::exit(usize::from(!clv::agent::resume_granted())),

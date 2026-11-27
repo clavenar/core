@@ -1,15 +1,16 @@
 use clv_abi::audit::{
     AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, DelegationRecordWithTool,
-    EncodedPublicationRecord, EncodedReadDecision, EncodedReadRecordWithLimit,
-    EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationAuditView,
-    PublicationReviewer, ReadAuditView, ReadRecord, ReadRecordWithLimit, ReplyRecord,
+    EncodedPublicationObservation, EncodedPublicationRecord, EncodedReadDecision,
+    EncodedReadRecordWithLimit, EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord,
+    PublicationAuditView, PublicationObservation, PublicationReviewer, ReadAuditView, ReadRecord,
+    ReadRecordWithLimit, ReplyRecord,
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CommitResult, CreateOptions, CreatePolicy,
     DiscardResult, EncodedGoalObservation, FileOptions, FileRecipient, GoalDeadline,
-    GoalObservation, GoalStatus, PublicationError, ReadLimits, RenameBatchDiff, RenameOptions,
-    RenameReviewReceipt, ReviewToken, TimedRenameReview, TimedReviewToken,
+    GoalMonitorKind, GoalObservation, GoalStatus, PublicationError, ReadLimits, RenameBatchDiff,
+    RenameOptions, RenameReviewReceipt, ReviewToken, TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::goal::{GoalCreateRequest, decode_rename_batch};
 use clv_abi::tool::ToolId;
@@ -533,19 +534,43 @@ pub fn launch_observer(goal: usize, program: Program) -> Option<usize> {
 
 /// Starts an isolated echo monitor for one terminal snapshot of this goal.
 pub fn launch_finish_monitor(goal: usize) -> Option<usize> {
-    syscall_result(syscall(SYS_GOAL_LAUNCH_FINISH_MONITOR, goal, 0, 0))
+    launch_monitor(goal, GoalMonitorKind::Finish)
+}
+
+/// Starts an isolated echo monitor for the disposition of a rename transaction.
+pub fn launch_publication_monitor(goal: usize) -> Option<usize> {
+    launch_monitor(goal, GoalMonitorKind::Publication)
+}
+
+fn launch_monitor(goal: usize, kind: GoalMonitorKind) -> Option<usize> {
+    syscall_result(syscall(
+        SYS_GOAL_LAUNCH_FINISH_MONITOR,
+        goal,
+        kind as usize,
+        0,
+    ))
 }
 
 /// Takes one snapshot and queues the same kernel-generated record for the parent.
 pub fn observe() -> Option<GoalObservation> {
     let mut bytes = [0; size_of::<EncodedGoalObservation>()];
+    GoalObservation::decode(observe_record(&mut bytes)?)
+}
+
+/// Collects the publication snapshot and queues the same record for the parent.
+pub fn observe_publication() -> Option<PublicationObservation> {
+    let mut bytes = [0; size_of::<EncodedPublicationObservation>()];
+    PublicationObservation::decode(observe_record(&mut bytes)?)
+}
+
+fn observe_record(bytes: &mut [u8]) -> Option<&[u8]> {
     let count = syscall(
         SYS_GOAL_OBSERVE,
         bytes.as_mut_ptr().expose_provenance(),
         bytes.len(),
         0,
     );
-    GoalObservation::decode(bytes.get(..count)?)
+    bytes.get(..count)
 }
 
 /// Reads member completion and the independent goal deadline in a single syscall.

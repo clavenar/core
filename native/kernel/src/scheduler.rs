@@ -7,8 +7,8 @@ pub(crate) use self::goal::DelegationTarget;
 use self::goal::Goal;
 use self::pipe::LaunchPipes;
 use clv_abi::agent::AgentLaunch;
-use clv_abi::audit::DelegationDenial;
-use clv_abi::goal::GoalObservation;
+use clv_abi::audit::{DelegationDenial, PublicationObservation};
+use clv_abi::goal::{GoalMonitorKind, GoalObservation};
 use clv_abi::{
     ChildEvent, CompletionKind, GrantKind, LaunchParent, Program, ReplyKind, RequestKind,
     TaskCompletion,
@@ -31,7 +31,7 @@ enum TaskState {
     Suspended,
     WaitingForChild(usize),
     WaitingForEvent,
-    /// A finish monitor starts at its entry point when this goal reaches a terminal state.
+    /// A monitor starts at its entry point when its requested goal event is ready.
     WaitingForGoal(usize),
     WaitingForMessage(usize),
     WaitingForPipeData(usize),
@@ -86,11 +86,17 @@ struct PendingEvent {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LaunchGrant {
     ObserveGoal(usize),
-    ObserveOnFinish,
+    Monitor(GoalMonitorKind),
     /// The pending rename records the boot-unique launch allowed to review it.
     ReviewRename,
     /// The agent's original child launch. Every resume ends this suspension's grants.
     ResumeAgent(usize),
+}
+
+#[derive(Clone, Copy)]
+enum MonitorReport {
+    Goal(GoalObservation),
+    Publication(PublicationObservation),
 }
 
 struct ChildLaunch {
@@ -195,7 +201,7 @@ pub(crate) struct Scheduler {
     goal: Option<Goal>,
     host_bridge: Option<HostBridge>,
     /// The dedicated monitor owns this snapshot from wakeup until its grant is used or revoked.
-    monitor_report: Option<GoalObservation>,
+    monitor_report: Option<MonitorReport>,
     // Child launches, goals and agents share a boot-unique handle sequence.
     next_handle: usize,
     next_event_sequence: usize,
@@ -307,7 +313,7 @@ impl Scheduler {
         grant: Option<LaunchGrant>,
     ) -> Result<PreparedLaunch, DelegationDenial> {
         let slot = match (program, grant) {
-            (Program::Echo, Some(LaunchGrant::ObserveOnFinish)) => GOAL_MONITOR_TASK_INDEX,
+            (Program::Echo, Some(LaunchGrant::Monitor(_))) => GOAL_MONITOR_TASK_INDEX,
             (Program::Echo, Some(_)) => ECHO_REPORT_TASK_INDEX,
             _ => task_index(program),
         };

@@ -10,11 +10,12 @@ use clv::goal::{
 };
 use clv::{agent, print};
 use clv_abi::agent::{NO_DEFINITION, SHA256_BYTES};
+use clv_abi::audit::PublicationObservation;
 use clv_abi::{CompletionKind, OPEN_READ, Program};
 pub(super) use options::{GoalCommand, GoalOptions};
 
 use super::{
-    HEX_DIGITS,
+    ConsoleLine, HEX_DIGITS,
     children::Children,
     files::OpenHandle,
     help::{self, Entry},
@@ -397,14 +398,19 @@ fn amount(value: Option<usize>, buf: &mut [u8; DIGITS]) -> &[u8] {
 }
 
 fn print_budget(budget: ReplyBudget) {
-    print_line(&[
-        b"available=",
-        amount(budget.available, &mut [0; DIGITS]),
-        b" reserved=",
-        amount(budget.reserved, &mut [0; DIGITS]),
-        b" spent=",
-        decimal(budget.spent, &mut [0; DIGITS]),
-    ]);
+    let mut line = ConsoleLine::new();
+    write_budget(&mut line, budget);
+    line.finish(&[]);
+}
+
+fn write_budget(line: &mut ConsoleLine, budget: ReplyBudget) {
+    let mut digits = [0; DIGITS];
+    line.write(b"available=");
+    line.write(amount(budget.available, &mut digits));
+    line.write(b" reserved=");
+    line.write(amount(budget.reserved, &mut digits));
+    line.write(b" spent=");
+    line.write(decimal(budget.spent, &mut digits));
 }
 
 fn print_deadline(deadline: GoalDeadline) {
@@ -425,6 +431,29 @@ pub(super) fn print_observation(bytes: &[u8]) {
     } else {
         print(b"invalid goal observation\r\n");
     }
+}
+
+pub(super) fn print_publication_observation(bytes: &[u8]) {
+    let Some(snapshot) = PublicationObservation::decode(bytes) else {
+        return print(b"invalid publication observation\r\n");
+    };
+    let mut reviewer_handle = [0; 18];
+    let reviewer = match snapshot.reviewer {
+        Some(reviewer) => audit::publication_reviewer_label(reviewer, &mut reviewer_handle),
+        None => b"none",
+    };
+    let mut line = ConsoleLine::new();
+    line.write(b"publication goal=");
+    line.write(&hex(snapshot.goal));
+    line.write(b" outcome=");
+    line.write(audit::publication_outcome_label(snapshot.outcome));
+    line.write(b" renames=");
+    line.write(decimal(snapshot.renames, &mut [0; DIGITS]));
+    line.write(b" reviewer=");
+    line.write(reviewer);
+    line.write(b"\r\n");
+    write_budget(&mut line, snapshot.budget);
+    line.finish(&[]);
 }
 
 pub(super) fn print_resume_receipt(bytes: &[u8]) {

@@ -4,6 +4,7 @@ use clv_abi::agent::{
     DELEGATION_HEADER_BYTES, DELEGATION_REQUEST_MAX_BYTES, EncodedResumeReceipt,
     LAUNCH_REQUEST_MAX_BYTES,
 };
+use clv_abi::audit::EncodedPublicationObservation;
 use clv_abi::goal::{EncodedGoalObservation, EncodedRenameReviewReceipt};
 use clv_abi::{
     FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, PATH_MAX_BYTES, ReplyKind, RequestKind,
@@ -41,12 +42,18 @@ impl MessageKind {
                 (3..=LAUNCH_REQUEST_MAX_BYTES).contains(&length)
             }
             Self::Request(
-                RequestKind::ObserveGoal | RequestKind::ResumeAgent | RequestKind::ReviewRename,
+                RequestKind::ObserveGoal
+                | RequestKind::ObservePublication
+                | RequestKind::ResumeAgent
+                | RequestKind::ReviewRename,
             ) => length == 0,
             Self::Reply(ReplyKind::GoalObservation) => {
                 length == size_of::<EncodedGoalObservation>()
             }
             Self::Reply(ReplyKind::AgentResumed) => length == size_of::<EncodedResumeReceipt>(),
+            Self::Reply(ReplyKind::PublicationObserved) => {
+                length == size_of::<EncodedPublicationObservation>()
+            }
             Self::Reply(ReplyKind::RenameReviewed) => {
                 length == size_of::<EncodedRenameReviewReceipt>()
             }

@@ -135,6 +135,8 @@ pub enum RequestKind {
     FileToolStdio = 12,
     /// The approved literal for a registered tool launched as a local MCP server.
     FileToolMcp = 13,
+    /// Empty assignment to report the disposition of the bound rename transaction.
+    ObservePublication = 14,
 }
 
 impl RequestKind {
@@ -153,6 +155,7 @@ impl RequestKind {
             value if value == Self::StageRenamePair as usize => Some(Self::StageRenamePair),
             value if value == Self::FileToolStdio as usize => Some(Self::FileToolStdio),
             value if value == Self::FileToolMcp as usize => Some(Self::FileToolMcp),
+            value if value == Self::ObservePublication as usize => Some(Self::ObservePublication),
             _ => None,
         }
     }
@@ -179,6 +182,8 @@ pub enum ReplyKind {
     HostPlanFailed = 11,
     /// One byte explaining why the guest could not obtain a host tool result.
     HostToolFailed = 12,
+    /// Only `goal_observe` can queue this kernel-generated publication snapshot.
+    PublicationObserved = 13,
 }
 
 impl ReplyKind {
@@ -196,6 +201,7 @@ impl ReplyKind {
             value if value == Self::RenameReviewed as usize => Some(Self::RenameReviewed),
             value if value == Self::HostPlanFailed as usize => Some(Self::HostPlanFailed),
             value if value == Self::HostToolFailed as usize => Some(Self::HostToolFailed),
+            value if value == Self::PublicationObserved as usize => Some(Self::PublicationObserved),
             _ => None,
         }
     }

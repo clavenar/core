@@ -219,14 +219,10 @@ fn print_rename(entry: RenameRecord<'_>) {
     line.finish(&[decision, caller, identity]);
 }
 
-fn print_publication(
-    goal: usize,
-    entry: PublicationRecord<'_>,
-    reviewer: Option<PublicationReviewer>,
-) {
+pub(super) fn publication_outcome_label(outcome: PublicationOutcome) -> &'static [u8] {
     use goal::CommitResult;
 
-    let outcome: &[u8] = match entry.outcome {
+    match outcome {
         PublicationOutcome::Commit(CommitResult::Committed) => b"published",
         PublicationOutcome::Commit(CommitResult::Conflict) => b"conflict",
         PublicationOutcome::Commit(CommitResult::PostconditionFailed) => b"postcondition-failed",
@@ -236,7 +232,27 @@ fn print_publication(
         PublicationOutcome::DiscardedByCancel => b"discarded-by-cancel",
         PublicationOutcome::DiscardedByRevoke => b"discarded-by-revoke",
         PublicationOutcome::DiscardedByExpiry => b"discarded-by-expiry",
-    };
+    }
+}
+
+pub(super) fn publication_reviewer_label(
+    reviewer: PublicationReviewer,
+    handle: &mut [u8; 18],
+) -> &[u8] {
+    match reviewer {
+        PublicationReviewer::Owner => b"owner",
+        PublicationReviewer::Supervisor(launch) => {
+            *handle = hex(launch.get());
+            handle
+        }
+    }
+}
+
+fn print_publication(
+    goal: usize,
+    entry: PublicationRecord<'_>,
+    reviewer: Option<PublicationReviewer>,
+) {
     let mut line = ConsoleLine::new();
     line.write(b"source=");
     line.quoted(entry.source);
@@ -250,7 +266,7 @@ fn print_publication(
         b" revision=",
         decimal(entry.revision as usize, &mut revision),
         b" outcome=",
-        outcome,
+        publication_outcome_label(entry.outcome),
     ] {
         line.write(part);
     }
@@ -258,10 +274,7 @@ fn print_publication(
         line.write(b" goal=");
         line.write(&hex(goal));
         line.write(b" reviewer=");
-        match reviewer {
-            PublicationReviewer::Owner => line.write(b"owner"),
-            PublicationReviewer::Supervisor(launch) => line.write(&hex(launch.get())),
-        }
+        line.write(publication_reviewer_label(reviewer, &mut [0; 18]));
     }
     line.finish(&[]);
 }

@@ -13,18 +13,20 @@ use clv_abi::agent::{
     FIND_GREETING_V6, FIND_GREETING_V7, FIND_GREETING_V8, ResumeReceipt,
 };
 use clv_abi::audit::{
-    EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationOutcome, ReplyRecord,
+    EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationObservation,
+    PublicationOutcome, ReplyRecord,
 };
 use clv_abi::bridge::{BridgeFailure, HostRequest, SEARCH_GREETING, plan_action};
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CreateOptions, CreatePolicy, DiscardResult,
-    FileOptions, GoalDeadline, GoalObservation, GoalStatus, MAX_CHILDREN, MAX_GOAL_RENAMES,
+    FileOptions, GoalDeadline, GoalMonitorKind, GoalObservation, GoalStatus, MAX_CHILDREN,
+    MAX_GOAL_RENAMES,
 };
 use clv_abi::tool::{HOST_TEXT_SEARCH_V1, TEXT_SEARCH_V1, ToolId};
 use clv_abi::{LaunchParent, Program, ReplyKind, RequestKind, TaskCompletion};
 
-use super::{AgentBinding, LaunchGrant, SHELL_TASK_INDEX, Scheduler, TaskState};
+use super::{AgentBinding, LaunchGrant, MonitorReport, SHELL_TASK_INDEX, Scheduler, TaskState};
 use crate::arch::monotonic_nanos;
 use crate::fs::ramfs::{
     DirectoryId, FileGrant, FileGrantMode, GrantArgument, RamFs, RenamePolicy, TaskFs,
@@ -95,6 +97,7 @@ pub(super) struct Goal {
     require_rename_review: bool,
     rename_limit: usize,
     rename: Option<PendingRenames>,
+    publication_report: Option<PublicationObservation>,
     delegation_audit: AuditHistory<EncodedRecordWithTool>,
     reply_audit: AuditHistory<EncodedReplyRecord>,
     rename_audit: AuditHistory<EncodedRenameRecord>,
@@ -316,6 +319,7 @@ impl Scheduler {
             require_rename_review,
             rename_limit,
             rename: None,
+            publication_report: None,
             delegation_audit: AuditHistory::default(),
             reply_audit: AuditHistory::default(),
             rename_audit: AuditHistory::default(),
@@ -340,7 +344,11 @@ impl Scheduler {
         Some(self.shell_goal(handle)?.budget())
     }
 
-    pub(crate) fn launch_finish_monitor(&mut self, goal: usize) -> Option<usize> {
+    pub(crate) fn launch_goal_monitor(
+        &mut self,
+        goal: usize,
+        kind: GoalMonitorKind,
+    ) -> Option<usize> {
         self.shell_goal(goal)?;
         // The owner can collect across goal closure, in either reply/status order.
         if self.tasks[GOAL_MONITOR_TASK_INDEX]
@@ -355,12 +363,16 @@ impl Scheduler {
                 Program::Echo,
                 None,
                 LaunchParent::Shell,
-                Some(LaunchGrant::ObserveOnFinish),
+                Some(LaunchGrant::Monitor(kind)),
             )
             .ok()?;
+        let request_kind = match kind {
+            GoalMonitorKind::Finish => RequestKind::ObserveGoal,
+            GoalMonitorKind::Publication => RequestKind::ObservePublication,
+        };
         let request = Message::new(
             self.current_id(),
-            MessageKind::Request(RequestKind::ObserveGoal),
+            MessageKind::Request(request_kind),
             0,
             |_| true,
         )?;
@@ -371,7 +383,7 @@ impl Scheduler {
             Default::default(),
             TaskState::WaitingForGoal(goal),
         );
-        // Registration after completion uses the same delivery path.
+        // Late registration uses the same delivery path.
         self.wake_goal_monitor();
         Some(handle)
     }
@@ -381,38 +393,53 @@ impl Scheduler {
         let TaskState::WaitingForGoal(handle) = task.state else {
             return;
         };
-        let Some(goal) = self
-            .goal
-            .as_ref()
-            .filter(|goal| goal.handle == handle && !goal.is_active())
+        let Some(LaunchGrant::Monitor(kind)) = task.launch.as_ref().and_then(|launch| launch.grant)
         else {
             return;
         };
-        self.monitor_report = Some(goal.observation());
-        task.state = TaskState::Runnable;
+        let Some(goal) = self.goal.as_ref().filter(|goal| goal.handle == handle) else {
+            return;
+        };
+        let report = match kind {
+            GoalMonitorKind::Finish if !goal.is_active() => {
+                Some(MonitorReport::Goal(goal.observation()))
+            }
+            GoalMonitorKind::Publication => goal.publication_report.map(MonitorReport::Publication),
+            _ => None,
+        };
+        if let Some(report) = report {
+            self.monitor_report = Some(report);
+            task.state = TaskState::Runnable;
+        }
     }
 
     pub(crate) fn observe_goal(&mut self, deliver: impl FnOnce(&[u8]) -> bool) -> Option<usize> {
         let grant = self.tasks[self.current].launch.as_ref()?.grant?;
-        let record = match grant {
-            LaunchGrant::ObserveGoal(handle) => self
-                .goal
-                .as_ref()
-                .filter(|goal| goal.handle == handle)?
-                .observation(),
-            LaunchGrant::ObserveOnFinish => self.monitor_report?,
+        let report = match grant {
+            LaunchGrant::ObserveGoal(handle) => MonitorReport::Goal(
+                self.goal
+                    .as_ref()
+                    .filter(|goal| goal.handle == handle)?
+                    .observation(),
+            ),
+            LaunchGrant::Monitor(_) => self.monitor_report?,
             _ => return None,
-        }
-        .encode();
+        };
+        let (kind, record) = match report {
+            MonitorReport::Goal(snapshot) => (ReplyKind::GoalObservation, snapshot.encode()),
+            MonitorReport::Publication(snapshot) => {
+                (ReplyKind::PublicationObserved, snapshot.encode())
+            }
+        };
         let bytes = record.as_flattened();
         // The observer and its parent see the same kernel sample. A failed copy or
         // occupied mailbox leaves the grant available for a retry.
-        let count = self.send_reply(Some(ReplyKind::GoalObservation), bytes.len(), |reply| {
+        let count = self.send_reply(Some(kind), bytes.len(), |reply| {
             reply.copy_from_slice(bytes);
             deliver(reply)
         })?;
         self.tasks[self.current].launch.as_mut()?.grant = None;
-        if grant == LaunchGrant::ObserveOnFinish {
+        if matches!(grant, LaunchGrant::Monitor(_)) {
             self.monitor_report = None;
         }
         Some(count)
@@ -463,6 +490,9 @@ impl Scheduler {
         // A full goal has released its pins. Issued handles still carry the goal ID.
         for task in &mut self.tasks {
             task.fs.revoke_goal_file(fs, handle);
+        }
+        if rename_discarded {
+            self.wake_goal_monitor();
         }
         Some(rename_discarded)
     }
@@ -769,12 +799,16 @@ impl Scheduler {
     }
 
     fn drop_goal(&mut self, fs: &mut RamFs) {
-        if let Some(mut goal) = self.goal.take() {
-            if self.tasks[GOAL_MONITOR_TASK_INDEX].state == TaskState::WaitingForGoal(goal.handle) {
-                self.stop_task(GOAL_MONITOR_TASK_INDEX, fs, TaskCompletion::Cancelled);
-            }
-            goal.release_files(fs);
-            goal.release_transaction(fs, None);
+        let Some(goal) = &mut self.goal else {
+            return;
+        };
+        let handle = goal.handle;
+        goal.release_files(fs);
+        goal.close_transaction(fs);
+        self.wake_goal_monitor();
+        self.goal = None;
+        if self.tasks[GOAL_MONITOR_TASK_INDEX].state == TaskState::WaitingForGoal(handle) {
+            self.stop_task(GOAL_MONITOR_TASK_INDEX, fs, TaskCompletion::Cancelled);
         }
     }
 

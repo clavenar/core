@@ -1,4 +1,6 @@
-use clv_abi::audit::{PublicationOutcome, PublicationReviewer, RenameDenial, RenameRecord};
+use clv_abi::audit::{
+    PublicationObservation, PublicationOutcome, PublicationReviewer, RenameDenial, RenameRecord,
+};
 use clv_abi::goal::{
     CommitResult, DiscardResult, GoalDeadline, GoalStatus, PublicationError, RenameReviewReceipt,
     ReviewToken, TimedRenameReview, TimedReviewToken,
@@ -118,6 +120,7 @@ impl Goal {
             pending.from_file_grant |= from_file_grant;
             return Ok(());
         }
+        self.publication_report = None;
         self.rename = Some(PendingRenames {
             changes: StagedRenames::new(change),
             approval: None,
@@ -139,9 +142,29 @@ impl Goal {
             for change in rename.changes.iter() {
                 self.publication_audit.record(fs, change, outcome, None);
             }
+            self.record_publication(
+                outcome,
+                rename.approval.map(|approval| approval.reviewer),
+                rename.changes.len(),
+            );
         }
         rename.changes.discard(fs);
         DiscardResult::Discarded
+    }
+
+    fn record_publication(
+        &mut self,
+        outcome: PublicationOutcome,
+        reviewer: Option<PublicationReviewer>,
+        renames: usize,
+    ) {
+        self.publication_report = Some(PublicationObservation {
+            goal: self.handle,
+            outcome,
+            reviewer,
+            renames,
+            budget: self.budget(),
+        });
     }
 
     pub(super) fn discard_granted_rename(&mut self, fs: &mut RamFs) -> bool {
@@ -163,6 +186,17 @@ impl Goal {
         let discarded = self.discard_rename(fs, outcome);
         self.rename_policy.release_inputs(fs);
         discarded
+    }
+
+    pub(super) fn close_transaction(&mut self, fs: &mut RamFs) {
+        if let Some(pending) = &self.rename {
+            self.record_publication(
+                PublicationOutcome::Discarded,
+                pending.approval.map(|approval| approval.reviewer),
+                pending.changes.len(),
+            );
+        }
+        self.release_transaction(fs, None);
     }
 }
 
@@ -300,7 +334,9 @@ impl Scheduler {
     ) -> Option<DiscardResult> {
         self.shell_goal(handle)?;
         let goal = self.goal.as_mut()?;
-        Some(goal.discard_rename(fs, Some(PublicationOutcome::Discarded)))
+        let result = goal.discard_rename(fs, Some(PublicationOutcome::Discarded));
+        self.wake_goal_monitor();
+        Some(result)
     }
 
     pub(crate) fn commit_goal(
@@ -340,7 +376,10 @@ impl Scheduler {
                 .record(fs, change, outcome, Some(approval.reviewer));
         }
         if result == Some(CommitResult::Committed) {
+            let renames = pending.changes.len();
             goal.release_transaction(fs, None);
+            goal.record_publication(outcome, Some(approval.reviewer), renames);
+            self.wake_goal_monitor();
         }
         result
     }

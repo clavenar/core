@@ -5,7 +5,8 @@ use clv_abi::agent::{
 use clv_abi::audit::{DelegationDenial, PublicationAuditView, ReadAuditView};
 use clv_abi::bridge::{BridgeFailure, MAX_FRAME_BYTES, POLL, SUBMIT, SUBMIT_TOOL};
 use clv_abi::goal::{
-    EncodedGoalCreate, FileRecipient, GoalCreateRequest, RENAME_DIFF_HEADER_BYTES, ReviewToken,
+    EncodedGoalCreate, FileRecipient, GoalCreateRequest, GoalMonitorKind, RENAME_DIFF_HEADER_BYTES,
+    ReviewToken,
 };
 use clv_abi::tool::{FILE_TOOL_MCP, FILE_TOOL_STDIO, ToolId};
 use clv_abi::{
@@ -161,9 +162,9 @@ pub(crate) fn dispatch(
             0,
         )
         .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_LAUNCH_FINISH_MONITOR => {
-            scheduler.launch_finish_monitor(a0).unwrap_or(SYSCALL_ERROR)
-        }
+        SYS_GOAL_LAUNCH_FINISH_MONITOR => GoalMonitorKind::from_register(a1)
+            .and_then(|kind| scheduler.launch_goal_monitor(a0, kind))
+            .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_LAUNCH_RENAME_REVIEWER => spawn_with_request(
             scheduler,
             fs,
@@ -504,6 +505,7 @@ pub(crate) fn dispatch(
                 !matches!(
                     kind,
                     ReplyKind::GoalObservation
+                        | ReplyKind::PublicationObserved
                         | ReplyKind::AgentResumed
                         | ReplyKind::RenameReviewed
                 )

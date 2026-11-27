@@ -3,8 +3,8 @@
 mod publication;
 mod rename;
 pub use publication::{
-    EncodedPublicationRecord, PublicationAuditView, PublicationOutcome, PublicationRecord,
-    PublicationReviewer,
+    EncodedPublicationObservation, EncodedPublicationRecord, PublicationAuditView,
+    PublicationObservation, PublicationOutcome, PublicationRecord, PublicationReviewer,
 };
 pub use rename::{EncodedRenameRecord, RenameDenial, RenameRecord};
 

@@ -80,6 +80,7 @@ entries! {
     GoalObserve {
         "goal observe echo" => "Read goal state, deadline and reply budget through echo",
         "goal observe --on-finish echo" => "Start a monitor for the final goal state and budget",
+        "goal observe --on-publication echo" => "Monitor the publication or discard of a rename",
         "goal observe --collect" => "Collect the monitor's report or show pending",
     },
     StageRename { "goal stage-rename <source> <new-name>" => "Stage a file rename" },

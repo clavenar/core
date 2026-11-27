@@ -19,6 +19,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
   - [Require a supervisor review before commit](#require-a-supervisor-review-before-commit)
   - [Trace a rename commit to its reviewer](#trace-a-rename-commit-to-its-reviewer)
   - [Publish two renames in one commit](#publish-two-renames-in-one-commit)
+  - [Observe a reviewed publication](#observe-a-reviewed-publication)
 - [Helper accounting and revocation](#helper-accounting-and-revocation)
 
 ## Boot and shell
@@ -2135,6 +2136,79 @@ directory and distinct from any other staged destination there. Discard,
 cancellation and goal expiry remove the entire pending batch. Revoking a
 file grant also removes the batch if it contains a rename staged under
 that grant.
+
+### Observe a reviewed publication
+
+At a fresh `clsh>` prompt, give `hello` a two-file rename goal confined to
+`/home/work`. Arm a read-only `echo` monitor while the worker is suspended.
+The shell delegates the resume and the review to separate launches in the
+supervisor slot. The monitor has its own launch and address space.
+
+```text
+mkdir /home
+mkdir /home/work
+mkdir /private
+write /home/work/draft-a.txt alpha
+write /home/work/draft-b.txt beta
+write /private/untouched.txt private
+goal create --rename-limit 2 --rename-under /home/work --require-rename-review echo --reply-bytes 0 --preserve-file /home/work/draft-a.txt --preserve-file /home/work/draft-b.txt
+goal grant-file --stage-rename /home/work/draft-a.txt
+goal grant-file --stage-rename /home/work/draft-b.txt
+agent run --suspended hello --stage-rename final-a.txt --stage-rename final-b.txt
+goal observe --on-publication echo
+goal observe --collect
+agent resume --via echo
+wait hello
+goal observe --collect
+goal commit
+goal diff --via echo
+goal observe --collect
+ls /home/work
+```
+
+All three collections print `pending`. The early commit requires a passing
+supervisor review. The review prints its own handle and `ready to commit`,
+and the directory still lists both draft names.
+
+Publish the reviewed batch as the shell owner.
+
+```text
+goal commit
+goal observe --collect
+ls /home/work
+cat /home/work/final-a.txt
+cat /home/work/final-b.txt
+cat /private/untouched.txt
+goal audit --publication
+goal close
+```
+
+The monitor reports the goal handle, `outcome=published`, `renames=2` and
+the reviewer handle from the passing review. Its reply budget sample shows
+`available=0 reserved=0 spent=0`. Both final names appear together, with
+`alpha` and `beta` in their original files. The audit attributes both
+renames to the same publication and reviewer. The file under `/private`
+still contains `private`.
+
+For cancellation, repeat the first block from a fresh boot, then cancel
+the reviewed transaction.
+
+```text
+goal cancel
+goal observe --collect
+ls /home/work
+cat /home/work/draft-a.txt
+cat /home/work/draft-b.txt
+cat /private/untouched.txt
+goal audit --publication
+goal close
+```
+
+The worker has already finished, so `goal cancel` reports
+`goal already finished` and `staged rename discarded`. The monitor reports
+`outcome=discarded-by-cancel` for both renames and identifies the reviewer
+whose approval was attached to the batch. The original names and contents
+remain visible, and the audit records two discarded renames.
 
 ## Helper accounting and revocation
 

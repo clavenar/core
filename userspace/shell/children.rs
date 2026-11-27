@@ -1,5 +1,6 @@
 use clv::{ChildReply, ChildStatus, agent, pipe, print};
 use clv_abi::bridge::BridgeFailure;
+use clv_abi::goal::GoalMonitorKind;
 use clv_abi::{
     ChildEvent, CompletionKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PIPE_CAPACITY,
     PROGRAM_HELLO, PROGRAMS, Program, ReplyKind, RequestKind,
@@ -21,6 +22,7 @@ pub(super) struct Children {
 
 struct GoalMonitor {
     handle: usize,
+    reply_kind: ReplyKind,
     collected: bool,
 }
 
@@ -120,21 +122,33 @@ impl Children {
     }
 
     pub(super) fn observe_goal(&mut self, goal: Option<usize>, arguments: &[u8]) {
-        let on_finish = match split_word(arguments) {
+        let monitor = match split_word(arguments) {
             (b"--collect", b"") => return self.collect_goal_monitor(),
-            (b"--on-finish", b"echo") => true,
-            (b"echo", b"") => false,
+            (b"--on-finish", b"echo") => Some(GoalMonitorKind::Finish),
+            (b"--on-publication", b"echo") => Some(GoalMonitorKind::Publication),
+            (b"echo", b"") => None,
             _ => return Entry::GoalObserve.usage(),
         };
         let Some(goal) = goal else {
             return print(b"no current goal\r\n");
         };
-        if on_finish {
-            let Some(handle) = clv::goal::launch_finish_monitor(goal) else {
+        if let Some(monitor) = monitor {
+            let (launch, reply_kind) = match monitor {
+                GoalMonitorKind::Finish => (
+                    clv::goal::launch_finish_monitor(goal),
+                    ReplyKind::GoalObservation,
+                ),
+                GoalMonitorKind::Publication => (
+                    clv::goal::launch_publication_monitor(goal),
+                    ReplyKind::PublicationObserved,
+                ),
+            };
+            let Some(handle) = launch else {
                 return print(b"cannot start goal monitor\r\n");
             };
             self.monitor = Some(GoalMonitor {
                 handle,
+                reply_kind,
                 collected: false,
             });
             return print_handle(b"goal monitor=", handle);
@@ -156,13 +170,9 @@ impl Children {
         };
         monitor.collected = true;
         let mut buffer = [0; MESSAGE_MAX_BYTES];
-        if let Some(bytes) = receive_report(
-            monitor.handle,
-            status,
-            ReplyKind::GoalObservation,
-            &mut buffer,
-        ) {
-            super::goal::print_observation(bytes);
+        if let Some(bytes) = receive_report(monitor.handle, status, monitor.reply_kind, &mut buffer)
+        {
+            display_reply(monitor.reply_kind, bytes);
         } else {
             print(match status {
                 ChildStatus::Cancelled => b"goal monitor cancelled\r\n",
@@ -560,6 +570,7 @@ fn display_reply(kind: ReplyKind, bytes: &[u8]) {
             });
         }
         ReplyKind::GoalObservation => super::goal::print_observation(bytes),
+        ReplyKind::PublicationObserved => super::goal::print_publication_observation(bytes),
         ReplyKind::AgentResumed => super::goal::print_resume_receipt(bytes),
         ReplyKind::RenameReviewed => {
             if let Some(receipt) = clv::goal::RenameReviewReceipt::decode(bytes) {

@@ -1,7 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.64 adds a pinned plan that combines host inference and two explicitly granted MCP tools.
+Kernel 0.0.65 adds a read-only monitor for rename publication and discard.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -209,6 +209,7 @@ queued reply.
 | 10 `RenameReviewed` | 40 bytes | Kernel receipt for a passing or blocked delegated review through call 75. Call 26 rejects this tag. |
 | 11 `HostPlanFailed` | 1 byte | Reason the agent could not obtain an approved host plan. |
 | 12 `HostToolFailed` | 1 byte | Reason the agent could not obtain a host tool result. |
+| 13 `PublicationObserved` | 64 bytes | Kernel publication snapshot requested by the monitor through call 68. Call 26 rejects this tag. |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -339,7 +340,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 68 `goal_observe` | `a0` observer's stack destination, `a1` capacity in bytes | 64 after copying the snapshot and queuing the same record for the parent, or -1 on failure |
 | 69 `agent_launch_supervisor` | `a0` suspended agent handle, `a1` program selector | Fresh shell-owned supervisor launch handle, or -1 on rejection |
 | 70 `agent_resume_granted` | None | 0 after resuming the bound child and queuing its receipt, or -1 on failure |
-| 71 `goal_launch_finish_monitor` | `a0` open goal handle | Fresh shell-owned monitor launch handle, or -1 on rejection |
+| 71 `goal_launch_finish_monitor` | `a0` open goal handle, `a1` trigger (0 for goal finish or 1 for publication) | Fresh shell-owned monitor launch handle, or -1 on rejection |
 | 72 `goal_launch_rename_reviewer` | `a0` completed goal handle | Fresh shell-owned `echo` launch handle bound to the pending rename, or -1 on rejection |
 | 73 `goal_publication_decisions_with_reviewer` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` zero-based row index, `a4` [history view](#publication-audit) (0–3) | Retained row count (0–4) in `a0`, overwritten count in `a1`, reviewer in `a2` and goal handle in `a3`, or -1 in `a0` on failure |
 | 74 `goal_rename_diff` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` = 0 for a preview or 1 for a review | Total bytes in `a0`, number of renames in `a1`, approval token or zero in `a2`, deadline or verdict in `a3`. Failure returns -1 in `a0`. |
@@ -492,7 +493,8 @@ or successful publication.
 
 The goal owner uses call 67 to start an ordinary child in a separate address
 space. The kernel binds a one-use inspection grant to the new launch and the
-open goal. Calls 67 and 71 queue the zero-byte `ObserveGoal` request (kind 8).
+open goal. Call 67 and finish monitors queue the zero-byte `ObserveGoal`
+request (kind 8).
 Reading this assignment through call 25 leaves the inspection grant live.
 
 An observer starts with an empty RamFS handle table. It runs outside the
@@ -531,7 +533,7 @@ table and one read-only observation grant. The ordinary `echo` and
 synchronous report slots remain available. A second launch returns -1
 while the monitor is live or its parent still has a reply or status to collect.
 
-For a ready or running goal the monitor sleeps at its entry point. Call 16
+With trigger 0, the monitor waits for goal execution to finish. Call 16
 on its handle returns -1 immediately and call 27 returns an empty mailbox.
 Once the goal completes, fails or is cancelled, the kernel freezes the
 64-byte observation after settling member reservations, then makes the
@@ -544,6 +546,26 @@ from task 6 by its launch handle. The report survives closing the finished
 goal and records the deadline as it stood at capture. Closing a ready goal
 before capture cancels the waiting monitor. Its wait result is cancellation
 and its reply mailbox is empty. Owner exit stops any live monitor.
+
+With trigger 1, the monitor receives the zero-byte `ObservePublication`
+request (kind 14) and waits for the staged batch to be published or
+discarded. A review receipt and a rejected commit leave the batch pending.
+Successful commit, discard, cancellation, grant revocation, deadline expiry
+or closing a goal with a staged batch can resolve it. The kernel retains the
+latest snapshot within the open goal for late registration. Starting a new
+batch supersedes the previous snapshot. Closing the goal before a batch
+exists cancels the waiting monitor.
+
+Call 68 delivers and queues a `PublicationObserved` reply. It contains
+eight little-endian RV64 words. The first four are the goal handle, the
+[publication outcome code](#publication-audit), the reviewer register and
+the number of renames. For a commit, the reviewer is the one whose approval
+was consumed. For a discard, it identifies any approval still attached to
+the batch. The reviewer register is zero when absent, all ones for an owner
+review, or the supervisor launch handle. The last four words contain the
+budget flags and available, reserved and spent reply bytes at resolution.
+The frozen report stays collectable after goal close.
+[Publication monitor walkthrough](qemu-walkthroughs.md#observe-a-reviewed-publication)
 
 ### Delegating one agent resume
 

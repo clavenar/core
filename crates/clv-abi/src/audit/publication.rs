@@ -1,7 +1,8 @@
 use core::num::NonZeroUsize;
 
 use crate::PATH_MAX_BYTES;
-use crate::goal::{CommitResult, RENAME_DIFF_MAX_BYTES};
+use crate::budget::ReplyBudget;
+use crate::goal::{CommitResult, MAX_GOAL_RENAMES, RENAME_DIFF_MAX_BYTES};
 
 /// Decision, base and observed revisions, source and basename lengths, then the frozen diff.
 pub type EncodedPublicationRecord = [[u8; 8]; 5 + RENAME_DIFF_MAX_BYTES.div_ceil(8)];
@@ -83,6 +84,78 @@ impl PublicationOutcome {
             7 => Self::DiscardedByRevoke,
             8 => Self::DiscardedByExpiry,
             _ => Self::Commit(CommitResult::from_register(code.try_into().ok()?)?),
+        })
+    }
+}
+
+pub type EncodedPublicationObservation = [[u8; 8]; 8];
+
+/// Snapshot taken when a whole rename transaction is published or discarded.
+#[derive(Clone, Copy)]
+pub struct PublicationObservation {
+    pub goal: usize,
+    pub outcome: PublicationOutcome,
+    pub reviewer: Option<PublicationReviewer>,
+    pub renames: usize,
+    pub budget: ReplyBudget,
+}
+
+impl PublicationObservation {
+    pub fn encode(self) -> EncodedPublicationObservation {
+        let (flags, available, reserved, spent) = self.budget.registers();
+        [
+            self.goal as u64,
+            self.outcome.code(),
+            self.reviewer.map_or(0, PublicationReviewer::register) as u64,
+            self.renames as u64,
+            flags as u64,
+            available as u64,
+            reserved as u64,
+            spent as u64,
+        ]
+        .map(u64::to_le_bytes)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let (words, []) = bytes.as_chunks::<8>() else {
+            return None;
+        };
+        let words: &EncodedPublicationObservation = words.try_into().ok()?;
+        let [
+            goal,
+            outcome,
+            reviewer,
+            renames,
+            flags,
+            available,
+            reserved,
+            spent,
+        ] = words.map(u64::from_le_bytes);
+        let outcome = PublicationOutcome::from_code(outcome)?;
+        if goal == 0
+            || !(1..=MAX_GOAL_RENAMES as u64).contains(&renames)
+            || !matches!(
+                outcome,
+                PublicationOutcome::Commit(CommitResult::Committed)
+                    | PublicationOutcome::Discarded
+                    | PublicationOutcome::DiscardedByCancel
+                    | PublicationOutcome::DiscardedByRevoke
+                    | PublicationOutcome::DiscardedByExpiry
+            )
+        {
+            return None;
+        }
+        Some(Self {
+            goal: goal as usize,
+            outcome,
+            reviewer: PublicationReviewer::from_register(reviewer as usize),
+            renames: renames as usize,
+            budget: ReplyBudget::from_registers(
+                flags as usize,
+                available as usize,
+                reserved as usize,
+                spent as usize,
+            )?,
         })
     }
 }
