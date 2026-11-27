@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements calls 0–79. The caller places the call number in
+The RV64 prototype implements calls 0–80. The caller places the call number in
 `a7`, passes up to six arguments in `a0`–`a5`, and executes `ecall`.
 The per-call descriptions give the result registers and error values.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -270,7 +270,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 34 `goal_run` | `a0` goal handle, `a1` program selector | Fresh child launch handle, or -1 on failure |
 | 35 `goal_status` | `a0` goal handle | State tag, with the member reporting that state in `a1` and detail in `a2` |
 | 36 `goal_close` | `a0` goal handle | 0 on release, 1 while running |
-| 37 `goal_cancel` | `a0` goal handle | 0 for a new or repeated cancellation, 1 if the goal already completed or failed |
+| 37 `goal_cancel` | `a0` goal handle | `a0` is 0 for a new or repeated cancellation, 1 for already completed or failed, or -1 on error. On success, `a1` is 1 if this call discarded a staged rename, 0 otherwise. |
 | 38 `agent_run` | `a0` goal handle, `a1` program selector | Fresh agent handle, with its child launch handle in `a1` |
 | 39 `agent_status` | `a0` agent handle | State tag, with the original child in `a1`, detail in `a2` and owning goal in `a3` |
 | 40 `agent_suspend` | `a0` agent handle | 0 when suspended, 1 if the agent already finished |
@@ -313,6 +313,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 77 `goal_create_with_rename_scope` | `a0` owner's directory handle, `a1` stack address of the six call 48 words, `a2` length in bytes (48), `a3` preserved-file handle or `NO_RAMFS_HANDLE` | Fresh goal handle, or -1 on rejection |
 | 78 `goal_create_with_read_scope` | `a0` owner's read-directory handle, `a1` and `a2` option block as in call 77, `a3` preserved-file handle, `a4` rename-directory handle (each optional handle takes `NO_RAMFS_HANDLE` when absent) | Fresh goal handle, or -1 on rejection |
 | 79 `goal_read_decisions` | Same arguments as call 57 | Retained read decision count (0–4), overwritten count in `a1` and lifetime bytes delivered in `a2`, or -1 on failure |
+| 80 `goal_publication_audit_with_cancellation` | Same arguments as call 76 | Same row format and result registers as call 76. Includes a pending rename discarded by call 37. |
 
 ## Rename review and publication
 
@@ -615,11 +616,13 @@ descriptor and validates the source and destination. A failed launch or
 shell path open ends before a staging call. Revocation, cancellation and
 publication preserve earlier decisions. Closing the goal releases its history.
 
-Call 76 reads the decisions made by call 69 with a matching review token and
-by call 74 when it discards a pending rename. Previews, reviews, invalid or
-replayed tokens, empty discards and automatic cleanup leave this history
-untouched. The fifth decision replaces the oldest row and increments the
+Call 76 reads commit decisions made by call 69 with a matching review token
+and explicit discards made by call 74. Call 80 also includes the rename
+discarded by call 37, if one existed. Cancellation is terminal, so that
+decision is the final row. Each view reports its own last four decisions and
 overwritten count, which saturates at the largest RV64 unsigned value.
+Previews, reviews, invalid or replayed tokens, empty discards and repeated
+cancellations add no rows. Revocation and goal teardown add no publication rows.
 
 Each 552-byte row starts with five little-endian 64-bit words giving the
 outcome, base revision, observed revision, source path length and destination
@@ -635,10 +638,11 @@ bytes. A published rename advances the revision by one.
 | 3 | `review-expired` |
 | 4 | `unavailable` |
 | 5 | `discarded` |
+| 6 | `discarded-by-cancel` (call 80) |
 
 The owner can reuse a single stack buffer to read indices zero through
 `count - 1`. Only the owner can cause a publication decision, so consecutive
-reads see the same history until the owner commits, discards or closes the
+reads see the same history until the owner commits, discards, cancels or closes the
 goal. Index zero on an empty history returns zero and accepts zero capacity.
 An invalid index, a short buffer for a retained row, or an invalid destination
 range fails before copying any bytes.
@@ -684,6 +688,12 @@ resumption produce no completion event.
 order. The kernel queues one event per cancelled shell-owned child. Repeating
 cancellation returns 0 even after another launch reuses a slot. Cancelling a
 ready goal produces no event.
+
+Execution and publication have separate results. A completed or failed goal
+retains its execution status. If it still has a staged rename, the same
+cancellation removes the proposal, invalidates its review token and returns
+1 in `a1`. A second cancellation returns 0 in `a1`. If commit ran first,
+the published file remains visible and cancellation also returns 0 in `a1`.
 
 Goal and agent status reads are repeatable and survive reuse of the child's
 program slot. Closing the goal releases its agent identity. The child's pending

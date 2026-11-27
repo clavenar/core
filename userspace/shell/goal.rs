@@ -37,14 +37,19 @@ pub(super) fn command(
         (Subcommand::Create, arguments) => create(arguments, current),
         (Subcommand::GrantFile, arguments) => grant_file(handle, arguments),
         (Subcommand::StageRename, arguments) => stage_rename(handle, arguments),
-        (action @ (Subcommand::Diff | Subcommand::Commit | Subcommand::Discard), b"") => {
-            match (action, current) {
-                (Subcommand::Commit, Some(goal)) => commit(goal),
-                (Subcommand::Discard, Some(goal)) => discard(goal),
-                (_, Some(goal)) => show_diff(goal),
-                (_, None) => print(b"no current goal\r\n"),
-            }
-        }
+        (
+            action @ (Subcommand::Diff
+            | Subcommand::Commit
+            | Subcommand::Discard
+            | Subcommand::Cancel),
+            b"",
+        ) => match (action, current) {
+            (Subcommand::Commit, Some(goal)) => commit(goal),
+            (Subcommand::Discard, Some(goal)) => discard(goal),
+            (Subcommand::Cancel, Some(goal)) => cancel(goal),
+            (_, Some(goal)) => show_diff(goal),
+            (_, None) => print(b"no current goal\r\n"),
+        },
         (Subcommand::RevokeFile, b"") => match handle {
             Some(handle) if goal::revoke_file(handle) => print(b"file revoked\r\n"),
             Some(_) => print(b"cannot revoke file\r\n"),
@@ -58,15 +63,6 @@ pub(super) fn command(
         },
         (Subcommand::Status, b"") => match handle.and_then(goal::status) {
             Some(status) => print_status(status),
-            None => print(b"no current goal\r\n"),
-        },
-        (Subcommand::Cancel, b"") => match current.as_mut().and_then(|goal| {
-            let result = goal::cancel(goal.handle)?;
-            goal.review = None;
-            Some(result)
-        }) {
-            Some(CancelResult::Cancelled) => print(b"goal cancelled\r\n"),
-            Some(CancelResult::AlreadyFinished) => print(b"goal already finished\r\n"),
             None => print(b"no current goal\r\n"),
         },
         (Subcommand::Close, b"") => match handle.and_then(goal::close) {
@@ -233,6 +229,20 @@ fn discard(goal: &mut CurrentGoal) {
         DiscardResult::Discarded => b"rename discarded\r\n",
         DiscardResult::Empty => b"no staged changes\r\n",
     });
+}
+
+fn cancel(goal: &mut CurrentGoal) {
+    let Some(outcome) = goal::cancel_with_outcome(goal.handle) else {
+        return print(b"no current goal\r\n");
+    };
+    goal.review = None;
+    print(match outcome.execution {
+        CancelResult::Cancelled => b"goal cancelled\r\n",
+        CancelResult::AlreadyFinished => b"goal already finished\r\n",
+    });
+    if outcome.rename_discarded {
+        print(b"staged rename discarded\r\n");
+    }
 }
 
 fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {

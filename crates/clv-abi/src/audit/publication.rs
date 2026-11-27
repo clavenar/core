@@ -9,6 +9,7 @@ pub enum PublicationOutcome {
     Commit(CommitResult),
     Unavailable,
     Discarded,
+    DiscardedByCancel,
 }
 
 impl PublicationOutcome {
@@ -17,6 +18,7 @@ impl PublicationOutcome {
             Self::Commit(result) => result as u64,
             Self::Unavailable => 4,
             Self::Discarded => 5,
+            Self::DiscardedByCancel => 6,
         }
     }
 
@@ -24,6 +26,7 @@ impl PublicationOutcome {
         Some(match code {
             4 => Self::Unavailable,
             5 => Self::Discarded,
+            6 => Self::DiscardedByCancel,
             _ => Self::Commit(CommitResult::from_register(code.try_into().ok()?)?),
         })
     }

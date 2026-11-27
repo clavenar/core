@@ -86,7 +86,7 @@ entries! {
             "Show audit records (default is delegations)",
     },
     GoalEnd {
-        "goal cancel" => "Stop the goal and its children",
+        "goal cancel" => "Stop live children and discard a staged rename",
         "goal close" => "Release a ready or finished goal",
     },
 

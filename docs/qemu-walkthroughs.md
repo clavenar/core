@@ -411,12 +411,57 @@ agent run --suspended hello
 goal cancel
 wait hello
 goal diff
+goal audit --publication
 cat /draft.txt
 goal close
 ```
 
-The wait reports that `hello` was cancelled. The diff reports `no staged changes`
-and the original file still prints `keep`.
+The shell prints `goal cancelled` and `staged rename discarded`. The wait
+reports that `hello` was cancelled, the diff is empty, and the audit shows
+`outcome=discarded-by-cancel`. The original file still prints `keep`.
+
+### Cancel a reviewed rename
+
+On a fresh boot, let the agent finish and review its proposed rename.
+
+```text
+write /draft.txt keep
+goal create --preserve-file /draft.txt
+goal grant-file --stage-rename /draft.txt
+agent run hello --stage-rename final.txt
+wait hello
+goal diff
+```
+
+When the diff reports `ready to commit`, cancel the goal twice.
+
+```text
+goal cancel
+goal cancel
+goal audit --publication
+goal diff
+cat /draft.txt
+goal close
+```
+
+Both calls print `goal already finished`. The first also prints
+`staged rename discarded`. The audit contains exactly one row for
+`/draft.txt` and `final.txt`, with `base=2 revision=2 outcome=discarded-by-cancel`.
+The diff is empty and `/draft.txt` still contains `keep`.
+
+To check the reverse order, repeat the first block on a fresh boot, then run
+these commands while the review is valid.
+
+```text
+goal commit
+goal cancel
+goal audit --publication
+cat /final.txt
+goal close
+```
+
+The audit contains one row with `base=2 revision=3 outcome=published`.
+Cancellation prints only `goal already finished`, and `/final.txt` contains `keep`.
 
 ## Requests, replies and file streams
 
@@ -1236,8 +1281,9 @@ history available until the owner closes the goal.
 
 ### Inspect rename publication decisions
 
-`goal audit --publication` shows the current goal's last four commit decisions
-and explicit discards, oldest first. Each row gives the absolute source path
+`goal audit --publication` shows the current goal's last four publication
+decisions, oldest first. These include commits, explicit discards and renames
+discarded by cancellation. Each row gives the absolute source path
 and destination basename captured at staging. `base` is the RamFS revision at
 staging. `revision` is the public revision when the kernel made the decision.
 Only the owner can read the history. Closing the goal releases it.

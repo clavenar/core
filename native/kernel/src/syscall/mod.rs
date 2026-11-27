@@ -21,13 +21,13 @@ use clv_abi::{
     SYS_GOAL_CREATE_WITH_RENAME_SCOPE, SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF,
     SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
     SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
-    SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT,
-    SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW,
-    SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
-    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
-    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
-    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
-    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
+    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
+    SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE,
+    SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR,
+    SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
     SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
     SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
     SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
@@ -238,10 +238,17 @@ pub(crate) fn dispatch(
             frame,
             scheduler.goal_rename_audit(a0, |bytes| stack.copy_to_user(bytes, a1, a2)),
         ),
-        SYS_GOAL_PUBLICATION_AUDIT => write_audit_result(
-            frame,
-            scheduler.goal_publication_audit(a0, a3, |bytes| stack.copy_to_user(bytes, a1, a2)),
-        ),
+        SYS_GOAL_PUBLICATION_AUDIT | SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION => {
+            write_audit_result(
+                frame,
+                scheduler.goal_publication_audit(
+                    a0,
+                    a3,
+                    number == SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
+                    |bytes| stack.copy_to_user(bytes, a1, a2),
+                ),
+            )
+        }
         SYS_GOAL_READ_AUDIT | SYS_GOAL_READ_AUDIT_WITH_LIMIT | SYS_GOAL_READ_DECISIONS => {
             let view = match number {
                 SYS_GOAL_READ_AUDIT => ReadAudit::Budget,
@@ -296,7 +303,10 @@ pub(crate) fn dispatch(
             .map_or(SYSCALL_ERROR, |result| result as usize),
         SYS_GOAL_CANCEL => scheduler
             .cancel_goal(a0, fs)
-            .map_or(SYSCALL_ERROR, |result| result as usize),
+            .map_or(SYSCALL_ERROR, |outcome| {
+                frame.registers[REG_A1] = usize::from(outcome.rename_discarded);
+                outcome.execution as usize
+            }),
         SYS_AGENT_RUN | SYS_AGENT_RUN_SUSPENDED => write_agent_launch(
             frame,
             scheduler.run_agent(fs, a0, a1, number == SYS_AGENT_RUN_SUSPENDED, None, None),

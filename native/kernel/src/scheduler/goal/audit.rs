@@ -1,6 +1,7 @@
-use clv_abi::audit::AUDIT_CAPACITY;
+use clv_abi::audit::{AUDIT_CAPACITY, EncodedPublicationRecord, PublicationOutcome};
 
 use super::DelegationAudit;
+use crate::fs::ramfs::{RamFs, StagedRename};
 use crate::scheduler::Scheduler;
 
 pub(super) struct AuditHistory<Record> {
@@ -47,6 +48,56 @@ impl<const WORDS: usize> AuditHistory<[[u8; 8]; WORDS]> {
     }
 }
 
+#[derive(Default)]
+pub(super) struct PublicationHistory {
+    explicit: AuditHistory<EncodedPublicationRecord>,
+    // Cancellation is terminal. Keep its final row separate so call 76 can still read
+    // the last four explicit decisions and their original overwritten count.
+    cancellation: Option<EncodedPublicationRecord>,
+}
+
+impl PublicationHistory {
+    pub(super) fn record(
+        &mut self,
+        fs: &RamFs,
+        change: &StagedRename,
+        outcome: PublicationOutcome,
+    ) {
+        let row = change.publication_record(fs, outcome);
+        if outcome == PublicationOutcome::DiscardedByCancel {
+            self.cancellation = Some(row);
+        } else {
+            self.explicit.record(row);
+        }
+    }
+
+    fn read_row(
+        &self,
+        index: usize,
+        include_cancellation: bool,
+        copy: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<(usize, usize)> {
+        let cancellation = if include_cancellation {
+            self.cancellation.as_slice()
+        } else {
+            &[]
+        };
+        let total = self.explicit.len + cancellation.len();
+        let skipped = total.saturating_sub(AUDIT_CAPACITY);
+        let count = total - skipped;
+        let bytes = if index == 0 && count == 0 {
+            &[][..]
+        } else {
+            self.explicit.entries[skipped..self.explicit.len]
+                .iter()
+                .chain(cancellation)
+                .nth(index)?
+                .as_flattened()
+        };
+        copy(bytes).then_some((count, self.explicit.overwritten.saturating_add(skipped)))
+    }
+}
+
 impl Scheduler {
     pub(crate) fn goal_delegation_audit(
         &self,
@@ -86,14 +137,11 @@ impl Scheduler {
         &self,
         handle: usize,
         index: usize,
+        include_cancellation: bool,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize)> {
-        let history = &self.shell_goal(handle)?.publication_audit;
-        let bytes = if index == 0 && history.len == 0 {
-            &[][..]
-        } else {
-            history.entries[..history.len].get(index)?.as_flattened()
-        };
-        copy(bytes).then_some((history.len, history.overwritten))
+        self.shell_goal(handle)?
+            .publication_audit
+            .read_row(index, include_cancellation, copy)
     }
 }

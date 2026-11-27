@@ -39,11 +39,12 @@ fn show_rows(handle: usize, view: View) -> Option<()> {
         View::Publication => {
             // Only this owner changes publication history. Reuse one row on its 4 KiB stack.
             let mut record = [[0; 8]; _];
-            let (count, overwritten) = goal::publication_audit_row(handle, 0, &mut record)?;
+            let (count, overwritten) =
+                goal::publication_audit_row_with_cancellation(handle, 0, &mut record)?;
             print_header(handle, count, overwritten);
             for index in 0..count {
                 if index != 0 {
-                    goal::publication_audit_row(handle, index, &mut record)?;
+                    goal::publication_audit_row_with_cancellation(handle, index, &mut record)?;
                 }
                 print_publication(PublicationRecord::decode(&record)?);
             }
@@ -219,6 +220,7 @@ fn print_publication(entry: PublicationRecord<'_>) {
         PublicationOutcome::Commit(CommitResult::ReviewExpired) => b"review-expired",
         PublicationOutcome::Unavailable => b"unavailable",
         PublicationOutcome::Discarded => b"discarded",
+        PublicationOutcome::DiscardedByCancel => b"discarded-by-cancel",
     };
     let mut line = ConsoleLine::new();
     line.write(b"source=");

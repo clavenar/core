@@ -387,3 +387,28 @@ pub enum CancelResult {
     Cancelled = 0,
     AlreadyFinished = 1,
 }
+
+/// Execution can already be finished while a private rename still awaits publication.
+pub struct CancelOutcome {
+    pub execution: CancelResult,
+    pub rename_discarded: bool,
+}
+
+impl CancelOutcome {
+    pub const fn from_registers(execution: usize, rename_discarded: usize) -> Option<Self> {
+        let execution = match execution {
+            0 => CancelResult::Cancelled,
+            1 => CancelResult::AlreadyFinished,
+            _ => return None,
+        };
+        let rename_discarded = match rename_discarded {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        Some(Self {
+            execution,
+            rename_discarded,
+        })
+    }
+}

@@ -86,10 +86,17 @@ impl Goal {
         Ok(())
     }
 
-    fn discard_rename(&mut self, fs: &mut RamFs) -> DiscardResult {
+    fn discard_rename(
+        &mut self,
+        fs: &mut RamFs,
+        outcome: Option<PublicationOutcome>,
+    ) -> DiscardResult {
         let Some(rename) = self.rename.take() else {
             return DiscardResult::Empty;
         };
+        if let Some(outcome) = outcome {
+            self.publication_audit.record(fs, &rename.change, outcome);
+        }
         rename.change.discard(fs);
         DiscardResult::Discarded
     }
@@ -100,13 +107,18 @@ impl Goal {
             .as_ref()
             .is_some_and(|rename| rename.from_file_grant)
         {
-            self.discard_rename(fs);
+            self.discard_rename(fs, None);
         }
     }
 
-    pub(super) fn release_transaction(&mut self, fs: &mut RamFs) {
-        self.discard_rename(fs);
+    pub(super) fn release_transaction(
+        &mut self,
+        fs: &mut RamFs,
+        outcome: Option<PublicationOutcome>,
+    ) -> DiscardResult {
+        let discarded = self.discard_rename(fs, outcome);
         self.rename_policy.release_input(fs);
+        discarded
     }
 }
 
@@ -199,14 +211,7 @@ impl Scheduler {
     ) -> Option<DiscardResult> {
         self.shell_goal(handle)?;
         let goal = self.goal.as_mut()?;
-        if let Some(pending) = &goal.rename {
-            goal.publication_audit.record(
-                pending
-                    .change
-                    .publication_record(fs, PublicationOutcome::Discarded),
-            );
-        }
-        Some(goal.discard_rename(fs))
+        Some(goal.discard_rename(fs, Some(PublicationOutcome::Discarded)))
     }
 
     pub(crate) fn commit_goal(
@@ -236,10 +241,9 @@ impl Scheduler {
             Some(CommitResult::ReviewExpired)
         };
         let outcome = result.map_or(PublicationOutcome::Unavailable, PublicationOutcome::Commit);
-        goal.publication_audit
-            .record(pending.change.publication_record(fs, outcome));
+        goal.publication_audit.record(fs, &pending.change, outcome);
         if result == Some(CommitResult::Committed) {
-            goal.release_transaction(fs);
+            goal.release_transaction(fs, None);
         }
         result
     }

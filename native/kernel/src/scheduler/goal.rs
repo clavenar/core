@@ -4,7 +4,7 @@ mod delegation;
 mod reads;
 mod rename;
 
-use self::audit::AuditHistory;
+use self::audit::{AuditHistory, PublicationHistory};
 use self::budget::ReplyReservation;
 use self::reads::GoalReads;
 pub(crate) use self::reads::ReadAudit;
@@ -12,12 +12,12 @@ use self::rename::PendingRename;
 use clv_abi::TaskCompletion;
 use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin};
 use clv_abi::audit::{
-    EncodedPublicationRecord, EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord,
-    ReplyRecord,
+    EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationOutcome, ReplyRecord,
 };
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
-    CancelResult, CloseResult, CreateOptions, FileOptions, GoalStatus, MAX_CHILDREN, ReadLimits,
+    CancelOutcome, CancelResult, CloseResult, CreateOptions, DiscardResult, FileOptions,
+    GoalStatus, MAX_CHILDREN, ReadLimits,
 };
 use clv_abi::tool::ToolId;
 
@@ -86,7 +86,7 @@ pub(super) struct Goal {
     delegation_audit: AuditHistory<EncodedRecordWithTool>,
     reply_audit: AuditHistory<EncodedReplyRecord>,
     rename_audit: AuditHistory<EncodedRenameRecord>,
-    publication_audit: AuditHistory<EncodedPublicationRecord>,
+    publication_audit: PublicationHistory,
 }
 
 impl Goal {
@@ -274,7 +274,7 @@ impl Scheduler {
             delegation_audit: AuditHistory::default(),
             reply_audit: AuditHistory::default(),
             rename_audit: AuditHistory::default(),
-            publication_audit: AuditHistory::default(),
+            publication_audit: PublicationHistory::default(),
         });
         Some(handle)
     }
@@ -396,8 +396,8 @@ impl Scheduler {
         Some(CloseResult::Closed)
     }
 
-    pub(crate) fn cancel_goal(&mut self, handle: usize, fs: &mut RamFs) -> Option<CancelResult> {
-        let result = match self.goal_status(handle)? {
+    pub(crate) fn cancel_goal(&mut self, handle: usize, fs: &mut RamFs) -> Option<CancelOutcome> {
+        let execution = match self.goal_status(handle)? {
             GoalStatus::Ready => {
                 let goal = self.goal.as_mut()?;
                 goal.release_file(fs);
@@ -413,8 +413,14 @@ impl Scheduler {
                 CancelResult::AlreadyFinished
             }
         };
-        self.goal.as_mut()?.release_transaction(fs);
-        Some(result)
+        let discarded = self
+            .goal
+            .as_mut()?
+            .release_transaction(fs, Some(PublicationOutcome::DiscardedByCancel));
+        Some(CancelOutcome {
+            execution,
+            rename_discarded: discarded == DiscardResult::Discarded,
+        })
     }
 
     pub(super) fn release_shell_goal(&mut self, fs: &mut RamFs) {
@@ -425,7 +431,7 @@ impl Scheduler {
     fn drop_goal(&mut self, fs: &mut RamFs) {
         if let Some(mut goal) = self.goal.take() {
             goal.release_file(fs);
-            goal.release_transaction(fs);
+            goal.release_transaction(fs, None);
         }
     }
 

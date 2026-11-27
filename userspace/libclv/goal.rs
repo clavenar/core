@@ -5,9 +5,9 @@ use clv_abi::audit::{
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
-    CancelResult, CloseResult, CommitResult, CreateOptions, DiscardResult, FileOptions,
-    FileRecipient, GoalDiff, GoalStatus, PublicationError, ReadLimits, RenameOptions, RenameReview,
-    ReviewToken, TimedRenameReview, TimedReviewToken,
+    CancelOutcome, CancelResult, CloseResult, CommitResult, CreateOptions, DiscardResult,
+    FileOptions, FileRecipient, GoalDiff, GoalStatus, PublicationError, ReadLimits, RenameOptions,
+    RenameReview, ReviewToken, TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -18,10 +18,10 @@ use clv_abi::{
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_DIFF, SYS_GOAL_DISCARD,
     SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
     SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_PUBLICATION_AUDIT,
-    SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS,
-    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS,
+    SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
+    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE,
+    SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -333,15 +333,38 @@ pub fn rename_audit_rows(
     Some((rows, overwritten))
 }
 
-/// Copies one row (index zero is oldest) and returns the retained and overwritten counts.
+/// Reads a commit or explicit discard (oldest first) and returns the retained and overwritten counts.
 /// Index zero also succeeds for an empty history, leaving the buffer untouched.
 pub fn publication_audit_row(
     goal: usize,
     index: usize,
     record: &mut EncodedPublicationRecord,
 ) -> Option<(usize, usize)> {
+    read_publication_row(SYS_GOAL_PUBLICATION_AUDIT, goal, index, record)
+}
+
+/// Includes a rename discarded by cancellation among the last four publication decisions.
+pub fn publication_audit_row_with_cancellation(
+    goal: usize,
+    index: usize,
+    record: &mut EncodedPublicationRecord,
+) -> Option<(usize, usize)> {
+    read_publication_row(
+        SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
+        goal,
+        index,
+        record,
+    )
+}
+
+fn read_publication_row(
+    number: usize,
+    goal: usize,
+    index: usize,
+    record: &mut EncodedPublicationRecord,
+) -> Option<(usize, usize)> {
     let (count, overwritten, _, _) = ecall(
-        SYS_GOAL_PUBLICATION_AUDIT,
+        number,
         goal,
         record.as_mut_ptr().expose_provenance(),
         size_of_val(record),
@@ -445,9 +468,11 @@ pub fn close(goal: usize) -> Option<CloseResult> {
 
 /// Cancels a ready goal or stops all its live children before returning.
 pub fn cancel(goal: usize) -> Option<CancelResult> {
-    match syscall(SYS_GOAL_CANCEL, goal, 0, 0) {
-        n if n == CancelResult::Cancelled as usize => Some(CancelResult::Cancelled),
-        n if n == CancelResult::AlreadyFinished as usize => Some(CancelResult::AlreadyFinished),
-        _ => None,
-    }
+    cancel_with_outcome(goal).map(|outcome| outcome.execution)
+}
+
+/// Reports the execution status and whether this cancellation removed a staged rename.
+pub fn cancel_with_outcome(goal: usize) -> Option<CancelOutcome> {
+    let (execution, rename_discarded, ..) = ecall(SYS_GOAL_CANCEL, goal, 0, 0, 0, 0);
+    CancelOutcome::from_registers(execution, rename_discarded)
 }
