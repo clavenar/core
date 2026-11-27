@@ -8,8 +8,8 @@ use clv_abi::audit::{
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
-    CancelOutcome, CancelResult, CloseResult, CommitResult, CreateOptions, CreatePolicy,
-    DiscardResult, EncodedGoalObservation, FileOptions, FileRecipient, GoalDeadline,
+    CancelOutcome, CancelResult, CloseResult, CommitOutcome, CommitResult, CreateOptions,
+    CreatePolicy, DiscardResult, EncodedGoalObservation, FileOptions, FileRecipient, GoalDeadline,
     GoalMonitorKind, GoalObservation, GoalStatus, PublicationError, ReadLimits, RenameBatchDiff,
     RenameOptions, RenameReviewReceipt, ReviewToken, TimedRenameReview, TimedReviewToken,
 };
@@ -277,6 +277,11 @@ pub fn review_batch_granted(
 
 pub fn commit(goal: usize, token: ReviewToken) -> Option<CommitResult> {
     CommitResult::from_register(syscall(SYS_GOAL_COMMIT, goal, token.get(), 0))
+}
+
+pub fn commit_with_receipt(goal: usize, token: ReviewToken) -> Option<CommitOutcome> {
+    let (result, _, generation, checksum) = ecall(SYS_GOAL_COMMIT, goal, token.get(), 0, 0, 0);
+    CommitOutcome::from_registers(result, generation, checksum)
 }
 
 /// Lets the owner discard the goal's pending rename and invalidate its review token.

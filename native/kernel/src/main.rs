@@ -111,7 +111,14 @@ fn recover_durable_disk(disk: block::JournalDevice, fs: &mut RamFs) -> Option<bl
     };
     if let Some(files) = saved {
         fs.restore_durable_files(files);
-        uart::write(b"durable rename recovered\r\n");
+        let record = journal
+            .latest_record()
+            .expect("recovered files have a journal record");
+        uart::write(b"durable rename recovered generation=");
+        write_hex(record.generation as usize);
+        uart::write(b" checksum=");
+        write_hex(record.checksum as usize);
+        uart::write(b"\r\n");
     }
     uart::write(if journal.is_writable() {
         b"durable rename journal ready\r\n"
@@ -181,7 +188,9 @@ fn report_journal(probe: block::JournalProbe) {
         JournalUpdate::GenerationExhausted => {
             uart::write(b"virtio block journal generation exhausted\r\n");
         }
-        JournalUpdate::Failed(error) => uart::write(block_error_message(error)),
+        JournalUpdate::Failed(error) | JournalUpdate::Unconfirmed(error, _) => {
+            uart::write(block_error_message(error));
+        }
     }
 }
 

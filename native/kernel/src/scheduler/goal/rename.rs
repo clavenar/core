@@ -2,14 +2,15 @@ use clv_abi::audit::{
     PublicationObservation, PublicationOutcome, PublicationReviewer, RenameDenial, RenameRecord,
 };
 use clv_abi::goal::{
-    CommitResult, DiscardResult, GoalDeadline, GoalStatus, PublicationError, RenameReviewReceipt,
-    ReviewToken, TimedRenameReview, TimedReviewToken,
+    CommitOutcome, CommitReceipt, CommitResult, DiscardResult, GoalDeadline, GoalStatus,
+    PublicationError, RenameReviewReceipt, ReviewToken, TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::{LaunchParent, PATH_MAX_BYTES, ReplyKind};
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU64, NonZeroUsize};
 
 use super::{Goal, Scheduler};
 use crate::arch::monotonic_nanos;
+use crate::drivers::virtio::block::JournalSaveError;
 use crate::fs::ramfs::{RamFs, RenamePolicy, StagedRenames, TaskFs};
 use crate::scheduler::LaunchGrant;
 
@@ -344,7 +345,7 @@ impl Scheduler {
         handle: usize,
         token: ReviewToken,
         fs: &mut RamFs,
-    ) -> Option<CommitResult> {
+    ) -> Option<CommitOutcome> {
         if !matches!(
             self.shell_goal(handle)?.status(),
             GoalStatus::Completed { .. }
@@ -358,29 +359,37 @@ impl Scheduler {
                 && (!goal.require_rename_review
                     || matches!(approval.reviewer, PublicationReviewer::Supervisor(_)))
         })?;
-        let result = if review_is_live(approval.review, monotonic_nanos()) {
+        let (result, record) = if review_is_live(approval.review, monotonic_nanos()) {
             match pending.changes.prepare(fs, &goal.rename_policy) {
                 Ok(prepared) => {
-                    let saved = prepared.durable_files(fs).is_none_or(|files| {
-                        self.durable_disk
-                            .as_mut()
-                            .is_some_and(|disk| disk.save(files.payload()))
-                    });
-                    if saved {
-                        prepared.publish(fs);
-                        Some(CommitResult::Committed)
-                    } else {
-                        Some(CommitResult::StorageFailed)
+                    let saved = prepared
+                        .durable_files(fs)
+                        .map(|files| {
+                            self.durable_disk
+                                .as_mut()
+                                .ok_or(JournalSaveError::Failed)?
+                                .save(files.payload())
+                        })
+                        .transpose();
+                    match saved {
+                        Ok(record) => {
+                            prepared.publish(fs);
+                            (Some(CommitResult::Committed), record)
+                        }
+                        Err(JournalSaveError::Failed) => (Some(CommitResult::StorageFailed), None),
+                        Err(JournalSaveError::OutcomeUnknown(record)) => {
+                            (Some(CommitResult::StorageOutcomeUnknown), Some(record))
+                        }
                     }
                 }
-                Err(PublicationError::Conflict) => Some(CommitResult::Conflict),
+                Err(PublicationError::Conflict) => (Some(CommitResult::Conflict), None),
                 Err(PublicationError::PostconditionFailed) => {
-                    Some(CommitResult::PostconditionFailed)
+                    (Some(CommitResult::PostconditionFailed), None)
                 }
-                Err(PublicationError::Unavailable) => None,
+                Err(PublicationError::Unavailable) => (None, None),
             }
         } else {
-            Some(CommitResult::ReviewExpired)
+            (Some(CommitResult::ReviewExpired), None)
         };
         let outcome = result.map_or(PublicationOutcome::Unavailable, PublicationOutcome::Commit);
         for change in pending.changes.iter() {
@@ -393,6 +402,13 @@ impl Scheduler {
             goal.record_publication(outcome, Some(approval.reviewer), renames);
             self.wake_goal_monitor();
         }
-        result
+        Some(CommitOutcome {
+            result: result?,
+            receipt: record.map(|record| CommitReceipt {
+                generation: NonZeroU64::new(record.generation)
+                    .expect("journal generation is nonzero"),
+                checksum: record.checksum,
+            }),
+        })
     }
 }

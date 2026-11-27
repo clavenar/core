@@ -220,7 +220,12 @@ pub(crate) fn dispatch(
             }),
         SYS_GOAL_COMMIT => ReviewToken::new(a1)
             .and_then(|token| scheduler.commit_goal(a0, token, fs))
-            .map_or(SYSCALL_ERROR, |result| result as usize),
+            .map_or(SYSCALL_ERROR, |outcome| {
+                let (result, generation, checksum) = outcome.registers();
+                frame.registers[REG_A2] = generation;
+                frame.registers[REG_A3] = checksum;
+                result
+            }),
         SYS_GOAL_DISCARD => scheduler
             .discard_goal_rename(a0, fs)
             .map_or(SYSCALL_ERROR, |result| result as usize),

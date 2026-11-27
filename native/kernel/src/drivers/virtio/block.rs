@@ -113,6 +113,19 @@ pub(crate) enum ProbeError {
     Timeout,
 }
 
+enum TransferError {
+    BeforeSubmission(ProbeError),
+    AfterSubmission(ProbeError),
+}
+
+impl TransferError {
+    fn cause(self) -> ProbeError {
+        match self {
+            Self::BeforeSubmission(error) | Self::AfterSubmission(error) => error,
+        }
+    }
+}
+
 struct Block {
     device: Device,
     queue: Ring<4>,
@@ -165,6 +178,11 @@ pub(crate) struct JournalDisk {
     failed: bool,
 }
 
+pub(crate) enum JournalSaveError {
+    Failed,
+    OutcomeUnknown(JournalRecord),
+}
+
 impl JournalDisk {
     pub(crate) fn is_writable(&self) -> bool {
         !self.failed && self.block.write_restriction().is_none() && self.journal.can_append()
@@ -174,22 +192,25 @@ impl JournalDisk {
         count == self.journal.format.file_count() && self.is_writable()
     }
 
-    pub(crate) fn save(&mut self, payload: &[u8]) -> bool {
+    pub(crate) fn latest_record(&self) -> Option<JournalRecord> {
+        self.journal.latest
+    }
+
+    pub(crate) fn save(&mut self, payload: &[u8]) -> Result<JournalRecord, JournalSaveError> {
         if !self.is_writable() || payload.len() > self.journal.format.payload_capacity() {
-            return false;
+            return Err(JournalSaveError::Failed);
         }
         self.block.deadline = io_deadline();
-        if matches!(
-            self.journal.append(&mut self.block, payload),
-            JournalUpdate::Flushed(_)
-        ) {
-            return true;
-        }
+        let error = match self.journal.append(&mut self.block, payload) {
+            JournalUpdate::Flushed(record) => return Ok(record),
+            JournalUpdate::Unconfirmed(_, record) => JournalSaveError::OutcomeUnknown(record),
+            _ => JournalSaveError::Failed,
+        };
         // A timed-out request may still own the DMA buffers. Stop using the
         // journal for this boot and keep the buffers reserved even if reset fails.
         self.failed = true;
         self.block.device.reset(self.block.deadline);
-        false
+        Err(error)
     }
 }
 
@@ -272,7 +293,8 @@ impl Block {
     }
 
     fn read_sector(&mut self, sector: u64) -> Result<Sector, ProbeError> {
-        self.transfer(Request::Read(sector))?;
+        self.transfer(Request::Read(sector))
+            .map_err(TransferError::cause)?;
         // SAFETY: The completion covers the full sector and returns ownership of the buffer.
         Ok(unsafe { (&raw const (*self.request).data).read_volatile() })
     }
@@ -292,7 +314,8 @@ impl Block {
             return Ok(DemoOutcome::Blocked(restriction));
         }
 
-        self.write_and_flush(DEMO_SECTOR, core::slice::from_ref(&DEMO_MARKER))?;
+        self.write_and_flush(DEMO_SECTOR, core::slice::from_ref(&DEMO_MARKER))
+            .map_err(TransferError::cause)?;
         Ok(DemoOutcome::Flushed)
     }
 
@@ -306,27 +329,37 @@ impl Block {
         }
     }
 
-    fn write_and_flush(&mut self, first_sector: u64, data: &[Sector]) -> Result<(), ProbeError> {
+    fn write_and_flush(&mut self, first_sector: u64, data: &[Sector]) -> Result<(), TransferError> {
         for (offset, bytes) in data.iter().enumerate() {
-            self.transfer(Request::Write(first_sector + offset as u64, bytes))?;
+            self.transfer(Request::Write(first_sector + offset as u64, bytes))
+                .map_err(|error| {
+                    if offset == 0 {
+                        error
+                    } else {
+                        TransferError::AfterSubmission(error.cause())
+                    }
+                })?;
         }
+        // All sector writes have already been submitted when we attempt the flush.
         self.transfer(Request::Flush)
+            .map_err(|error| TransferError::AfterSubmission(error.cause()))
     }
 
-    fn transfer(&mut self, request: Request<'_>) -> Result<(), ProbeError> {
+    fn transfer(&mut self, request: Request<'_>) -> Result<(), TransferError> {
+        use TransferError::{AfterSubmission, BeforeSubmission};
         let (kind, sector, io_error) = match request {
             Request::Read(sector) => (READ, sector, ProbeError::Read),
             Request::Write(sector, _) => (WRITE, sector, ProbeError::Write),
             Request::Flush => (FLUSH, 0, ProbeError::Flush),
         };
         if sector >= self.sectors {
-            return Err(io_error);
+            return Err(BeforeSubmission(io_error));
         }
         if monotonic_nanos() >= self.deadline {
-            return Err(ProbeError::Timeout);
+            return Err(BeforeSubmission(ProbeError::Timeout));
         }
         if self.queue.is_pending() || !self.device.operational() {
-            return Err(ProbeError::Device);
+            return Err(BeforeSubmission(ProbeError::Device));
         }
 
         // SAFETY: No request is pending, so the driver owns the resident DMA buffer.
@@ -356,32 +389,32 @@ impl Block {
                 ])
             }
         };
-        submitted.map_err(|_| ProbeError::Device)?;
+        submitted.map_err(|_| BeforeSubmission(ProbeError::Device))?;
         self.queue.notify(&self.device);
 
         let expected = if kind == READ { SECTOR_BYTES + 1 } else { 1 };
         while monotonic_nanos() < self.deadline {
             if !self.device.operational() {
-                return Err(ProbeError::Device);
+                return Err(AfterSubmission(ProbeError::Device));
             }
             let Some(length) = self
                 .queue
                 .complete()
-                .map_err(|_| ProbeError::InvalidCompletion)?
+                .map_err(|_| AfterSubmission(ProbeError::InvalidCompletion))?
             else {
                 core::hint::spin_loop();
                 continue;
             };
             if length == 0 {
-                return Err(ProbeError::InvalidCompletion);
+                return Err(AfterSubmission(ProbeError::InvalidCompletion));
             }
             // SAFETY: The used entry returns ownership to the driver. A fresh status is required.
             return match unsafe { status.read_volatile() } {
                 STATUS_OK if length == expected => Ok(()),
-                STATUS_IO_ERROR | STATUS_UNSUPPORTED => Err(io_error),
-                _ => Err(ProbeError::InvalidCompletion),
+                STATUS_IO_ERROR | STATUS_UNSUPPORTED => Err(AfterSubmission(io_error)),
+                _ => Err(AfterSubmission(ProbeError::InvalidCompletion)),
             };
         }
-        Err(ProbeError::Timeout)
+        Err(AfterSubmission(ProbeError::Timeout))
     }
 }

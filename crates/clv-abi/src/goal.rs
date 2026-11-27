@@ -1,3 +1,5 @@
+use core::num::NonZeroU64;
+
 use crate::budget::ReplyBudget;
 use crate::tool::ToolId;
 use crate::{CompletionKind, NO_CHILD_HANDLE, NO_RAMFS_HANDLE, PATH_MAX_BYTES, Program};
@@ -170,6 +172,7 @@ pub enum CommitResult {
     ReviewExpired = 3,
     // Publication audit reserves outcome codes 4 through 8.
     StorageFailed = 9,
+    StorageOutcomeUnknown = 10,
 }
 
 impl CommitResult {
@@ -180,8 +183,52 @@ impl CommitResult {
             2 => Self::PostconditionFailed,
             3 => Self::ReviewExpired,
             9 => Self::StorageFailed,
+            10 => Self::StorageOutcomeUnknown,
             _ => return None,
         })
+    }
+}
+
+/// Identifies a record on the attached durable journal for recovery comparison.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CommitReceipt {
+    pub generation: NonZeroU64,
+    pub checksum: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CommitOutcome {
+    pub result: CommitResult,
+    pub receipt: Option<CommitReceipt>,
+}
+
+impl CommitOutcome {
+    /// Call 62 returns the result in a0 and the journal generation and CRC-32 in a2 and a3.
+    pub fn registers(self) -> (usize, usize, usize) {
+        let (generation, checksum) = self.receipt.map_or((0, 0), |receipt| {
+            (receipt.generation.get() as usize, receipt.checksum as usize)
+        });
+        (self.result as usize, generation, checksum)
+    }
+
+    pub fn from_registers(result: usize, generation: usize, checksum: usize) -> Option<Self> {
+        let result = CommitResult::from_register(result)?;
+        let receipt = match NonZeroU64::new(generation as u64) {
+            Some(generation)
+                if matches!(
+                    result,
+                    CommitResult::Committed | CommitResult::StorageOutcomeUnknown
+                ) =>
+            {
+                Some(CommitReceipt {
+                    generation,
+                    checksum: checksum.try_into().ok()?,
+                })
+            }
+            None if checksum == 0 && result != CommitResult::StorageOutcomeUnknown => None,
+            _ => return None,
+        };
+        Some(Self { result, receipt })
     }
 }
 

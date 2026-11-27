@@ -267,13 +267,17 @@ fn print_review_deadline(deadline_ns: u64) {
 
 fn commit(goal: &mut CurrentGoal) {
     let token = goal.review.take();
-    match token.and_then(|token| goal::commit(goal.handle, token)) {
+    let outcome = token.and_then(|token| goal::commit_with_receipt(goal.handle, token));
+    match outcome.map(|outcome| outcome.result) {
         Some(CommitResult::Committed) => color::print_line(color::GREEN, b"rename committed"),
         Some(CommitResult::Conflict) => color::print_line(color::RED, b"commit conflict"),
         Some(CommitResult::ReviewExpired) => color::print_line(color::YELLOW, b"review expired"),
         Some(CommitResult::PostconditionFailed) => print(b"postcondition failed\r\n"),
         Some(CommitResult::StorageFailed) => {
             color::print_line(color::RED, b"durable commit storage failed")
+        }
+        Some(CommitResult::StorageOutcomeUnknown) => {
+            color::print_line(color::YELLOW, b"durable commit outcome unknown")
         }
         None => {
             if matches!(
@@ -289,6 +293,14 @@ fn commit(goal: &mut CurrentGoal) {
                 print(b"cannot commit goal\r\n");
             }
         }
+    }
+    if let Some(receipt) = outcome.and_then(|outcome| outcome.receipt) {
+        print_line(&[
+            b"durable commit generation=",
+            &hex(receipt.generation.get() as usize),
+            b" checksum=",
+            &hex(receipt.checksum as usize),
+        ]);
     }
 }
 

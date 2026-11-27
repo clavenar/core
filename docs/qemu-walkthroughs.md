@@ -33,9 +33,10 @@ handles and ordinary RamFS changes live for one boot.
 ## Boot and shell
 
 In an ANSI terminal, the shell displays the `clsh>` prompt and help headings
-in green. `goal commit` prints `rename committed` in green, `review expired`
-or `goal deadline expired` in yellow, and `commit conflict` or
-`durable commit storage failed` in red. The shell resets the color after
+in green. `goal commit` prints `rename committed` in green and
+`durable commit outcome unknown` in yellow. Review and goal deadline
+expiry also appear in yellow. A commit conflict or a durable storage
+failure before submission appears in red. The shell resets the color after
 each prompt, heading, or message.
 
 Type `help` for the full command reference. It groups commands by task, shows
@@ -2185,12 +2186,14 @@ goal close
 
 `--durable` requires approval from `echo`. After that approval,
 `goal commit` prints `rename committed` once the new record has been
-flushed and the file is visible as `/final.txt`.
+flushed and the file is visible as `/final.txt`. The next line prints
+`durable commit generation=… checksum=…`.
 
 Exit QEMU with `Ctrl+a`, then `x`. In the same Linux terminal, run
 `boot_durable on` to attach the saved image read-only. Look for
-`durable rename recovered` before `clsh>`. Run `cat /final.txt` to see
-`keep`, and `cat /draft.txt` to see `cannot open path`.
+`durable rename recovered` before `clsh>` and compare its generation
+and checksum with the commit output. Run `cat /final.txt` to see `keep`,
+and `cat /draft.txt` to see `cannot open path`.
 
 The journal holds one root-level file. Later durable renames can update
 that same file, alternating sectors. Ordinary edits and unlinks in RamFS
@@ -2219,13 +2222,11 @@ cat /replacement.txt
 goal audit --publication
 ```
 
-Expect `durable commit storage failed`, followed by `keep` for
-`/final.txt` and `cannot open path` for `/replacement.txt`. The audit
-records `storage-failed` and the diff stays staged. With this write
-failure, the next boot still recovers `/final.txt`. A flush failure can
-happen after the new bytes reach the disk. In that case, the running guest
-keeps the original name, and recovery selects whichever valid record has
-the highest generation.
+Expect `durable commit outcome unknown` and the attempted generation
+and checksum, followed by `keep` for `/final.txt` and `cannot open path`
+for `/replacement.txt`. The audit records `storage-outcome-unknown` and
+the diff stays staged. With this injected write failure, the next boot
+reports the previous generation and checksum and recovers `/final.txt`.
 
 ### Persist two renames in one commit
 
@@ -2268,12 +2269,14 @@ goal close
 ```
 
 The review lists both renames. Commit writes both sectors and flushes
-before it publishes both names. Later durable commits must include the
-same two file identities.
+before it publishes both names. Record the generation and checksum printed
+after `rename committed`. Later durable commits must include the same two
+file identities.
 
 Quit QEMU with `Ctrl+a`, then `x`, and run `boot_pair on` in the same
-Linux terminal. Expect `durable rename recovered` before `clsh>`. Run
-`cat /final-a.txt` and `cat /final-b.txt` again to see `alpha` and `beta`.
+Linux terminal. The `durable rename recovered` line before `clsh>` reports
+the same generation and checksum. Run `cat /final-a.txt` and
+`cat /final-b.txt` again to see `alpha` and `beta`.
 
 To fail the second sector write of the next commit, quit QEMU and run
 this block in the same Linux terminal. Sector 4 is the second sector of
@@ -2300,11 +2303,28 @@ ls /
 goal audit --publication
 ```
 
-Expect `durable commit storage failed`, both `final-*.txt` names in the
-listing and two `storage-failed` audit rows. Quit and run `boot_pair on`
-again. Both `final-*.txt` files are recovered from the complete slot.
-A flush error can leave a complete newer slot on disk. Recovery selects
-the highest valid generation.
+Expect `durable commit outcome unknown` and the attempted generation
+and checksum. The listing shows both `final-*.txt` names and the audit
+shows two `storage-outcome-unknown` rows. Quit and run `boot_pair on`
+again. Both `final-*.txt` files and the previous generation and checksum
+come from the intact slot.
+
+To inject a flush failure after both writes, quit from that read-only boot
+and run this block in the same Linux terminal.
+
+```sh
+pair_flush_fault="$(mktemp -t clavenar-pair-flush-fault.XXXXXX)"
+printf '%s\n' '[inject-error]' 'event = "flush_to_disk"' 'errno = "5"' > "$pair_flush_fault"
+boot_pair off "blkdebug:$pair_flush_fault:$pair_disk"
+```
+
+Repeat the commands that stage and review `next-a.txt` and `next-b.txt`.
+Commit prints `durable commit outcome unknown` with the attempted
+generation and checksum again. The running guest still lists both
+`final-*.txt` files. After quitting, run `boot_pair on` and compare the
+boot line with that commit output. In this QEMU example both written
+sectors remain readable, so the generation and checksum match the
+attempt. Read `/next-a.txt` and `/next-b.txt` to see `alpha` and `beta`.
 
 Integers in the 1,024-byte slot are little-endian.
 

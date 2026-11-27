@@ -1,7 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.75 extends durable rename publication to two-file batches.
+Kernel 0.0.76 reports the journal generation and checksum for durable commits.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -699,9 +699,19 @@ For a durable goal, call 62 validates the approval and prepares the batch
 before writing the new basenames and current file bytes to the alternate
 journal slot. All sector writes and the flush share a 500 ms guest deadline.
 After the flush completes, the call publishes the entire batch and returns 0.
-A storage failure returns 9, consumes the approval, keeps the original
-names public and leaves the diff staged. A write or flush error disables
-further journal writes for that boot.
+If storage fails before any sector is submitted, the call returns 9. Once
+a sector has been submitted, a failure before the flush is confirmed
+returns 10 for an unknown storage outcome. Both outcomes consume the
+approval and leave the batch staged in the running guest. A journal I/O
+error disables further journal writes for that boot.
+
+For a flushed durable commit or an unknown outcome, `a2` returns the
+nonzero journal generation and `a3` returns the slot's 32-bit CRC-32,
+zero-extended to an RV64 word. Both registers return zero for the other
+defined results, including a successful volatile rename. Boot reports the
+generation and checksum of the selected record. Compare the two values on the
+first boot of the same disk image after the attempt, before another durable
+write can reuse the generation.
 [Single-file walkthrough](qemu-walkthroughs.md#persist-a-reviewed-rename) · [Pair walkthrough](qemu-walkthroughs.md#persist-two-renames-in-one-commit)
 
 Public file and directory creation or removal, truncating opens, nonempty
@@ -1067,13 +1077,14 @@ bytes. A published batch advances the revision by one.
 | 7 | `discarded-by-revoke` |
 | 8 | `discarded-by-expiry` |
 | 9 | `storage-failed` |
+| 10 | `storage-outcome-unknown` |
 
 Register `a2` contains the supervisor's launch handle for a delegated
 approval, all ones for an owner's direct approval, or zero for a discard
 or an empty history.
 Register `a3` returns the goal handle on success. The identity comes from
-the approval the kernel consumed at commit, including commits that failed
-because of a conflict, an expired review or a storage error. A passing review
+the approval the kernel consumed at commit, including conflicts, expired
+reviews and unconfirmed storage outcomes. A passing review
 replaces the stored reviewer even when it reuses a live token. Another launch
 in the same task slot leaves earlier attribution intact. The shell prints the
 goal handle and reviewer on commit rows, using `reviewer=owner` for a direct review.
