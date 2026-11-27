@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod audit;
+pub mod bridge;
 pub mod budget;
 pub mod goal;
 mod program;
@@ -86,6 +87,7 @@ pub const SYS_GOAL_LAUNCH_RENAME_REVIEWER: usize = 72;
 pub const SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER: usize = 73;
 pub const SYS_GOAL_RENAME_DIFF: usize = 74;
 pub const SYS_GOAL_REVIEW_BATCH_GRANTED: usize = 75;
+pub const SYS_HOST_BRIDGE: usize = 76;
 
 /// Call 15 starts the child with stdin and stdout pipes when `a1` has this value.
 pub const SPAWN_STDIO: usize = 1;
@@ -173,6 +175,8 @@ pub enum ReplyKind {
     AgentResumed = 9,
     /// Only `goal_review_granted` can queue this receipt for the goal owner.
     RenameReviewed = 10,
+    /// One byte explaining why the guest could not obtain an approved host plan.
+    HostPlanFailed = 11,
 }
 
 impl ReplyKind {
@@ -188,6 +192,7 @@ impl ReplyKind {
             value if value == Self::GoalObservation as usize => Some(Self::GoalObservation),
             value if value == Self::AgentResumed as usize => Some(Self::AgentResumed),
             value if value == Self::RenameReviewed as usize => Some(Self::RenameReviewed),
+            value if value == Self::HostPlanFailed as usize => Some(Self::HostPlanFailed),
             _ => None,
         }
     }

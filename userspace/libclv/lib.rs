@@ -4,6 +4,7 @@
 //! Receive buffers and direct file and console I/O use the caller's stack buffers.
 
 pub mod agent;
+pub mod bridge;
 pub mod fs;
 pub mod goal;
 pub mod mcp;

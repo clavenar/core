@@ -10,6 +10,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
 - [Requests, replies and file streams](#requests-replies-and-file-streams)
 - [Delegation and read limits](#delegation-and-read-limits)
 - [Mock planning and registered tools](#mock-planning-and-registered-tools)
+  - [Run a host-backed mock plan](#run-a-host-backed-mock-plan)
 - [Reviewed renames](#reviewed-renames)
   - [Review a staged rename through echo](#review-a-staged-rename-through-echo)
   - [Require a supervisor review before commit](#require-a-supervisor-review-before-commit)
@@ -68,17 +69,34 @@ Run this from an interactive terminal in the Core repository after building
 the kernel. The Python 3 fixture creates a private Unix socket and launches
 QEMU with a single modern VirtIO console port. The UART carries `clsh>`.
 The boot probe exchanges four-byte `PING` and `PONG` messages after Sv39
-activation, with a 500 ms deadline. It resets the device before starting the
-first user task. [VirtIO MMIO and console specification](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)
+activation, with a 500 ms deadline. A successful probe leaves the port
+available for the host-backed plan. [VirtIO MMIO and console specification](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)
 
 ```sh
-python3 - PONG <<'PY'
+python3 - search <<'PY'
 import socket
+import struct
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
-reply = sys.argv[1].encode("ascii")
+plan = struct.Struct("<BBBQB")
+actions = {"search": 1, "invalid-plan": 2, "silent-plan": None}
+mode = sys.argv[1]
+reply = b"PONG" if mode in actions else mode.encode("ascii")
+
+def serve_plans(peer, wire, action):
+    while first := wire.read(1):
+        if first[0] != plan.size:
+            raise RuntimeError("invalid plan request length")
+        size, version, kind, request_id, selector = plan.unpack(
+            first + wire.read(plan.size - 1)
+        )
+        if (version, kind, selector) != (1, 1, 1) or request_id == 0:
+            raise RuntimeError("invalid plan request")
+        if action is not None:
+            peer.sendall(plan.pack(size, 1, 2, request_id, action))
+
 with TemporaryDirectory(prefix="clavenar-bridge-") as directory:
     path = f"{directory}/bridge.sock"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
@@ -104,6 +122,9 @@ with TemporaryDirectory(prefix="clavenar-bridge-") as directory:
                     raise RuntimeError("expected PING from the guest")
                 if reply:
                     peer.sendall(reply)
+                if mode in actions:
+                    peer.settimeout(None)
+                    serve_plans(peer, wire, actions[mode])
                 raise SystemExit(guest.wait())
         finally:
             if guest.poll() is None:
@@ -113,9 +134,9 @@ PY
 ```
 
 Look for `host bridge ready` between `Sv39 paging enabled` and `clsh>`.
-At the prompt, run the local MCP example and confirm it returns
-`Hello from RamFS`. Press `Ctrl+a`, then `x`, to exit QEMU.
-[Local MCP example](#invoke-a-registered-file-tool-over-mcp)
+At the prompt, run the host-backed mock plan example. Press `Ctrl+a`, then
+`x`, to exit QEMU. Pass `PONG` to answer the boot probe alone.
+[Host-backed mock plan](#run-a-host-backed-mock-plan)
 
 Rerun with `python3 - '' <<'PY'` to leave the host peer silent. The kernel
 prints `host bridge timed out` and continues to the shell. Use `PONX` as
@@ -1125,7 +1146,7 @@ completion or cancellation, until the owner closes the goal. [Definition source]
 ```text
 goal create --children 2 --allow-helper grep --read-bytes 18 --reply-bytes 36
 goal grant-file --delegate-to grep --argument Hello /hello.txt
-agent run hello --mock find-greeting@5
+agent run hello --mock find-greeting@6
 goal status
 goal budget
 agent run --suspended hello --mock find-greeting@1
@@ -1138,7 +1159,7 @@ goal audit
 goal close
 ```
 
-Revision 5 prints `cannot start agent`. The goal remains `Ready` with
+Revision 6 prints `cannot start agent`. The goal remains `Ready` with
 `available=36 reserved=0 spent=0`. Revision 1 starts in the same goal.
 Both status snapshots show `definition=find-greeting@1 sha256=` followed
 by the same 64 hex digits. Compare those digits on the build host with
@@ -1257,6 +1278,43 @@ Repeat with `--read-bytes 17` to see a tool error. The audit reports
 `denied=insufficient-read-bytes` and `read_bytes=0`. The shell prints
 `cannot read requested file`. The encoded error response still counts
 toward the reply budget.
+
+### Run a host-backed mock plan
+
+Start the bridge fixture above with its `search` argument. In revision 5,
+`hello` requests an action from the host before invoking the registered
+`text.search@1` tool over MCP. The request carries a launch ID and plan
+selector. The approved action selects the literal `Hello` from the pinned
+definition, and the goal's grant supplies the file.
+[Host fixture](#probe-the-qemu-host-bridge) · [Revision 5 definition](../userspace/hello/definitions/find-greeting-v5.toml)
+
+```text
+goal create --children 2 --allow-tool text.search@1 --read-bytes 18 --reply-bytes 1042
+goal grant-file --delegate-to grep --argument Hello /hello.txt
+agent run hello --mock find-greeting@5
+wait hello
+recv hello
+agent status
+goal audit
+goal audit --reads
+goal budget
+goal close
+```
+
+`recv hello` prints `Hello from RamFS`. The delegation audit shows one
+accepted invocation of `text.search@1`, and the read audit shows
+`read_bytes=18`. The local MCP session and forwarded result consume
+462 reply bytes.
+
+Restart the fixture with `invalid-plan` or `silent-plan` in place of
+`search` and repeat the same commands. An unapproved action prints
+`invalid host plan reply`. A silent planner prints `host plan timed out`
+after two seconds. In both cases, the delegation history is empty,
+`read_bytes=0`, and the failure reply consumes one reply byte.
+
+With `silent-plan`, run `goal cancel` immediately after `agent run` to
+cancel while the request is pending. Then `wait hello` prints
+`hello cancelled` and the delegation and read histories are empty.
 
 ### Require an exact tool revision for a goal
 

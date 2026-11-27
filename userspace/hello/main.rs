@@ -3,7 +3,7 @@
 
 mod mcp_client;
 
-use clv::{ChildReply, ChildStatus, LaunchRequest, agent, fs, pipe};
+use clv::{ChildReply, ChildStatus, LaunchRequest, agent, bridge, fs, pipe};
 use clv_abi::agent::{LAUNCH_REQUEST_MAX_BYTES, decode_rename_pair};
 use clv_abi::{
     GrantKind, MESSAGE_MAX_BYTES, PROBE_VALUE, ReplyKind, RequestKind, SYS_EXIT, SYS_PROBE,
@@ -123,13 +123,25 @@ fn run_plan(kind: RequestKind, bytes: &[u8]) -> usize {
             };
             supervise_stdio_tool(&request)
         }
-        Some(agent::FIND_GREETING_V4) => {
-            let Some(request) = agent::FileToolInvocation::decode(include_bytes!(concat!(
-                env!("OUT_DIR"),
-                "/find-greeting-v4.action"
-            ))) else {
+        Some(id @ (agent::FIND_GREETING_V4 | agent::FIND_GREETING_V5)) => {
+            let host = id == agent::FIND_GREETING_V5;
+            let action: &[u8] = if host {
+                include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v5.action"))
+            } else {
+                include_bytes!(concat!(env!("OUT_DIR"), "/find-greeting-v4.action"))
+            };
+            let Some(request) = agent::FileToolInvocation::decode(action) else {
                 return delegation_failed();
             };
+            if host {
+                let failure = match bridge::plan_action() {
+                    Ok(bridge::SEARCH_GREETING) => return mcp_client::run(&request),
+                    Ok(_) => bridge::PlanFailure::InvalidReply,
+                    Err(reason) => reason,
+                };
+                clv::send_reply(ReplyKind::HostPlanFailed, &[failure as u8]);
+                return 2;
+            }
             mcp_client::run(&request)
         }
         _ => delegation_failed(),

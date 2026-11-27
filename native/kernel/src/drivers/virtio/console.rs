@@ -42,65 +42,100 @@ impl Console {
     /// # Safety
     /// Only the boot hart may probe, once, with the selected device and kernel
     /// DMA storage identity-mapped for the supervisor.
-    pub(crate) unsafe fn probe(self) -> Result<(), ProbeError> {
+    pub(crate) unsafe fn probe(self) -> Result<Port, ProbeError> {
         let deadline = monotonic_nanos().saturating_add(PROBE_TIMEOUT_NS);
         if !self.0.reset(deadline) {
             return Err(ProbeError::Timeout);
         }
         // SAFETY: Reset left the queues idle. The boot probe owns both static buffers.
-        let mut receive = unsafe { Queue::new(&raw mut RECEIVE, RECEIVE_QUEUE) };
-        let mut transmit = unsafe { Queue::new(&raw mut TRANSMIT, TRANSMIT_QUEUE) };
-        let result = self.exchange(&mut receive, &mut transmit, deadline);
-        let reset = self.0.reset(deadline);
-        result?;
-        reset.then_some(()).ok_or(ProbeError::Timeout)
+        let mut port = Port {
+            device: self.0,
+            receive: unsafe { Queue::new(&raw mut RECEIVE, RECEIVE_QUEUE) },
+            transmit: unsafe { Queue::new(&raw mut TRANSMIT, TRANSMIT_QUEUE) },
+        };
+        if let Err(error) = port.start().and_then(|()| port.check_peer(deadline)) {
+            port.device.reset(deadline);
+            return Err(error);
+        }
+        Ok(port)
     }
+}
 
-    fn exchange(
-        &self,
-        receive: &mut Queue,
-        transmit: &mut Queue,
-        deadline: u64,
-    ) -> Result<(), ProbeError> {
-        let device = &self.0;
-        if !device.negotiate() || !receive.configure(device) || !transmit.configure(device) {
+pub(crate) struct Port {
+    device: Device,
+    receive: Queue,
+    transmit: Queue,
+}
+
+impl Port {
+    fn start(&mut self) -> Result<(), ProbeError> {
+        let device = &self.device;
+        if !device.negotiate()
+            || !self.receive.configure(device)
+            || !self.transmit.configure(device)
+        {
             return Err(ProbeError::Device);
         }
         // Have a receive descriptor in place before the host can answer.
-        receive.offer_receive()?;
-        transmit.offer_send(PROBE_REQUEST)?;
+        self.receive.offer_receive()?;
         if !device.start() {
             return Err(ProbeError::Device);
         }
-        receive.notify(device);
-        transmit.notify(device);
+        self.receive.notify(device);
+        Ok(())
+    }
 
-        let mut sent = false;
+    fn check_peer(&mut self, deadline: u64) -> Result<(), ProbeError> {
+        if !self.try_send(PROBE_REQUEST)? {
+            return Err(ProbeError::Device);
+        }
         let mut expected = PROBE_RESPONSE;
         let mut bytes = [0; BUFFER_BYTES];
         while monotonic_nanos() < deadline {
-            if !device.operational() {
-                return Err(ProbeError::Device);
-            }
-            if !sent {
-                sent = transmit.complete()?.is_some();
-            }
             if !expected.is_empty()
-                && let Some(length) = receive.receive(&mut bytes)?
+                && let Some(length) = self.try_read(&mut bytes)?
             {
                 expected = expected
                     .strip_prefix(&bytes[..length])
                     .ok_or(ProbeError::InvalidReply)?;
-                if !expected.is_empty() {
-                    receive.offer_receive()?;
-                    receive.notify(device);
-                }
             }
-            if sent && expected.is_empty() {
+            if expected.is_empty() && self.transmit_ready()? {
                 return Ok(());
             }
             core::hint::spin_loop();
         }
         Err(ProbeError::Timeout)
+    }
+
+    fn transmit_ready(&mut self) -> Result<bool, ProbeError> {
+        if !self.device.operational() {
+            return Err(ProbeError::Device);
+        }
+        self.transmit.complete()?;
+        Ok(!self.transmit.is_pending())
+    }
+
+    pub(crate) fn try_send(&mut self, bytes: &[u8]) -> Result<bool, ProbeError> {
+        if !self.transmit_ready()? {
+            return Ok(false);
+        }
+        self.transmit.offer_send(bytes)?;
+        self.transmit.notify(&self.device);
+        Ok(true)
+    }
+
+    pub(crate) fn try_read(
+        &mut self,
+        bytes: &mut [u8; BUFFER_BYTES],
+    ) -> Result<Option<usize>, ProbeError> {
+        if !self.device.operational() {
+            return Err(ProbeError::Device);
+        }
+        let length = self.receive.receive(bytes)?;
+        if length.is_some() {
+            self.receive.offer_receive()?;
+            self.receive.notify(&self.device);
+        }
+        Ok(length)
     }
 }

@@ -50,6 +50,7 @@ impl MessageKind {
             Self::Reply(ReplyKind::RenameReviewed) => {
                 length == size_of::<EncodedRenameReviewReceipt>()
             }
+            Self::Reply(ReplyKind::HostPlanFailed) => length == 1,
             Self::Reply(
                 ReplyKind::Denied
                 | ReplyKind::ReadFailed

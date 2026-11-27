@@ -8,10 +8,14 @@ use self::audit::{AuditHistory, PublicationHistory};
 use self::budget::ReplyReservation;
 use self::reads::GoalReads;
 use self::rename::PendingRenames;
-use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin, ResumeReceipt};
+use clv_abi::agent::{
+    AgentStatus, ControlResult, DefinitionPin, EncodedDefinitionPin, FIND_GREETING_V5,
+    ResumeReceipt,
+};
 use clv_abi::audit::{
     EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationOutcome, ReplyRecord,
 };
+use clv_abi::bridge::PlanFailure;
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CreateOptions, CreatePolicy, DiscardResult,
@@ -465,6 +469,39 @@ impl Scheduler {
     fn current_agent_member(&self) -> Option<(&Goal, &Member, AgentBinding)> {
         let child = self.tasks[self.current].launch.as_ref()?.handle;
         self.live_agent_member(child)
+    }
+
+    fn host_plan_owner(&self) -> Option<(usize, GoalDeadline)> {
+        let (goal, member, binding) = self.current_agent_member()?;
+        let pin = DefinitionPin::decode(binding.definition?)?;
+        (pin.id == FIND_GREETING_V5).then_some((member.handle, goal.deadline))
+    }
+
+    pub(crate) fn submit_host_plan(&mut self) -> Result<usize, PlanFailure> {
+        const PLAN_TIMEOUT_NS: u64 = 2_000_000_000;
+
+        let (launch, goal_deadline) = self.host_plan_owner().ok_or(PlanFailure::Unavailable)?;
+        let limit = monotonic_nanos().saturating_add(PLAN_TIMEOUT_NS);
+        let deadline = match goal_deadline {
+            GoalDeadline::Unlimited => limit,
+            GoalDeadline::At(at) => limit.min(at),
+            GoalDeadline::Expired => return Err(PlanFailure::TimedOut),
+        };
+        self.host_bridge
+            .as_mut()
+            .ok_or(PlanFailure::Unavailable)?
+            .submit(launch, FIND_GREETING_V5.intent, deadline)
+    }
+
+    pub(crate) fn poll_host_plan(
+        &mut self,
+        copy: impl FnOnce(&[u8]) -> bool,
+    ) -> Result<usize, PlanFailure> {
+        let (launch, _) = self.host_plan_owner().ok_or(PlanFailure::Unavailable)?;
+        self.host_bridge
+            .as_mut()
+            .ok_or(PlanFailure::Unavailable)?
+            .poll(launch, copy)
     }
 
     /// The boot-unique child handle identifies both the original goal and its agent.

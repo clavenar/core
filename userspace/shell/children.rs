@@ -1,4 +1,5 @@
 use clv::{ChildReply, ChildStatus, agent, pipe, print};
+use clv_abi::bridge::PlanFailure;
 use clv_abi::{
     ChildEvent, CompletionKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PIPE_CAPACITY,
     PROGRAM_HELLO, PROGRAMS, Program, ReplyKind, RequestKind,
@@ -526,6 +527,16 @@ fn display_reply(kind: ReplyKind, bytes: &[u8]) {
         ReplyKind::ReadFailed => print(b"cannot read requested file\r\n"),
         ReplyKind::ResultTooLarge => print(b"grep result exceeds 64 bytes\r\n"),
         ReplyKind::DelegationFailed => print(b"cannot delegate child\r\n"),
+        ReplyKind::HostPlanFailed => {
+            let reason = bytes
+                .first()
+                .and_then(|&byte| PlanFailure::from_raw(byte.into()));
+            print(match reason {
+                Some(PlanFailure::Unavailable) => b"host bridge unavailable\r\n",
+                Some(PlanFailure::TimedOut) => b"host plan timed out\r\n",
+                Some(PlanFailure::InvalidReply) | None => b"invalid host plan reply\r\n",
+            });
+        }
         ReplyKind::GoalObservation => super::goal::print_observation(bytes),
         ReplyKind::AgentResumed => super::goal::print_resume_receipt(bytes),
         ReplyKind::RenameReviewed => {

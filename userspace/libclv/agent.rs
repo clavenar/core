@@ -1,7 +1,7 @@
 pub use clv_abi::agent::{
     AgentLaunch, AgentStatus, CURRENT_AGENT, ControlResult, DefinitionId, DefinitionPin,
-    FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, FIND_GREETING_V4, FileDelegation,
-    FileToolInvocation, PlanIntent, ResumeReceipt,
+    FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, FIND_GREETING_V4, FIND_GREETING_V5,
+    FileDelegation, FileToolInvocation, PlanIntent, ResumeReceipt,
 };
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES,

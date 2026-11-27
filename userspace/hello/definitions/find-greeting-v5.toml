@@ -1,0 +1,10 @@
+name = "find-greeting"
+revision = 5
+agent = "hello"
+host_mock = true
+
+[delegate_with_file]
+tool = "text.search@1"
+argument = "Hello"
+reply_bytes = 1024
+mcp = true

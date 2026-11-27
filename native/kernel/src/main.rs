@@ -5,6 +5,7 @@ mod arch;
 mod console;
 mod drivers;
 mod fs;
+mod host_bridge;
 mod ipc;
 mod memory;
 mod programs;
@@ -57,15 +58,21 @@ extern "C" fn kernel_main() -> ! {
         )
     });
     let probe_bridge = || {
-        if let Some(bridge) = bridge {
-            // SAFETY: This runs on the boot hart with the selected MMIO page mapped.
-            let message: &[u8] = match unsafe { bridge.probe() } {
-                Ok(()) => b"host bridge ready\r\n",
-                Err(ProbeError::Device) => b"host bridge unavailable\r\n",
-                Err(ProbeError::InvalidReply) => b"host bridge invalid reply\r\n",
-                Err(ProbeError::Timeout) => b"host bridge timed out\r\n",
-            };
-            uart::write(message);
+        let bridge = bridge?;
+        // SAFETY: This runs on the boot hart with the selected MMIO page mapped.
+        match unsafe { bridge.probe() } {
+            Ok(port) => {
+                uart::write(b"host bridge ready\r\n");
+                Some(port)
+            }
+            Err(error) => {
+                uart::write(match error {
+                    ProbeError::Device => b"host bridge unavailable\r\n",
+                    ProbeError::InvalidReply => b"host bridge invalid reply\r\n",
+                    ProbeError::Timeout => b"host bridge timed out\r\n",
+                });
+                None
+            }
         }
     };
     // SAFETY: The boot hart installed the trap vector and built every task's address space.

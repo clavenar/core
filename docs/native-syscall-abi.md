@@ -1,7 +1,7 @@
 # Native syscall ABI
 
-The RV64 prototype implements 76 calls numbered from 0 through 75.
-Kernel 0.0.58 adds an MCP stdio mode to registered file-tool launches.
+The RV64 prototype implements 77 calls numbered from 0 through 76.
+Kernel 0.0.60 adds a goal-scoped call for the host-backed mock planner.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -13,6 +13,7 @@ The caller places the call number in `a7`, passes up to six arguments in
 - [Goal and agent calls](#goal-and-agent-calls)
   - [Goal creation](#goal-creation)
   - [Goal deadlines](#goal-deadlines)
+  - [Host plan requests](#host-plan-requests)
   - [Read-only goal observers](#read-only-goal-observers)
   - [Background goal monitors](#background-goal-monitors)
   - [Delegating one agent resume](#delegating-one-agent-resume)
@@ -206,6 +207,7 @@ queued reply.
 | 8 `GoalObservation` | 64 bytes | Kernel snapshot requested by the observer through call 68. Call 26 rejects this tag. |
 | 9 `AgentResumed` | 32 bytes | Kernel receipt for a supervisor's successful call 70. Call 26 rejects this tag. |
 | 10 `RenameReviewed` | 40 bytes | Kernel receipt for a passing or blocked delegated review through call 75. Call 26 rejects this tag. |
+| 11 `HostPlanFailed` | 1 byte | Reason the agent could not obtain an approved host plan. |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -341,6 +343,39 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 73 `goal_publication_decisions_with_reviewer` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` zero-based row index, `a4` [history view](#publication-audit) (0–3) | Retained row count (0–4) in `a0`, overwritten count in `a1`, reviewer in `a2` and goal handle in `a3`, or -1 in `a0` on failure |
 | 74 `goal_rename_diff` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` = 0 for a preview or 1 for a review | Total bytes in `a0`, number of renames in `a1`, approval token or zero in `a2`, deadline or verdict in `a3`. Failure returns -1 in `a0`. |
 | 75 `goal_review_batch_granted` | `a0` reviewer's stack destination, `a1` capacity in bytes | Total bytes in `a0`, number of renames in `a1`, verdict (1–4) in `a2`. Failure to deliver returns -1 in `a0`. |
+| 76 `host_bridge` | `a0` operations 0 submit or 1 poll. Submit takes zeros in `a1` and `a2`. Poll takes a stack address in `a1` and capacity 32 in `a2`. | Submit returns the request ID. Poll returns the length copied or zero while pending. An error returns -1 in `a0` with a reason in `a1`. |
+
+### Host plan requests
+
+Call 76 accepts the live agent launch pinned to `find-greeting@5`. A
+successful submit produces one request for that launch using the intent from
+its pin. The boot-unique launch handle serves as the request ID. There is
+one exchange at a time. Both operations return without waiting for the host.
+The exchange expires two seconds after submission or at the goal deadline,
+whichever comes first. Stopping the launch releases the exchange.
+
+The optional VirtIO console carries the following byte stream after the
+boot probe. Each frame starts with its total length in bytes.
+
+| Offset | Field |
+| --- | --- |
+| 0 | Frame length (11–32 bytes) |
+| 1 | Version (1) |
+| 2 | Kind (1 plan request or 2 plan reply) |
+| 3–10 | Request ID as a little-endian 64-bit integer |
+| 11 | Selector for version 1 plan frames, which are 12 bytes long |
+
+The plan request uses selector 1 for `find-greeting`. A reply with selector 1
+chooses the pinned search. The kernel assembles frames across reads, discards
+complete frames addressed to another launch and retires the port for plan
+requests if a length falls outside the frame bounds. The guest client checks
+the returned version, kind, request ID and action before asking the kernel
+to invoke the existing registered file tool.
+
+Failure codes in `a1` and the `HostPlanFailed` reply are 1 for unavailable
+or denied, 2 for timeout, and 3 for an invalid reply. The typed failure
+reply spends one byte of the agent's reply allowance.
+[QEMU walkthrough](qemu-walkthroughs.md#run-a-host-backed-mock-plan)
 
 ### Goal creation
 
@@ -627,7 +662,7 @@ request format.
 | --- | --- | --- |
 | All clear | `DelegateWithFile` (tag 4) | Two little-endian RV64 words for the helper selector and its reply allowance, followed by 0–64 literal argument bytes |
 | Bit 2 only | `PlanIntent` (tag 5) | One intent byte. Intent 1 for `hello` pins `find-greeting@1`. Other legacy intents retain their original delivery behavior. |
-| Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. Intent 1 with revision 1–4 selects the corresponding `find-greeting` definition for `hello`. |
+| Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. Intent 1 with revision 1–5 selects the corresponding `find-greeting` definition for `hello`. |
 | Bit 4 only | `StageRename` (tag 7) | 1–64 bytes for the proposed basename. `hello` presents the name and its startup file descriptor to call 64. |
 | Bit 5 only | `StageRenamePair` (tag 11) | One byte with the first basename's length, followed by both basenames in grant order. Each basename is 1–64 bytes. The request length determines the second length. |
 

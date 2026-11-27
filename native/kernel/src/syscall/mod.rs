@@ -3,6 +3,7 @@ use clv_abi::agent::{
     RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED, decode_rename_pair,
 };
 use clv_abi::audit::{DelegationDenial, PublicationAuditView, ReadAuditView};
+use clv_abi::bridge::{MAX_FRAME_BYTES, POLL_PLAN, PlanFailure, SUBMIT_PLAN};
 use clv_abi::goal::{
     EncodedGoalCreate, FileRecipient, GoalCreateRequest, RENAME_DIFF_HEADER_BYTES, ReviewToken,
 };
@@ -23,10 +24,10 @@ use clv_abi::{
     SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT, SYS_GOAL_RENAME_AUDIT,
     SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW_BATCH_GRANTED,
     SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT,
-    SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN,
-    SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
+    SYS_GOAL_STATUS, SYS_HOST_BRIDGE, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN,
+    SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ,
+    SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR,
+    SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
     SYS_SPAWN_WITH_FILE_ARG, SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
     SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
@@ -338,6 +339,19 @@ pub(crate) fn dispatch(
                     )
                 });
             write_agent_launch(frame, launch)
+        }
+        SYS_HOST_BRIDGE => {
+            let result = match a0 {
+                SUBMIT_PLAN if a1 == 0 && a2 == 0 => scheduler.submit_host_plan(),
+                POLL_PLAN if a2 == MAX_FRAME_BYTES && stack.contains(a1, a2) => {
+                    scheduler.poll_host_plan(|bytes| stack.copy_to_user(bytes, a1, a2))
+                }
+                _ => Err(PlanFailure::Unavailable),
+            };
+            result.unwrap_or_else(|reason| {
+                frame.registers[REG_A1] = reason as usize;
+                SYSCALL_ERROR
+            })
         }
         SYS_AGENT_DELEGATE
         | SYS_AGENT_DELEGATE_WITH_FILE

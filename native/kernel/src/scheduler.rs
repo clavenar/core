@@ -15,7 +15,9 @@ use clv_abi::{
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
+use crate::drivers::virtio::console::Port;
 use crate::fs::ramfs::{RamFs, TaskFs};
+use crate::host_bridge::HostBridge;
 use crate::ipc::pipe::Pipe;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::sv39::AddressSpace;
@@ -191,6 +193,7 @@ pub(crate) struct Scheduler {
     tasks: [Task; TASK_COUNT],
     initial_status: usize,
     goal: Option<Goal>,
+    host_bridge: Option<HostBridge>,
     /// The dedicated monitor owns this snapshot from wakeup until its grant is used or revoked.
     monitor_report: Option<GoalObservation>,
     // Child launches, goals and agents share a boot-unique handle sequence.
@@ -208,11 +211,22 @@ impl Scheduler {
             }),
             initial_status: sstatus,
             goal: None,
+            host_bridge: None,
             monitor_report: None,
             next_handle: 1,
             next_event_sequence: 0,
             current: task_index(Program::Hello),
         }
+    }
+
+    pub(crate) fn attach_host_bridge(&mut self, port: Option<Port>) {
+        self.host_bridge = port.map(HostBridge::new);
+    }
+
+    pub(crate) fn host_plan_pending(&self) -> bool {
+        self.host_bridge
+            .as_ref()
+            .is_some_and(HostBridge::is_pending)
     }
 
     pub(crate) fn current_id(&self) -> usize {
@@ -626,6 +640,9 @@ impl Scheduler {
         task.state = TaskState::Stopped;
         task.fs.close_all(fs);
         if let Some(launch) = &mut task.launch {
+            if let Some(bridge) = &mut self.host_bridge {
+                bridge.release(launch.handle);
+            }
             launch.grant = None;
             launch.request = None;
             launch.completion = Some(completion);

@@ -4,6 +4,7 @@ use core::arch::{asm, global_asm};
 use super::{idle, timer};
 use crate::console::{write_hex, write_task};
 use crate::drivers::uart;
+use crate::drivers::virtio::console::Port;
 use crate::fs::ramfs::RamFs;
 use crate::memory::sv39::AddressSpace;
 use crate::memory::usercopy::SSTATUS_SUM;
@@ -79,7 +80,7 @@ fn supervisor_status() -> usize {
 /// vector and preparing all user address spaces.
 pub(crate) unsafe fn start(
     tasks: [(AddressSpace, usize); TASK_COUNT],
-    after_paging: impl FnOnce(),
+    after_paging: impl FnOnce() -> Option<Port>,
 ) -> ! {
     // SAFETY: No user task has run, and only this hart accesses the state.
     let state = unsafe { &mut *(&raw mut KERNEL_STATE) };
@@ -95,7 +96,7 @@ pub(crate) unsafe fn start(
         idle();
     }
     uart::write(b"Sv39 paging enabled\r\n");
-    after_paging();
+    scheduler.attach_host_bridge(after_paging());
     let first_frame = *scheduler.current_frame();
     arm_timer();
     // SAFETY: The first task's code and stack are mapped in the active space.
@@ -181,11 +182,11 @@ fn switch_task(scheduler: &Scheduler, previous: usize, reason: SwitchReason) {
         uart::write(b"Sv39 task switch failed\r\n");
         idle();
     }
-    // Routine switch traces share the shell's UART with the bytes it is draining.
+    // Keep routine switch traces off the UART during pipe I/O and host polling.
     let trace: &[u8] = match reason {
         SwitchReason::Fault => b"fault switch ",
         SwitchReason::Expiry => return,
-        _ if scheduler.has_active_pipe_reader() => return,
+        _ if scheduler.has_active_pipe_reader() || scheduler.host_plan_pending() => return,
         SwitchReason::Timer => b"timer switch ",
         SwitchReason::Wait => b"wait switch ",
         SwitchReason::Exit => b"exit switch ",

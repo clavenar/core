@@ -3,7 +3,8 @@ mod definition;
 
 use clv_abi::USER_IMAGE_MAX_BYTES;
 use clv_abi::agent::{
-    FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, FIND_GREETING_V4, SHA256_BYTES,
+    FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, FIND_GREETING_V4, FIND_GREETING_V5,
+    SHA256_BYTES,
 };
 use clv_abi::tool::FILE_TOOLS;
 use sha2::{Digest, Sha256};
@@ -22,6 +23,7 @@ fn main() {
         FIND_GREETING_V2,
         FIND_GREETING_V3,
         FIND_GREETING_V4,
+        FIND_GREETING_V5,
     ] {
         definition::build(&userspace.join("hello/definitions"), &output, id);
     }

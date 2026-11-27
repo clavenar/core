@@ -1,7 +1,7 @@
 use clv_abi::Program;
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, DefinitionId, DefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2,
-    FIND_GREETING_V3, FIND_GREETING_V4, FileDelegation, FileToolInvocation,
+    FIND_GREETING_V3, FIND_GREETING_V4, FIND_GREETING_V5, FileDelegation, FileToolInvocation,
 };
 use clv_abi::tool::FileTool;
 use serde::Deserialize;
@@ -14,6 +14,8 @@ struct Definition {
     name: String,
     revision: u8,
     agent: String,
+    #[serde(default)]
+    host_mock: bool,
     delegate_with_file: Delegation,
 }
 
@@ -39,11 +41,15 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
     assert_eq!(definition.name, id.intent.name());
     assert_eq!(definition.revision, id.revision);
     assert_eq!(definition.agent, id.intent.program().name());
+    assert_eq!(definition.host_mock, id == FIND_GREETING_V5);
 
     let step = definition.delegate_with_file;
     assert_eq!(
         (step.stdio, step.mcp),
-        (id == FIND_GREETING_V3, id == FIND_GREETING_V4),
+        (
+            id == FIND_GREETING_V3,
+            matches!(id, FIND_GREETING_V4 | FIND_GREETING_V5)
+        ),
         "wrong transport for {stem}"
     );
     let argument = step.argument.as_bytes();
@@ -56,16 +62,18 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
             reply_bytes,
         }
         .encode(&mut buffer),
-        (FIND_GREETING_V2 | FIND_GREETING_V3 | FIND_GREETING_V4, None, Some(name)) => {
-            FileToolInvocation {
-                tool: FileTool::named(name.as_bytes())
-                    .expect("unknown file tool revision")
-                    .id,
-                argument,
-                reply_bytes,
-            }
-            .encode(&mut buffer)
+        (
+            FIND_GREETING_V2 | FIND_GREETING_V3 | FIND_GREETING_V4 | FIND_GREETING_V5,
+            None,
+            Some(name),
+        ) => FileToolInvocation {
+            tool: FileTool::named(name.as_bytes())
+                .expect("unknown file tool revision")
+                .id,
+            argument,
+            reply_bytes,
         }
+        .encode(&mut buffer),
         _ => panic!("invalid delegation target for {stem}"),
     }
     .expect("definition argument exceeds the IPC limit");

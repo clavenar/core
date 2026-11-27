@@ -157,6 +157,10 @@ impl Queue {
         }
     }
 
+    pub(super) fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub(super) fn complete(&mut self) -> Result<Option<usize>, QueueError> {
         // SAFETY: The used index is an aligned device-owned field.
         let index = u16::from_le(unsafe { (&raw const (*self.memory).used.index).read_volatile() });
