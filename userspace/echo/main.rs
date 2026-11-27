@@ -17,6 +17,10 @@ extern "C" fn _start() -> ! {
             ..
         }) => clv::exit(usize::from(clv::goal::observe().is_none())),
         Some(LaunchRequest::Received {
+            kind: RequestKind::ResumeAgent,
+            ..
+        }) => clv::exit(usize::from(!clv::agent::resume_granted())),
+        Some(LaunchRequest::Received {
             kind: RequestKind::Echo,
             bytes,
             ..

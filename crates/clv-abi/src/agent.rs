@@ -197,6 +197,36 @@ pub struct AgentLaunch {
     pub child: usize,
 }
 
+pub type EncodedResumeReceipt = [[u8; 8]; 4];
+
+/// Boot-unique handles recorded when a supervisor makes a suspended child runnable.
+pub struct ResumeReceipt {
+    pub supervisor: usize,
+    pub goal: usize,
+    pub agent: usize,
+    pub child: usize,
+}
+
+impl ResumeReceipt {
+    pub fn encode(self) -> EncodedResumeReceipt {
+        [self.supervisor, self.goal, self.agent, self.child].map(|word| (word as u64).to_le_bytes())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let (words, []) = bytes.as_chunks::<8>() else {
+            return None;
+        };
+        let words: &EncodedResumeReceipt = words.try_into().ok()?;
+        let [supervisor, goal, agent, child] = words.map(|word| u64::from_le_bytes(word) as usize);
+        Some(Self {
+            supervisor,
+            goal,
+            agent,
+            child,
+        })
+    }
+}
+
 /// The owning goal and the state of the agent's original child launch.
 pub struct AgentStatus {
     pub goal: usize,

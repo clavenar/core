@@ -173,6 +173,37 @@ handle. While an agent is suspended, its goal is `Running`, `goal close`
 reports `goal busy`, and `goal cancel` stops the suspended child. If the child
 finishes before you type `agent suspend`, the shell prints `agent already finished`.
 
+### Resume a suspended agent through echo
+
+At a fresh `clsh>` prompt, let `echo` resume an agent that can propose a rename.
+
+```text
+write /draft.txt keep
+goal create --preserve-file /draft.txt
+goal grant-file --stage-rename /draft.txt
+agent run --suspended hello --stage-rename final.txt
+agent status
+agent resume --via echo
+wait hello
+goal diff
+cat /draft.txt
+cat /final.txt
+goal commit
+cat /final.txt
+goal close
+```
+
+The first status prints `Suspended child=<handle>`. The resume prints
+`resumed by supervisor=<handle>` alongside the goal, agent and original
+child handles. After `hello` exits with status 0, `goal diff` shows
+`rename /draft.txt -> final.txt` and `ready to commit`. The first two
+reads print `keep` and `cannot open path`. Once the owner commits, reading
+`/final.txt` prints `keep`.
+
+The grant covers one suspension. The command needs a suspended agent and
+an available `echo` slot. If the agent is itself `echo`, use `agent resume`
+to resume it directly.
+
 ### Reserve reply bytes for children
 
 Use `goal create --reply-bytes N` to limit the total bytes its children can send

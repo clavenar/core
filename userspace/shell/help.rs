@@ -109,7 +109,7 @@ entries! {
     AgentActions {
         "agent status" => "Show agent state and handles",
         "agent suspend" => "Pause the agent",
-        "agent resume" => "Resume the agent",
+        "agent resume [--via echo]" => "Resume directly or grant echo one resume",
     },
 }
 

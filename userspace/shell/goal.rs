@@ -375,6 +375,20 @@ pub(super) fn print_observation(bytes: &[u8]) {
     }
 }
 
+pub(super) fn print_resume_receipt(bytes: &[u8]) {
+    if let Some(receipt) = agent::ResumeReceipt::decode(bytes) {
+        print_handles(
+            b"resumed by supervisor=",
+            receipt.supervisor,
+            b" goal=",
+            receipt.goal,
+        );
+        print_handles(b"agent=", receipt.agent, b" child=", receipt.child);
+    } else {
+        print(b"cannot resume agent via echo\r\n");
+    }
+}
+
 pub(super) fn agent_command(
     arguments: &[u8],
     current: &mut Option<CurrentGoal>,
@@ -390,10 +404,15 @@ pub(super) fn agent_command(
             };
             if let Some(launch) = children.run_agent(goal.handle, arguments) {
                 goal.agent = Some(launch.agent);
-                print_agent_handles(launch.agent, b" child=", launch.child);
+                print_handles(b"agent=", launch.agent, b" child=", launch.child);
             }
         }
         (Subcommand::Status, b"") => print_agent_status(agent_handle),
+        (Subcommand::Resume, args) if split_word(args) == (b"--via", b"echo") => match agent_handle
+        {
+            Some(agent) => children.resume_via_echo(agent),
+            None => print(b"no current agent\r\n"),
+        },
         (action @ (Subcommand::Suspend | Subcommand::Resume), b"") => {
             let suspending = matches!(action, Subcommand::Suspend);
             let control = if suspending {
@@ -415,8 +434,8 @@ pub(super) fn agent_command(
     }
 }
 
-fn print_agent_handles(agent: usize, label: &[u8], related: usize) {
-    print_line(&[b"agent=", &hex(agent), label, &hex(related)]);
+fn print_handles(label: &[u8], handle: usize, related_label: &[u8], related: usize) {
+    print_line(&[label, &hex(handle), related_label, &hex(related)]);
 }
 
 fn print_agent_status(agent_handle: Option<usize>) {
@@ -424,7 +443,7 @@ fn print_agent_status(agent_handle: Option<usize>) {
     if let Some(handle) = agent_handle
         && let Some((snapshot, pin)) = agent::status_with_definition(handle, &mut definition)
     {
-        print_agent_handles(handle, b" goal=", snapshot.goal);
+        print_handles(b"agent=", handle, b" goal=", snapshot.goal);
         if let Some(pin) = pin {
             print_line(&[
                 b"definition=",

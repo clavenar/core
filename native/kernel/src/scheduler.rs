@@ -67,11 +67,18 @@ struct PendingEvent {
     kind: CompletionKind,
 }
 
+/// A single operation the shell entrusted to this particular launch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaunchGrant {
+    ObserveGoal(usize),
+    /// The agent's original child launch. Every resume ends this suspension's grants.
+    ResumeAgent(usize),
+}
+
 struct ChildLaunch {
     handle: usize,
     parent: LaunchParent,
-    /// One snapshot of this boot-unique goal, granted only to this launch.
-    observed_goal: Option<usize>,
+    grant: Option<LaunchGrant>,
     request: Option<Message>,
     reply: Option<Message>,
     legacy_file_reply: bool,
@@ -85,7 +92,7 @@ struct PreparedLaunch {
     handle: usize,
     next_handle: usize,
     parent: LaunchParent,
-    observed_goal: Option<usize>,
+    grant: Option<LaunchGrant>,
 }
 
 #[derive(Clone, Copy)]
@@ -95,6 +102,7 @@ pub(crate) enum LaunchScope {
     File(usize),
     FileWithPipe(usize),
     GoalObserver(usize),
+    ResumeSupervisor(usize),
     Goal {
         handle: usize,
         reply_bytes: Option<usize>,
@@ -289,7 +297,7 @@ impl Scheduler {
             handle,
             next_handle,
             parent,
-            observed_goal: None,
+            grant: None,
         })
     }
 
@@ -316,7 +324,11 @@ impl Scheduler {
             LaunchScope::Plain => TaskFs::empty(),
             LaunchScope::GoalObserver(handle) => {
                 self.shell_goal(handle)?;
-                launch.observed_goal = Some(handle);
+                launch.grant = Some(LaunchGrant::ObserveGoal(handle));
+                TaskFs::empty()
+            }
+            LaunchScope::ResumeSupervisor(agent) => {
+                launch.grant = Some(self.agent_resume_grant(agent)?);
                 TaskFs::empty()
             }
             LaunchScope::Goal {
@@ -352,7 +364,7 @@ impl Scheduler {
             handle,
             next_handle,
             parent,
-            observed_goal,
+            grant,
         } = launch;
         let index = task_index(program);
         let task = &mut self.tasks[index];
@@ -362,8 +374,8 @@ impl Scheduler {
             index + 1,
             self.initial_status,
         );
-        let grant = task_fs.startup_grant();
-        if let Some((fd, kind)) = grant {
+        let startup_grant = task_fs.startup_grant();
+        if let Some((fd, kind)) = startup_grant {
             let writer = if pipe.is_some() { handle } else { 0 };
             frame.set_startup_args(fd, kind as usize, writer);
         }
@@ -374,14 +386,14 @@ impl Scheduler {
         task.fs = task_fs;
         task.timer_fired = false;
         // Older children use an in-band status byte to answer a file read.
-        let legacy_file_reply = matches!(grant, Some((_, GrantKind::File)))
+        let legacy_file_reply = matches!(startup_grant, Some((_, GrantKind::File)))
             || request
                 .as_ref()
                 .is_some_and(|message| message.kind == MessageKind::Request(RequestKind::ReadFile));
         task.launch = Some(ChildLaunch {
             handle,
             parent,
-            observed_goal,
+            grant,
             request,
             reply: None,
             legacy_file_reply,
@@ -555,7 +567,7 @@ impl Scheduler {
         task.state = TaskState::Stopped;
         task.fs.close_all(fs);
         if let Some(launch) = &mut task.launch {
-            launch.observed_goal = None;
+            launch.grant = None;
             launch.request = None;
             launch.completion = Some(completion);
             if let Some(goal) = &mut self.goal {

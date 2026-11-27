@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements calls 0–85. The caller places the call number in
+The RV64 prototype implements calls 0–87. The caller places the call number in
 `a7`, passes up to six arguments in `a0`–`a5`, and executes `ecall`.
 The per-call descriptions give the result registers and error values.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -12,6 +12,7 @@ The per-call descriptions give the result registers and error values.
 - [Goal and agent calls](#goal-and-agent-calls)
   - [Goal deadlines](#goal-deadlines)
   - [Read-only goal observers](#read-only-goal-observers)
+  - [Delegating one agent resume](#delegating-one-agent-resume)
 - [Rename review and publication](#rename-review-and-publication)
 - [Goal membership and delegated authority](#goal-membership-and-delegated-authority)
 - [Audit records](#audit-records)
@@ -195,6 +196,7 @@ queued reply.
 | 6 `ResultTooLarge` | Empty | The matched lines exceed the reply capacity |
 | 7 `DelegationFailed` | Empty | The agent could not start the requested helper |
 | 8 `GoalObservation` | 64 bytes | Kernel snapshot requested by the observer through call 85. Call 26 rejects this tag. |
+| 9 `AgentResumed` | 32 bytes | Kernel receipt for a supervisor's successful call 87. Call 26 rejects this tag. |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -322,6 +324,8 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 83 `goal_publication_decisions_with_expiry` | Same arguments as call 76 | Same row format and result registers as call 81. Also includes a rename discarded on goal expiry. |
 | 84 `goal_launch_observer` | `a0` open goal handle, `a1` program selector | Fresh shell-owned child handle, or -1 on rejection |
 | 85 `goal_observe` | `a0` observer's stack destination, `a1` capacity in bytes | 64 after copying the snapshot and queuing the same record for the parent, or -1 on failure |
+| 86 `agent_launch_supervisor` | `a0` suspended agent handle, `a1` program selector | Fresh shell-owned supervisor launch handle, or -1 on rejection |
+| 87 `agent_resume_granted` | None | 0 after resuming the bound child and queuing its receipt, or -1 on failure |
 
 ### Goal deadlines
 
@@ -374,6 +378,28 @@ retry. Closing the goal, owner exit or observer exit invalidates an unused
 grant. A later goal or launch in the same slot gets a fresh identity.
 Goal control, audit, review and publication calls retain their existing
 caller checks.
+
+### Delegating one agent resume
+
+The owner uses call 86 to give a separate process one resume of a live,
+suspended agent. It binds the grant to the agent's original child launch
+and queues an empty `ResumeAgent` request (kind 9). The supervisor occupies
+the selected program's normal slot, starts with an empty RamFS handle table
+and runs outside the goal's child limit and reply budget.
+
+Call 87 takes its target from the calling launch's grant. On success, it
+makes the child runnable at its saved frame and queues an `AgentResumed`
+reply in the supervisor's mailbox for the owner. Call 27 returns the
+supervisor launch, goal, agent and resumed child handles as four consecutive
+little-endian RV64 words. An occupied mailbox makes call 87 fail before the
+resume. The supervisor can retry after its parent collects the pending reply.
+
+A resume by the owner or any supervisor ends every grant for that
+suspension. A later suspension of the same agent requires a fresh grant.
+Repeating call 40 on an already suspended agent preserves the current
+suspension. Goal cancellation, expiry, closure or supervisor exit also
+invalidates unused authority. Reviewing and committing a rename still
+require the owner.
 
 ## Rename review and publication
 
@@ -760,9 +786,9 @@ and wait results for the agent and for each helper the shell launched.
 An agent-issued helper's results belong to that agent. `agent_status`
 retains the agent's own exit status or fault cause.
 
-Repeating suspend or resume on a live agent already in the requested state
-succeeds. A paused child keeps its slot and any queued reply. Suspension and
-resumption produce no completion event.
+The owner's direct suspend and resume calls (40 and 41) succeed when a live
+agent is already in the requested state. A paused child keeps its slot and
+any queued reply. Suspension and resumption produce no completion event.
 
 `goal_cancel` stops each live member by its original launch handle in launch
 order. The kernel queues one event per cancelled shell-owned child. Repeating

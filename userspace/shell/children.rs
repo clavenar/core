@@ -113,18 +113,30 @@ impl Children {
         let Some(handle) = clv::goal::launch_observer(goal, Program::Echo) else {
             return print(b"cannot start goal observer\r\n");
         };
+        if !self.collect_echo_report(handle, ReplyKind::GoalObservation) {
+            print(b"goal observation unavailable\r\n");
+        }
+    }
+
+    pub(super) fn resume_via_echo(&mut self, agent: usize) {
+        let launch = agent::launch_supervisor(agent, Program::Echo);
+        if !launch.is_some_and(|handle| self.collect_echo_report(handle, ReplyKind::AgentResumed)) {
+            print(b"cannot resume agent via echo\r\n");
+        }
+    }
+
+    fn collect_echo_report(&mut self, handle: usize, expected: ReplyKind) -> bool {
         self.handles[Program::Echo as usize] = handle;
         let mut buffer = [0; MESSAGE_MAX_BYTES];
         if matches!(clv::wait(handle), Some(ChildStatus::Exited(0)))
-            && let Some(ChildReply::Received {
-                kind: ReplyKind::GoalObservation,
-                bytes,
-                ..
-            }) = clv::receive_reply(handle, &mut buffer)
+            && let Some(ChildReply::Received { kind, bytes, .. }) =
+                clv::receive_reply(handle, &mut buffer)
+            && kind == expected
         {
-            super::goal::print_observation(bytes);
+            display_reply(kind, bytes);
+            true
         } else {
-            print(b"goal observation unavailable\r\n");
+            false
         }
     }
 
@@ -371,22 +383,27 @@ fn print_reply(handle: usize) {
     let mut buffer = [0; MESSAGE_MAX_BYTES];
     match clv::receive_reply(handle, &mut buffer) {
         Some(ChildReply::Empty) => print(b"no message\r\n"),
-        Some(ChildReply::Received { kind, bytes, .. }) => match kind {
-            ReplyKind::FileData if bytes.is_empty() => print(b"empty file\r\n"),
-            ReplyKind::Matches if bytes.is_empty() => {}
-            ReplyKind::Echo | ReplyKind::FileData | ReplyKind::Matches => {
-                clv::write_console(bytes);
-                if kind == ReplyKind::Echo || !bytes.ends_with(b"\n") {
-                    print(b"\r\n");
-                }
-            }
-            ReplyKind::Denied => print(b"read denied: no directory grant\r\n"),
-            ReplyKind::ReadFailed => print(b"cannot read requested file\r\n"),
-            ReplyKind::ResultTooLarge => print(b"grep result exceeds 64 bytes\r\n"),
-            ReplyKind::DelegationFailed => print(b"cannot delegate child\r\n"),
-            ReplyKind::GoalObservation => super::goal::print_observation(bytes),
-        },
+        Some(ChildReply::Received { kind, bytes, .. }) => display_reply(kind, bytes),
         None => print(b"recv failed\r\n"),
+    }
+}
+
+fn display_reply(kind: ReplyKind, bytes: &[u8]) {
+    match kind {
+        ReplyKind::FileData if bytes.is_empty() => print(b"empty file\r\n"),
+        ReplyKind::Matches if bytes.is_empty() => {}
+        ReplyKind::Echo | ReplyKind::FileData | ReplyKind::Matches => {
+            clv::write_console(bytes);
+            if kind == ReplyKind::Echo || !bytes.ends_with(b"\n") {
+                print(b"\r\n");
+            }
+        }
+        ReplyKind::Denied => print(b"read denied: no directory grant\r\n"),
+        ReplyKind::ReadFailed => print(b"cannot read requested file\r\n"),
+        ReplyKind::ResultTooLarge => print(b"grep result exceeds 64 bytes\r\n"),
+        ReplyKind::DelegationFailed => print(b"cannot delegate child\r\n"),
+        ReplyKind::GoalObservation => super::goal::print_observation(bytes),
+        ReplyKind::AgentResumed => super::goal::print_resume_receipt(bytes),
     }
 }
 

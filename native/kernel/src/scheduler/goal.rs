@@ -10,7 +10,7 @@ use self::budget::ReplyReservation;
 use self::reads::GoalReads;
 pub(crate) use self::reads::ReadAudit;
 use self::rename::PendingRename;
-use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin};
+use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin, ResumeReceipt};
 use clv_abi::audit::{
     EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationOutcome, ReplyRecord,
 };
@@ -22,7 +22,7 @@ use clv_abi::goal::{
 use clv_abi::tool::ToolId;
 use clv_abi::{ReplyKind, TaskCompletion};
 
-use super::{AgentBinding, SHELL_TASK_INDEX, Scheduler, TaskState};
+use super::{AgentBinding, LaunchGrant, SHELL_TASK_INDEX, Scheduler, TaskState};
 use crate::arch::monotonic_nanos;
 use crate::fs::ramfs::{
     DirectoryId, FileGrant, FileGrantMode, GrantArgument, RamFs, RenamePolicy, TaskFs,
@@ -305,7 +305,10 @@ impl Scheduler {
     }
 
     pub(crate) fn observe_goal(&mut self, deliver: impl FnOnce(&[u8]) -> bool) -> Option<usize> {
-        let handle = self.tasks[self.current].launch.as_ref()?.observed_goal?;
+        let LaunchGrant::ObserveGoal(handle) = self.tasks[self.current].launch.as_ref()?.grant?
+        else {
+            return None;
+        };
         let goal = self.goal.as_ref().filter(|goal| goal.handle == handle)?;
         let record = GoalObservation {
             status: goal.status(),
@@ -320,7 +323,7 @@ impl Scheduler {
             reply.copy_from_slice(bytes);
             deliver(reply)
         })?;
-        self.tasks[self.current].launch.as_mut()?.observed_goal = None;
+        self.tasks[self.current].launch.as_mut()?.grant = None;
         Some(count)
     }
 
@@ -372,6 +375,11 @@ impl Scheduler {
 
     fn current_agent_member(&self) -> Option<(&Goal, &Member, AgentBinding)> {
         let child = self.tasks[self.current].launch.as_ref()?.handle;
+        self.live_agent_member(child)
+    }
+
+    /// The boot-unique child handle identifies both the original goal and its agent.
+    fn live_agent_member(&self, child: usize) -> Option<(&Goal, &Member, AgentBinding)> {
         let goal = self.goal.as_ref()?;
         let member = goal.members().find(|member| member.is_live(child))?;
         let MemberRole::Agent(binding) = member.role else {
@@ -406,16 +414,69 @@ impl Scheduler {
         if member.completion.is_some() {
             return Some(ControlResult::AlreadyFinished);
         }
-        let index = self.launch_index(member.handle)?;
-        let state = &mut self.tasks[index].state;
-        if *state != TaskState::Suspended && !state.can_finish() {
+        let child = member.handle;
+        let index = self.launch_index(child)?;
+        let state = self.tasks[index].state;
+        if state != TaskState::Suspended && !state.can_finish() {
             return None;
         }
-        // A suspended blocking syscall retries at its saved PC after resume.
-        if suspended || *state == TaskState::Suspended {
-            *state = TaskState::for_agent(suspended);
+        if suspended {
+            self.tasks[index].state = TaskState::Suspended;
+        } else if state == TaskState::Suspended {
+            self.resume_suspended_child(index, child);
         }
         Some(ControlResult::Applied)
+    }
+
+    pub(super) fn agent_resume_grant(&self, agent: usize) -> Option<LaunchGrant> {
+        let (_, member, _) = self.agent_member(agent)?;
+        let child = member.handle;
+        let index = self.launch_index(child)?;
+        (member.completion.is_none() && self.tasks[index].state == TaskState::Suspended)
+            .then_some(LaunchGrant::ResumeAgent(child))
+    }
+
+    pub(crate) fn resume_granted_agent(&mut self) -> Option<()> {
+        let supervisor = self.tasks[self.current].launch.as_ref()?;
+        let LaunchGrant::ResumeAgent(child) = supervisor.grant? else {
+            return None;
+        };
+        let (goal, _, binding) = self.live_agent_member(child)?;
+        let index = self.launch_index(child)?;
+        if self.tasks[index].state != TaskState::Suspended {
+            return None;
+        }
+        let receipt = ResumeReceipt {
+            supervisor: supervisor.handle,
+            goal: goal.handle,
+            agent: binding.handle,
+            child,
+        }
+        .encode();
+        let bytes = receipt.as_flattened();
+        // Queue the receipt before changing state so a full mailbox permits a retry.
+        // Both operations finish in this trap before the parent or agent can run.
+        self.send_reply(Some(ReplyKind::AgentResumed), bytes.len(), |reply| {
+            reply.copy_from_slice(bytes);
+            true
+        })?;
+        self.resume_suspended_child(index, child);
+        Some(())
+    }
+
+    fn resume_suspended_child(&mut self, index: usize, child: usize) {
+        // A suspended blocking syscall retries at its saved PC after resume.
+        self.tasks[index].state = TaskState::Runnable;
+        // A later suspension of the same live child must require a fresh grant.
+        for launch in self
+            .tasks
+            .iter_mut()
+            .filter_map(|task| task.launch.as_mut())
+        {
+            if launch.grant == Some(LaunchGrant::ResumeAgent(child)) {
+                launch.grant = None;
+            }
+        }
     }
 
     pub(crate) fn close_goal(&mut self, handle: usize, fs: &mut RamFs) -> Option<CloseResult> {

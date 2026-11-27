@@ -96,6 +96,8 @@ pub const SYS_GOAL_CREATE_WITH_TIMEOUT: usize = 82;
 pub const SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY: usize = 83;
 pub const SYS_GOAL_LAUNCH_OBSERVER: usize = 84;
 pub const SYS_GOAL_OBSERVE: usize = 85;
+pub const SYS_AGENT_LAUNCH_SUPERVISOR: usize = 86;
+pub const SYS_AGENT_RESUME_GRANTED: usize = 87;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_RAMFS_HANDLE: usize = usize::MAX;
@@ -113,6 +115,8 @@ pub enum RequestKind {
     StageRename = 7,
     /// Empty assignment queued by the owner through `goal_launch_observer`.
     ObserveGoal = 8,
+    /// Empty assignment to resume the agent bound to this launch.
+    ResumeAgent = 9,
 }
 
 impl RequestKind {
@@ -126,6 +130,7 @@ impl RequestKind {
             value if value == Self::PlanDefinition as usize => Some(Self::PlanDefinition),
             value if value == Self::StageRename as usize => Some(Self::StageRename),
             value if value == Self::ObserveGoal as usize => Some(Self::ObserveGoal),
+            value if value == Self::ResumeAgent as usize => Some(Self::ResumeAgent),
             _ => None,
         }
     }
@@ -144,6 +149,8 @@ pub enum ReplyKind {
     DelegationFailed = 7,
     /// Only `goal_observe` can queue this kernel-generated report.
     GoalObservation = 8,
+    /// Only `agent_resume_granted` can queue this kernel-generated receipt.
+    AgentResumed = 9,
 }
 
 impl ReplyKind {
@@ -157,6 +164,7 @@ impl ReplyKind {
             value if value == Self::ResultTooLarge as usize => Some(Self::ResultTooLarge),
             value if value == Self::DelegationFailed as usize => Some(Self::DelegationFailed),
             value if value == Self::GoalObservation as usize => Some(Self::GoalObservation),
+            value if value == Self::AgentResumed as usize => Some(Self::AgentResumed),
             _ => None,
         }
     }
