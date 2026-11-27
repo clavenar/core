@@ -1360,7 +1360,7 @@ boot_checkpoint() {
   qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
     -kernel target/riscv64gc-unknown-none-elf/release/clavenar-kernel \
     -global virtio-mmio.force-legacy=off \
-    -drive "file=$checkpoint_disk,format=raw,if=none,id=checkpoint,cache=writeback" \
+    -drive "file=$checkpoint_disk,format=raw,if=none,id=checkpoint,cache=writeback,readonly=${1:-off}" \
     -device virtio-blk-device,drive=checkpoint
 }
 
@@ -1392,6 +1392,7 @@ Expect a suspended agent, one `grep` delegation, `read_bytes=18` and
 ```text
 agent resume
 wait hello
+recv --checkpoint hello
 recv hello
 goal audit
 goal audit --reads
@@ -1399,30 +1400,44 @@ goal budget
 goal close
 ```
 
-`recv hello` prints `Hello from RamFS`. The recovered goal has zero new
+Both reads print `Hello from RamFS`. The checkpoint read also reports
+`read_bytes=18 reply_bytes=36`. The recovered goal has zero new
 delegations and zero new read audit entries. It still reports
 `read_bytes=18`, and its reply budget shows `available=0 reserved=0 spent=36`.
 The original search was already charged for its reply, and this resume
 charged for forwarding the result.
 
-Quit and run `boot_checkpoint` a third time. Look for
-`agent checkpoint consumed`. At `clsh>`, `agent resume` reports
-`no current agent`. Prepare a fresh checkpoint image to repeat the example.
+Quit and run `boot_checkpoint on` a third time to attach the same image
+read-only. Look for `agent checkpoint completed`. At `clsh>`, run these
+commands.
+
+```text
+recv --checkpoint hello
+recv --checkpoint hello
+agent resume
+```
+
+Both reads print the saved result and the same charges. `agent resume`
+reports `no current agent`. Prepare a fresh checkpoint image to run the
+search again.
 
 Sector 0 contains `CLVCHK01` followed by zeros. Slots 1 and 2 use the
 512-byte journal format. The generation 1 payload starts with byte 1 and
 the 34-byte definition pin. Five little-endian 64-bit words follow in
 order for the read limit, read bytes spent, reply limit, reply bytes spent
 and remaining reply reservation. The last 18 bytes hold the saved
-`Matches` reply. The generation 2 payload is byte 2, which marks the
-checkpoint consumed. An invalid nonblank slot blocks recovery because it
-may have held the consumption record.
+`Matches` reply. The generation 2 completion payload uses the same
+layout with byte 3, the final reply charge and a zero reply reservation.
+A single byte 4 records cancellation. The legacy single-byte 2 marker
+still reports `agent checkpoint consumed`. An invalid nonblank slot
+blocks recovery because it may have held a terminal record.
 [Journal record format](#recover-a-previous-journal-record)
 
-The kernel flushes consumption before queueing the saved reply. A crash
-in that interval can interrupt delivery. In the boot that saved the
-checkpoint, `agent resume` can finish directly and `goal cancel` can
-consume the checkpoint and discard the reply.
+The kernel flushes the completed record before queueing the live reply.
+After a crash in that interval, boot with the same image and use
+`recv --checkpoint hello` to read the completed reply directly. In the
+boot that saved a paused checkpoint, `agent resume` can finish directly
+and `goal cancel` can record cancellation and discard the reply.
 
 ### Invoke a registered file tool over stdio
 

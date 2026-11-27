@@ -407,6 +407,20 @@ fn decimal(mut value: usize, buf: &mut [u8; DIGITS]) -> &[u8] {
     }
 }
 
+pub(super) fn recv_checkpoint() {
+    let mut buffer = [0; clv_abi::MESSAGE_MAX_BYTES];
+    let Some(reply) = agent::receive_checkpoint_reply(&mut buffer) else {
+        return print(b"no completed checkpoint reply\r\n");
+    };
+    print(reply.bytes);
+    print_line(&[
+        b"read_bytes=",
+        decimal(reply.read_spent, &mut [0; DIGITS]),
+        b" reply_bytes=",
+        decimal(reply.reply_spent, &mut [0; DIGITS]),
+    ]);
+}
+
 fn amount(value: Option<usize>, buf: &mut [u8; DIGITS]) -> &[u8] {
     match value {
         Some(value) => decimal(value, buf),

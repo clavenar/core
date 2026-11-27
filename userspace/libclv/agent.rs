@@ -1,21 +1,22 @@
 pub use clv_abi::agent::{
-    AgentLaunch, AgentStatus, CURRENT_AGENT, ControlResult, DefinitionId, DefinitionPin,
-    FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, FIND_GREETING_V4, FIND_GREETING_V5,
-    FIND_GREETING_V6, FIND_GREETING_V7, FIND_GREETING_V8, FileDelegation, FileToolInvocation,
-    PlanIntent, ResumeReceipt,
+    AgentLaunch, AgentStatus, CURRENT_AGENT, CheckpointReply, ControlResult, DefinitionId,
+    DefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, FIND_GREETING_V4,
+    FIND_GREETING_V5, FIND_GREETING_V6, FIND_GREETING_V7, FIND_GREETING_V8, FileDelegation,
+    FileToolInvocation, PlanIntent, ResumeReceipt,
 };
 use clv_abi::agent::{
-    DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES, RUN_CHECKPOINT,
-    RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR,
-    RUN_SUSPENDED, encode_rename_pair,
+    DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES, RECV_CHECKPOINT,
+    RUN_CHECKPOINT, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME,
+    RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED, encode_rename_pair,
 };
 use clv_abi::tool::{FILE_TOOL_MCP, FILE_TOOL_STDIO};
 use clv_abi::{
-    MESSAGE_MAX_BYTES, PATH_MAX_BYTES, Program, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
-    SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_LAUNCH_SUPERVISOR,
-    SYS_AGENT_RESUME, SYS_AGENT_RESUME_GRANTED, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
-    SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STAGE_RENAME,
-    SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND,
+    MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PATH_MAX_BYTES, Program, SYS_AGENT_DELEGATE,
+    SYS_AGENT_DELEGATE_WITH_FILE, SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_INVOKE_FILE_TOOL,
+    SYS_AGENT_LAUNCH_SUPERVISOR, SYS_AGENT_RESUME, SYS_AGENT_RESUME_GRANTED, SYS_AGENT_RUN,
+    SYS_AGENT_RUN_SUSPENDED, SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST,
+    SYS_AGENT_STAGE_RENAME, SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND,
+    SYS_REPLY_RECV,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -284,6 +285,23 @@ pub fn resume_checkpoint() -> Option<(usize, AgentLaunch)> {
             child,
         },
     ))
+}
+
+/// Inspects the completed checkpoint reply and its final byte charges.
+pub fn receive_checkpoint_reply(buffer: &mut [u8]) -> Option<CheckpointReply<'_>> {
+    let (length, read_spent, reply_spent, _) = ecall(
+        SYS_REPLY_RECV,
+        buffer.as_mut_ptr().expose_provenance(),
+        buffer.len(),
+        NO_CHILD_HANDLE,
+        RECV_CHECKPOINT,
+        0,
+    );
+    Some(CheckpointReply {
+        bytes: buffer.get(..length)?,
+        read_spent,
+        reply_spent,
+    })
 }
 
 /// Starts a shell-owned supervisor for this agent's current suspension.

@@ -398,10 +398,14 @@ impl Children {
         }
     }
 
-    pub(super) fn recv(&self, name: &[u8]) {
-        match Program::named(name) {
-            Some(program) => print_reply(self.handles[program as usize]),
-            None => Entry::Recv.usage(),
+    pub(super) fn recv(&self, arguments: &[u8]) {
+        match split_word(arguments) {
+            (b"--checkpoint", b"hello") => super::goal::recv_checkpoint(),
+            (name, b"") => match Program::named(name) {
+                Some(program) => print_reply(self.handles[program as usize]),
+                None => Entry::Recv.usage(),
+            },
+            _ => Entry::Recv.usage(),
         }
     }
 

@@ -1,7 +1,7 @@
 use clv_abi::agent::{
-    AgentLaunch, CURRENT_AGENT, NO_DEFINITION, RUN_CHECKPOINT, RUN_PLAN_DEFINITION,
-    RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED,
-    decode_rename_pair,
+    AgentLaunch, CURRENT_AGENT, NO_DEFINITION, RECV_CHECKPOINT, RUN_CHECKPOINT,
+    RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR,
+    RUN_SUSPENDED, decode_rename_pair,
 };
 use clv_abi::audit::{
     DelegationDenial, EncodedReadDenialSnapshot, PublicationAuditView, ReadAuditView,
@@ -557,8 +557,22 @@ pub(crate) fn dispatch(
             }
             .unwrap_or(SYSCALL_ERROR)
         }
+        SYS_REPLY_RECV
+            if a3 == RECV_CHECKPOINT && a2 == NO_CHILD_HANDLE && stack.contains(a0, a1) =>
+        {
+            scheduler.checkpoint_reply().map_or(SYSCALL_ERROR, |reply| {
+                if !stack.copy_to_user(reply.bytes, a0, a1) {
+                    return SYSCALL_ERROR;
+                }
+                frame.registers[REG_A1] = reply.read_spent;
+                frame.registers[REG_A2] = reply.reply_spent;
+                reply.bytes.len()
+            })
+        }
         SYS_MESSAGE_RECV | SYS_REQUEST_RECV | SYS_REPLY_RECV
-            if (a1 > 0 || number == SYS_REPLY_RECV) && stack.contains(a0, a1) =>
+            if (a1 > 0 || number == SYS_REPLY_RECV)
+                && (number != SYS_REPLY_RECV || a3 == 0)
+                && stack.contains(a0, a1) =>
         {
             let legacy = number == SYS_MESSAGE_RECV;
             let mailbox = match number {

@@ -1,7 +1,8 @@
 # Native syscall ABI
 
 The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.77 adds a durable checkpoint for the local `find-greeting@2` reply.
+Kernel 0.0.78 keeps a completed `find-greeting@2` checkpoint reply readable
+after reboot.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -218,9 +219,10 @@ For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
 and status 1 if the request or send fails.
 
-Call 27 (`reply_recv`) takes a user stack destination in `a0`, its capacity
-in `a1`, and a child handle owned by the caller in `a2`. It waits for a reply or child
-completion. On delivery it returns the byte count in `a0`, the kernel-recorded
+With `a3` set to zero, call 27 (`reply_recv`) takes a user stack destination
+in `a0`, its capacity in `a1`, and a child handle owned by the caller in `a2`.
+It waits for a reply or child completion. On delivery it returns the byte
+count in `a0`, the kernel-recorded
 sender in `a1`, and the child's reply kind in `a2`. A zero-capacity buffer
 can receive a zero-byte reply. During suspension or after completion an empty
 mailbox returns zero in all three registers. An invalid handle, invalid buffer
@@ -930,19 +932,29 @@ When the helper exits successfully, the kernel saves its `Matches` reply
 and the actual budget counts, then suspends the parent before forwarding.
 An owner waiting for the child can issue another command when the child
 parks. The owner resumes the checkpoint. Call 41 with the live agent
-handle consumes the journal record and completes the reply step on that
-launch. Goal cancellation also consumes a live checkpoint before discarding
-the reply.
+handle saves the completed reply and final budget counts before it queues
+the reply on that launch. Goal cancellation saves a distinct terminal state
+before discarding the reply.
 
 After reboot the shell can use call 41 with `a0` set to zero and no open
 goal. The kernel validates the saved definition pin and the reply reservation,
-flushes the consumption record, and completes the reply step under fresh
+flushes the completion record, and completes the reply step under fresh
 handles. On success `a0`, `a1` and `a2` contain the agent, child and goal handles
 respectively. The new goal carries forward the recorded read and reply
 spending and charges for forwarding the saved result. Its continuation
 has reply authority and fresh audit histories. A failed or unconfirmed
-consumption leaves the reply private. A crash after confirmed consumption
-can interrupt delivery, and the checkpoint stays consumed on reboot.
+write leaves the reply private in the running guest.
+
+To read a completed checkpoint, the shell uses call 27 with mode 1 in
+`a3` and `NO_CHILD_HANDLE` in `a2`. Registers `a0` and `a1` supply the user
+stack destination and capacity. On success the call copies the saved reply
+and returns its length in `a0`, read bytes spent in `a1`, and reply bytes spent
+in `a2`. This read can be repeated from a read-only image and adds zero
+charges. The kernel requires a completed record with the current definition
+pin. Other states, unauthorized callers and invalid buffers return -1.
+Existing single-byte consumed records remain terminal. A reboot after the
+completion flush can recover the saved reply even if the mailbox step
+was interrupted.
 [Checkpoint walkthrough](qemu-walkthroughs.md#resume-a-local-search-checkpoint)
 
 ## Audit records

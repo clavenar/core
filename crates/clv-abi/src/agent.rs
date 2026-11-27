@@ -15,6 +15,8 @@ pub const RUN_STAGE_RENAME: usize = 16;
 pub const RUN_STAGE_RENAME_PAIR: usize = 32;
 /// Pause the pinned local search after durably saving its completed reply.
 pub const RUN_CHECKPOINT: usize = 64;
+/// Selects an owner read of the completed checkpoint in reply receive.
+pub const RECV_CHECKPOINT: usize = 1;
 /// A zero agent handle on a delegation call selects the calling task's live agent.
 pub const CURRENT_AGENT: usize = 0;
 
@@ -260,6 +262,13 @@ fn decode_file_action(bytes: &[u8]) -> Option<(u64, usize, &[u8])> {
 pub struct AgentLaunch {
     pub agent: usize,
     pub child: usize,
+}
+
+/// The saved result and final byte charges of a completed checkpoint.
+pub struct CheckpointReply<'a> {
+    pub bytes: &'a [u8],
+    pub read_spent: usize,
+    pub reply_spent: usize,
 }
 
 pub type EncodedResumeReceipt = [[u8; 8]; 4];

@@ -49,7 +49,10 @@ entries! {
     AskFile {
         "askfile [--stream] hello <path>" => "Print file data from one reply or a stream",
     },
-    Recv { "recv <program>" => "Collect a child reply" },
+    Recv {
+        "recv <program>" => "Collect a child reply",
+        "recv --checkpoint hello" => "Read the completed checkpoint reply and charges",
+    },
     Wait { "wait <program>" => "Wait for the child's result" },
     Event { "event" => "Get the next completion event" },
 

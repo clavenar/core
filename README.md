@@ -11,7 +11,8 @@ block journal and restore them at boot.
 [Try a required supervisor review](docs/qemu-walkthroughs.md#require-a-supervisor-review-before-commit) · [Persist a reviewed rename](docs/qemu-walkthroughs.md#persist-a-reviewed-rename) · [Persist a two-file batch](docs/qemu-walkthroughs.md#persist-two-renames-in-one-commit)
 
 A checkpoint can save the result of the local `find-greeting@2` search
-and resume the reply step after reboot.
+and resume the reply step after reboot. A completed reply stays readable
+on the checkpoint image.
 [Resume a local search checkpoint](docs/qemu-walkthroughs.md#resume-a-local-search-checkpoint)
 
 ## Build and run the RV64 kernel

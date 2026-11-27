@@ -664,7 +664,7 @@ impl Scheduler {
             .checkpoint_child
             .is_some_and(|child| self.has_live_checkpoint(child))
         {
-            self.consume_checkpoint()?;
+            self.cancel_checkpoint()?;
         }
         self.stop_goal_work(fs, PublicationOutcome::DiscardedByCancel)
     }
