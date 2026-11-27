@@ -4,7 +4,7 @@ use clv_abi::agent::{
 };
 use clv_abi::audit::DelegationDenial;
 use clv_abi::goal::{
-    CreateOptions, FileOptions, FileRecipient, ReadLimits, RenameOptions, ReviewToken,
+    CreateOptions, CreatePolicy, FileOptions, FileRecipient, ReadLimits, RenameOptions, ReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -138,13 +138,16 @@ pub(crate) fn dispatch(
             .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_CREATE | SYS_GOAL_CREATE_WITH_REPLY_BUDGET => scheduler
             .create_goal(
-                CreateOptions {
-                    child_limit: 1,
-                    reply_limit: (number == SYS_GOAL_CREATE_WITH_REPLY_BUDGET).then_some(a0),
-                    allowed_helper: None,
+                CreatePolicy {
+                    options: CreateOptions {
+                        child_limit: 1,
+                        reply_limit: (number == SYS_GOAL_CREATE_WITH_REPLY_BUDGET).then_some(a0),
+                        allowed_helper: None,
+                    },
+                    read_limits: ReadLimits::default(),
+                    allowed_tool: None,
+                    require_rename_review: false,
                 },
-                ReadLimits::default(),
-                None,
                 FileOptions::default(),
                 None,
                 fs,
@@ -185,10 +188,8 @@ pub(crate) fn dispatch(
             let timeout_ms =
                 (number == SYS_GOAL_CREATE_WITH_TIMEOUT).then_some(frame.registers[REG_A5]);
             words
-                .and_then(CreateOptions::from_registers_with_allowed_tool)
-                .and_then(|(options, limits, tool)| {
-                    scheduler.create_goal(options, limits, tool, files, timeout_ms, fs)
-                })
+                .and_then(CreatePolicy::from_registers)
+                .and_then(|policy| scheduler.create_goal(policy, files, timeout_ms, fs))
                 .unwrap_or(SYSCALL_ERROR)
         }
         SYS_GOAL_RUN | SYS_GOAL_RUN_WITH_REPLY_BUDGET => {

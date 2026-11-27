@@ -62,6 +62,7 @@ entries! {
         "  --helper-read-bytes N" => "Limit helper reads in bytes",
         "  --preserve-file <path>" => "Save input for rename review",
         "  --rename-under <dir>" => "Limit renames to this directory tree",
+        "  --require-rename-review echo" => "Require echo to review a rename before commit",
         "  --allow-helper <program> | --allow-tool <name@rev>" =>
             "Allow one helper or one tool, e.g. text.search@1",
     },

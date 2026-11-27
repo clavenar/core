@@ -74,6 +74,7 @@ keywords!(GoalFlag {
     AllowTool => "--allow-tool",
     PreserveFile => "--preserve-file",
     RenameUnder => "--rename-under",
+    RequireRenameReview => "--require-rename-review",
     Suspended => "--suspended",
     WithFile => "--with-file",
     Delegable => "--delegable",

@@ -290,7 +290,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 45 `goal_run_with_reply_budget` | `a0` goal handle, `a1` program selector, `a2` requested reply bytes | Fresh ordinary child launch handle |
 | 46 `agent_run_with_reply_budget` | Same as call 45, plus `a3` start mode (0 runnable, 1 suspended) | Fresh agent handle, with the child launch handle in `a1` |
 | 47 `goal_grant_file` | `a0` goal handle, `a1` open RamFS file handle owned by the shell | 0 when attached, -1 on rejection |
-| 48 `goal_create_with_options` | `a0` lifetime child limit (1, 2 or 3), `a1` option flags, `a2` total reply bytes if bit 0 is set, `a3` allowed helper program (bit 1) or exact tool ID (bit 4), `a4` total RamFS read bytes if bit 2 is set, `a5` helper RamFS read bytes if bit 3 is set | Fresh goal handle, or -1 on rejection |
+| 48 `goal_create_with_options` | `a0` lifetime child limit (1, 2 or 3), `a1` option flags (bit 5 requires an `echo` rename review), `a2` total reply bytes if bit 0 is set, `a3` allowed helper program (bit 1) or exact tool ID (bit 4), `a4` total RamFS read bytes if bit 2 is set, `a5` helper RamFS read bytes if bit 3 is set | Fresh goal handle, or -1 on rejection |
 | 49 `agent_delegate` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle, or -1 on rejection |
 | 50 `goal_grant_delegable_file` | `a0` goal handle, `a1` shell file handle | 0 when attached with permission for the goal's agent to delegate read access, or -1 on rejection |
 | 51 `agent_delegate_with_file` | `a0` live agent handle, `a1` program selector, `a2` reply bytes to transfer | Fresh helper launch handle with read access to the agent's file, or -1 on rejection |
@@ -447,38 +447,41 @@ A stack buffer of `RENAME_DIFF_MAX_BYTES` suffices for any diff. An empty
 diff also accepts zero capacity. A short buffer or an invalid nonempty
 destination range fails before copying any bytes.
 
-Calls 68 and 75 copy the frozen diff to the owning shell. Once the goal has
-completed successfully and the full diff has been delivered, RamFS checks
-the original revision, source identity at its original name, and vacant
-destination. RamFS checks the source's parent against the goal's rename scope.
+Calls 68 and 75 copy the frozen diff to the owning shell. By default they
+also review it once the goal has completed successfully and the full diff
+has been delivered. RamFS verifies that the revision matches, the original
+name still identifies the same file, the destination is free and the source
+lies within the goal's rename scope.
 When the goal preserves an input file, RamFS also compares the source's
 identity, length and contents with that input. A conflict takes precedence
 over a failed postcondition.
 
-Call 68 returns the following status codes. Call 75 uses the same codes for a
-preview or blocked review and returns the deadline for a passing review.
+Call 68 returns the following status codes. Call 75 uses the same codes with
+a zero token and returns the deadline with a passing token.
 
 | Status in `a3` | Meaning | Token in `a2` |
 | --- | --- | --- |
-| 0 | Preview for an empty diff or a ready, running, failed or cancelled goal. | 0 |
+| 0 | Preview for an empty diff, or for a pending rename on a goal that allows direct review and has yet to complete successfully. | 0 |
 | 1 | Ready to commit. The checks passed. | Nonzero, single-use |
 | 2 | Conflict. The base revision, original source or destination has changed. | 0 |
 | 3 | Postcondition failed. The source falls outside the rename scope or differs from the preserved input. | 0 |
 | 4 | Review unavailable. The kernel cannot prepare publication, represent the deadline or allocate a token. | 0 |
+| 5 | Supervisor review required. The owner received the pending diff. Only a passing call 90 can issue or renew an approval. | 0 |
 
 The first passing review starts a 60-second token lifetime on the kernel's monotonic
 clock. QEMU `virt` provides a 10 MHz RISC-V time counter, so each tick is
-100 nanoseconds. Direct and delegated reviews reuse a live token. For a
+100 nanoseconds. A passing review reuses a live token. For a
 timed goal, call 75 and the delegated receipt report the earlier of the
 token and goal deadlines. If only the token has expired, a passing review
-issues a fresh token. The goal deadline stays fixed. A rejected review
-clears the token and leaves the frozen diff available. A failed copy
+issues a fresh token. The goal deadline stays fixed. A blocked verdict
+(2–4) clears the token and leaves the frozen diff available. A failed copy
 returns -1 before checking the change or altering its token. Call 67 reads
 the diff without changing review state.
 Discard, cancellation, goal expiry, successful close and owner exit invalidate the token.
 Revoking a file grant invalidates the token for a rename staged through that grant.
 
-Call 69 checks the caller, goal state and token. It consumes a matching token
+Call 69 checks the caller, goal state, token and any requirement for
+supervisor approval. It consumes a matching, authorized token
 and returns 3 if only the token has expired. The rename remains staged for
 review or discard. Once the goal expires, call 69 returns -1 for the former
 token and the diff is empty. With a live token, it repeats the RamFS checks
@@ -515,8 +518,8 @@ Ordinary direct children receive read access only. Delegating a file to a
 helper requires a delegable grant. Call 72 verifies that the caller is the
 goal's live agent and that its open descriptor carries this goal's rename
 permission. It uses the same slot, basename checks and publication rules as
-call 66. The owner can review the proposal directly or delegate one review
-through call 89. Only the owner can commit it.
+call 66. By default the owner can review the proposal directly or delegate
+one review through call 89. Only the owner can commit it.
 
 Call 74 accepts the owner's open goal handle in any goal state. It releases
 the reference held by the pending rename and invalidates its review token.
@@ -527,6 +530,14 @@ running goal can stage a replacement under the same rules.
 
 ### Delegating a rename review
 
+Bit 5 of the creation flags requires an `echo` supervisor review for the
+goal's lifetime. Calls 48, 70, 77, 78 and 82 accept this flag, including
+alongside file scopes, budgets and timeouts. It takes no argument word.
+For a pending rename on such a goal, calls 68 and 75 return the names,
+a zero token and status 5. Direct inspection preserves an existing approval
+and its deadline. Call 69 accepts only an approval recorded on that rename
+by the kernel after it queued a passing supervisor receipt.
+
 Call 89 requires a successfully completed goal with a pending rename and
 an available reporting slot. It binds that specific change to a fresh
 `echo` launch and queues an empty `ReviewRename` request (kind 10).
@@ -535,10 +546,10 @@ goal's membership and byte budgets. Reading the request through call 25
 leaves the grant available. Call 24 cannot issue this assignment.
 
 Call 90 copies the full frozen diff in call 67's format to the reviewer.
-RamFS applies the same checks as for the owner's review. The reviewer gets
-the verdict in `a2`. The kernel queues a `RenameReviewed` reply for the
-owner under the reviewer's launch handle. Call 27 returns task 5 as the
-sender and five little-endian RV64 words in the payload.
+RamFS checks the revision, source, destination and goal postconditions.
+The reviewer gets the verdict in `a2`. The kernel queues a `RenameReviewed`
+reply for the owner under the reviewer's launch handle. Call 27 returns
+task 5 as the sender and five little-endian RV64 words in the payload.
 
 | Word | Meaning |
 | --- | --- |

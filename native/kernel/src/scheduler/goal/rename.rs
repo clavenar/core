@@ -17,9 +17,23 @@ fn review_is_live(review: TimedReviewToken, now_ns: u64) -> bool {
     (issued_at_ns..review.deadline_ns).contains(&now_ns)
 }
 
+#[derive(Clone, Copy)]
+enum RenameApproval {
+    Owner(TimedReviewToken),
+    Supervisor(TimedReviewToken),
+}
+
+impl RenameApproval {
+    fn review(self) -> TimedReviewToken {
+        match self {
+            Self::Owner(review) | Self::Supervisor(review) => review,
+        }
+    }
+}
+
 pub(super) struct PendingRename {
     change: StagedRename,
-    review_token: Option<TimedReviewToken>,
+    approval: Option<RenameApproval>,
     reviewer: Option<usize>,
     from_file_grant: bool,
 }
@@ -34,7 +48,8 @@ impl PendingRename {
         self.change.check(fs, policy)?;
         let now_ns = monotonic_nanos();
         if let Some(review) = self
-            .review_token
+            .approval
+            .map(RenameApproval::review)
             .filter(|&review| review_is_live(review, now_ns))
         {
             return Ok(review);
@@ -103,7 +118,7 @@ impl Goal {
         )?;
         self.rename = Some(PendingRename {
             change,
-            review_token: None,
+            approval: None,
             reviewer: None,
             from_file_grant,
         });
@@ -218,9 +233,12 @@ impl Scheduler {
         if !deliver(names) {
             return None;
         }
-        let result = if can_review {
+        let result = if review && goal.require_rename_review {
+            // Inspection preserves the supervisor approval and its original deadline.
+            TimedRenameReview::SupervisorRequired
+        } else if can_review {
             let checked = pending.check_review(fs, &goal.rename_policy, &mut self.next_handle);
-            pending.review_token = checked.ok();
+            pending.approval = checked.ok().map(RenameApproval::Owner);
             review_with_goal_deadline(checked, goal.deadline)
         } else {
             TimedRenameReview::Preview
@@ -265,7 +283,7 @@ impl Scheduler {
             true
         })?;
         let pending = self.goal.as_mut()?.rename.as_mut()?;
-        pending.review_token = checked.ok();
+        pending.approval = checked.ok().map(RenameApproval::Supervisor);
         pending.reviewer = None;
         self.next_handle = next_handle;
         self.tasks[self.current].launch.as_mut()?.grant = None;
@@ -296,9 +314,12 @@ impl Scheduler {
         }
         let goal = self.goal.as_mut()?;
         let pending = goal.rename.as_mut()?;
-        let review = pending
-            .review_token
-            .take_if(|review| review.token == token)?;
+        let approval = pending.approval.take_if(|approval| {
+            approval.review().token == token
+                && (!goal.require_rename_review
+                    || matches!(approval, RenameApproval::Supervisor(_)))
+        })?;
+        let review = approval.review();
         let result = if review_is_live(review, monotonic_nanos()) {
             match pending.change.publish(fs, &goal.rename_policy) {
                 Ok(()) => Some(CommitResult::Committed),

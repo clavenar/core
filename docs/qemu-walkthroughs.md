@@ -11,6 +11,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
 - [Mock planning and registered tools](#mock-planning-and-registered-tools)
 - [Reviewed renames](#reviewed-renames)
   - [Review a staged rename through echo](#review-a-staged-rename-through-echo)
+  - [Require a supervisor review before commit](#require-a-supervisor-review-before-commit)
 - [Helper accounting and revocation](#helper-accounting-and-revocation)
 
 ## Boot and shell
@@ -1406,6 +1407,39 @@ To see a blocked review, repeat on a fresh boot and insert
 grant. The agent still exits with status 0, but the reviewer reports
 `postcondition failed`. The shell refuses the commit. Before closing the
 goal, `cat /draft.txt` prints `changed` and `cat /final.txt` fails to open.
+
+### Require a supervisor review before commit
+
+At a fresh `clsh>` prompt, set `--require-rename-review echo` when creating
+the goal. This makes a passing review by the separate `echo` supervisor a
+condition of publication for this goal.
+
+```text
+write /draft.txt keep
+goal create --preserve-file /draft.txt --require-rename-review echo
+goal grant-file --stage-rename /draft.txt
+agent run hello --stage-rename final.txt
+wait hello
+goal diff
+goal commit
+cat /draft.txt
+goal diff --via echo
+goal commit
+cat /final.txt
+goal close
+```
+
+The first diff shows `rename /draft.txt -> final.txt` and
+`supervisor review required`. The first commit is refused, and reading
+`/draft.txt` prints `keep`. The delegated review identifies the supervisor
+and reports `ready to commit`. The second commit publishes the rename, and
+`/final.txt` contains `keep`. Reading the diff again between approval and
+commit preserves the approval and its original deadline.
+
+To check a stale approval, repeat on a fresh boot and insert
+`write /draft.txt revised` after `goal diff --via echo`. The second commit
+reports `commit conflict`. Before closing the goal, `cat /draft.txt`
+prints `revised` and `cat /final.txt` reports `cannot open path`.
 
 ### Revoke a rename grant after review
 

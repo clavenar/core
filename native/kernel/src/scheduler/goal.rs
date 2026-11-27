@@ -16,8 +16,8 @@ use clv_abi::audit::{
 };
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
-    CancelOutcome, CancelResult, CloseResult, CreateOptions, DiscardResult, FileOptions,
-    GoalDeadline, GoalObservation, GoalStatus, MAX_CHILDREN, ReadLimits,
+    CancelOutcome, CancelResult, CloseResult, CreateOptions, CreatePolicy, DiscardResult,
+    FileOptions, GoalDeadline, GoalObservation, GoalStatus, MAX_CHILDREN,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{LaunchParent, Program, ReplyKind, RequestKind, TaskCompletion};
@@ -87,6 +87,7 @@ pub(super) struct Goal {
     cancelled_before_launch: bool,
     file: Option<FileGrant>,
     rename_policy: RenamePolicy,
+    require_rename_review: bool,
     rename: Option<PendingRename>,
     delegation_audit: AuditHistory<EncodedRecordWithTool>,
     reply_audit: AuditHistory<EncodedReplyRecord>,
@@ -250,13 +251,17 @@ impl Goal {
 impl Scheduler {
     pub(crate) fn create_goal(
         &mut self,
-        options: CreateOptions,
-        read_limits: ReadLimits,
-        allowed_tool: Option<ToolId>,
+        policy: CreatePolicy,
         files: FileOptions,
         timeout_ms: Option<usize>,
         fs: &mut RamFs,
     ) -> Option<usize> {
+        let CreatePolicy {
+            options,
+            read_limits,
+            allowed_tool,
+            require_rename_review,
+        } = policy;
         if self.current != SHELL_TASK_INDEX
             || self.goal.is_some()
             || !(1..=MAX_CHILDREN).contains(&options.child_limit)
@@ -289,6 +294,7 @@ impl Scheduler {
             cancelled_before_launch: false,
             file: None,
             rename_policy,
+            require_rename_review,
             rename: None,
             delegation_audit: AuditHistory::default(),
             reply_audit: AuditHistory::default(),

@@ -22,6 +22,7 @@ pub(crate) struct GoalOptions<'a> {
     pub allowed_tool: Option<ToolId>,
     pub preserve_file: Option<&'a [u8]>,
     pub rename_under: Option<&'a [u8]>,
+    pub require_rename_review: bool,
     pub suspended: bool,
     pub with_file: bool,
 }
@@ -70,6 +71,15 @@ impl<'a> GoalOptions<'a> {
                 }
                 GoalFlag::RenameUnder if matches!(command, GoalCommand::Create) => {
                     parse_path(rest, &mut options.rename_under)?
+                }
+                GoalFlag::RequireRenameReview
+                    if matches!(command, GoalCommand::Create) && !options.require_rename_review =>
+                {
+                    let (b"echo", rest) = split_word(rest) else {
+                        return None;
+                    };
+                    options.require_rename_review = true;
+                    rest
                 }
                 GoalFlag::Suspended
                     if matches!(command, GoalCommand::AgentRun) && !options.suspended =>

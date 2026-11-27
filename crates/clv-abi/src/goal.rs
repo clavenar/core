@@ -77,6 +77,7 @@ pub enum RenameReview {
     Preview,
     Ready(ReviewToken),
     Blocked(PublicationError),
+    SupervisorRequired,
 }
 
 impl RenameReview {
@@ -86,6 +87,7 @@ impl RenameReview {
             Self::Preview => (0, 0),
             Self::Ready(token) => (token.get(), 1),
             Self::Blocked(reason) => (0, reason as usize),
+            Self::SupervisorRequired => (0, 5),
         }
     }
 
@@ -93,6 +95,7 @@ impl RenameReview {
         Some(match (ReviewToken::new(token), status) {
             (None, 0) => Self::Preview,
             (Some(token), 1) => Self::Ready(token),
+            (None, 5) => Self::SupervisorRequired,
             (None, status) => match PublicationError::from_register(status) {
                 Some(reason) => Self::Blocked(reason),
                 None => return None,
@@ -107,6 +110,7 @@ pub enum TimedRenameReview {
     Preview,
     Ready(TimedReviewToken),
     Blocked(PublicationError),
+    SupervisorRequired,
 }
 
 impl TimedRenameReview {
@@ -119,6 +123,7 @@ impl TimedRenameReview {
             Self::Ready(review) => RenameReview::Ready(review.token).registers(),
             Self::Preview => RenameReview::Preview.registers(),
             Self::Blocked(reason) => RenameReview::Blocked(reason).registers(),
+            Self::SupervisorRequired => RenameReview::SupervisorRequired.registers(),
         }
     }
 
@@ -132,6 +137,7 @@ impl TimedRenameReview {
             None => match RenameReview::from_registers(0, detail) {
                 Some(RenameReview::Preview) => Some(Self::Preview),
                 Some(RenameReview::Blocked(reason)) => Some(Self::Blocked(reason)),
+                Some(RenameReview::SupervisorRequired) => Some(Self::SupervisorRequired),
                 _ => None,
             },
         }
@@ -168,7 +174,13 @@ impl RenameReviewReceipt {
         let words: &EncodedRenameReviewReceipt = words.try_into().ok()?;
         let [reviewer, goal, base_revision, token, detail] = words.map(u64::from_le_bytes);
         let review = TimedRenameReview::from_registers(token as usize, detail as usize)?;
-        if reviewer == 0 || goal == 0 || review == TimedRenameReview::Preview {
+        if reviewer == 0
+            || goal == 0
+            || !matches!(
+                review,
+                TimedRenameReview::Ready(_) | TimedRenameReview::Blocked(_)
+            )
+        {
             return None;
         }
         Some(Self {
@@ -377,6 +389,42 @@ impl CreateOptions {
         };
         let (options, limits) = Self::from_registers_with_read_limits(registers)?;
         Some((options, limits, allowed_tool))
+    }
+}
+
+/// Policy encoded in the six words shared by goal creation calls 48, 70, 77, 78 and 82.
+pub struct CreatePolicy {
+    pub options: CreateOptions,
+    pub read_limits: ReadLimits,
+    pub allowed_tool: Option<ToolId>,
+    /// Only the bound echo supervisor can approve publication of a rename.
+    pub require_rename_review: bool,
+}
+
+impl CreatePolicy {
+    const REQUIRE_RENAME_REVIEW: usize = 1 << 5;
+
+    pub fn registers(&self) -> Option<[usize; 6]> {
+        let mut words = self
+            .options
+            .registers_with_allowed_tool(self.read_limits, self.allowed_tool)?;
+        if self.require_rename_review {
+            words[1] |= Self::REQUIRE_RENAME_REVIEW;
+        }
+        Some(words)
+    }
+
+    pub fn from_registers(mut words: [usize; 6]) -> Option<Self> {
+        let require_rename_review = words[1] & Self::REQUIRE_RENAME_REVIEW != 0;
+        words[1] &= !Self::REQUIRE_RENAME_REVIEW;
+        let (options, read_limits, allowed_tool) =
+            CreateOptions::from_registers_with_allowed_tool(words)?;
+        Some(Self {
+            options,
+            read_limits,
+            allowed_tool,
+            require_rename_review,
+        })
     }
 }
 

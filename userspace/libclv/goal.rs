@@ -5,10 +5,10 @@ use clv_abi::audit::{
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
-    CancelOutcome, CancelResult, CloseResult, CommitResult, CreateOptions, DiscardResult,
-    EncodedGoalObservation, FileOptions, FileRecipient, GoalDeadline, GoalDiff, GoalObservation,
-    GoalStatus, PublicationError, ReadLimits, RenameOptions, RenameReview, RenameReviewReceipt,
-    ReviewToken, TimedRenameReview, TimedReviewToken,
+    CancelOutcome, CancelResult, CloseResult, CommitResult, CreateOptions, CreatePolicy,
+    DiscardResult, EncodedGoalObservation, FileOptions, FileRecipient, GoalDeadline, GoalDiff,
+    GoalObservation, GoalStatus, PublicationError, ReadLimits, RenameOptions, RenameReview,
+    RenameReviewReceipt, ReviewToken, TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -141,7 +141,25 @@ pub fn create_with_timeout(
     files: FileOptions,
     timeout_ms: Option<usize>,
 ) -> Option<usize> {
-    let words = options.registers_with_allowed_tool(limits, allowed_tool)?;
+    create_with_policy(
+        CreatePolicy {
+            options,
+            read_limits: limits,
+            allowed_tool,
+            require_rename_review: false,
+        },
+        files,
+        timeout_ms,
+    )
+}
+
+/// Binds rename approval, resource limits and optional file scopes when the goal is created.
+pub fn create_with_policy(
+    policy: CreatePolicy,
+    files: FileOptions,
+    timeout_ms: Option<usize>,
+) -> Option<usize> {
+    let words = policy.registers()?;
     let rename = files.rename;
     if files.read_directory == Some(NO_RAMFS_HANDLE)
         || rename.directory == Some(NO_RAMFS_HANDLE)

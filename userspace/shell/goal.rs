@@ -25,7 +25,11 @@ pub(super) struct CurrentGoal {
     handle: usize,
     agent: Option<usize>,
     review: Option<ReviewToken>,
+    require_rename_review: bool,
 }
+
+const SUPERVISOR_REVIEW_REQUIRED: &[u8] =
+    b"supervisor review required (use goal diff --via echo)\r\n";
 
 fn with_current(current: &mut Option<CurrentGoal>, action: impl FnOnce(&mut CurrentGoal)) {
     match current {
@@ -190,7 +194,9 @@ fn stage_rename(goal: Option<usize>, arguments: &[u8]) {
 
 fn show_diff(goal: &mut CurrentGoal, reviewer: Option<&mut Children>) {
     let mut buffer = [0; clv_abi::goal::RENAME_DIFF_MAX_BYTES];
-    goal.review = None;
+    if !goal.require_rename_review {
+        goal.review = None;
+    }
     let result = if reviewer.is_some() {
         goal::diff(goal.handle, &mut buffer).map(|diff| (diff, TimedRenameReview::Preview))
     } else {
@@ -200,6 +206,7 @@ fn show_diff(goal: &mut CurrentGoal, reviewer: Option<&mut Children>) {
         return print(b"cannot read goal diff\r\n");
     };
     let goal::GoalDiff::Rename { source, new_name } = diff else {
+        goal.review = None;
         return print(b"no staged changes\r\n");
     };
     print_line(&[b"rename ", source, b" -> ", new_name]);
@@ -210,9 +217,13 @@ fn show_diff(goal: &mut CurrentGoal, reviewer: Option<&mut Children>) {
         print_reviewer(&receipt);
         review = receipt.review;
     }
-    if let TimedRenameReview::Ready(approved) = review {
-        goal.review = Some(approved.token);
-    }
+    goal.review = match review {
+        TimedRenameReview::Ready(approved) => Some(approved.token),
+        TimedRenameReview::SupervisorRequired if goal.review.is_some() => {
+            return print(b"supervisor review required (previous receipt retained)\r\n");
+        }
+        _ => None,
+    };
     print_review(review);
 }
 
@@ -230,6 +241,7 @@ pub(super) fn print_reviewer(receipt: &RenameReviewReceipt) {
 pub(super) fn print_review(review: TimedRenameReview) {
     match review {
         TimedRenameReview::Preview => print(b"preview only\r\n"),
+        TimedRenameReview::SupervisorRequired => print(SUPERVISOR_REVIEW_REQUIRED),
         TimedRenameReview::Ready(review) => print_review_deadline(review.deadline_ns),
         TimedRenameReview::Blocked(reason) => print(match reason {
             PublicationError::Conflict => b"conflict\r\n",
@@ -266,6 +278,8 @@ fn commit(goal: &mut CurrentGoal) {
                 Some((_, GoalDeadline::Expired))
             ) {
                 color::print_line(color::YELLOW, b"goal deadline expired");
+            } else if token.is_none() && goal.require_rename_review {
+                print(SUPERVISOR_REVIEW_REQUIRED);
             } else if token.is_none() {
                 print(b"goal commit requires a passing goal diff after completion\r\n");
             } else {
@@ -304,12 +318,13 @@ fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
     let Some((options, b"")) = GoalOptions::parse(arguments, GoalCommand::Create) else {
         return Entry::GoalCreate.usage();
     };
-    match create_goal(options) {
+    match create_goal(&options) {
         Some(handle) => {
             *current = Some(CurrentGoal {
                 handle,
                 agent: None,
                 review: None,
+                require_rename_review: options.require_rename_review,
             });
             print_handle(b"goal created ", handle);
         }
@@ -318,20 +333,23 @@ fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
     }
 }
 
-fn create_goal(options: GoalOptions<'_>) -> Option<usize> {
-    let create = goal::CreateOptions {
-        child_limit: options.children.unwrap_or(1),
-        reply_limit: options.reply_bytes,
-        allowed_helper: options.allowed_helper,
+fn create_goal(options: &GoalOptions<'_>) -> Option<usize> {
+    let policy = goal::CreatePolicy {
+        options: goal::CreateOptions {
+            child_limit: options.children.unwrap_or(1),
+            reply_limit: options.reply_bytes,
+            allowed_helper: options.allowed_helper,
+        },
+        read_limits: options.read_limits,
+        allowed_tool: options.allowed_tool,
+        require_rename_review: options.require_rename_review,
     };
     // Keep all three descriptors open until the kernel has resolved the goal's policies.
     let read_directory = open_policy_handle(options.read_under)?;
     let rename_directory = open_policy_handle(options.rename_under)?;
     let preserve_file = open_policy_handle(options.preserve_file)?;
-    goal::create_with_timeout(
-        create,
-        options.read_limits,
-        options.allowed_tool,
+    goal::create_with_policy(
+        policy,
         goal::FileOptions {
             read_directory: read_directory.as_ref().map(OpenHandle::id),
             rename: goal::RenameOptions {
