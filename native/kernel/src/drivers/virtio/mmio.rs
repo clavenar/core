@@ -75,7 +75,7 @@ impl Device {
         }
     }
 
-    pub(super) fn negotiate(&self, supported_features: u32) -> bool {
+    pub(super) fn negotiate(&self, supported_features: u32) -> Option<u32> {
         self.write(STATUS, ACKNOWLEDGE);
         self.write(STATUS, ACKNOWLEDGE | DRIVER);
 
@@ -83,7 +83,7 @@ impl Device {
         let features = self.read(DEVICE_FEATURES) & supported_features;
         self.write(DEVICE_FEATURES_SEL, 1);
         if self.read(DEVICE_FEATURES) & VERSION_1_HIGH_BIT == 0 {
-            return false;
+            return None;
         }
         // Accept VERSION_1 and the device-specific features supported by the driver.
         self.write(DRIVER_FEATURES_SEL, 0);
@@ -91,7 +91,7 @@ impl Device {
         self.write(DRIVER_FEATURES_SEL, 1);
         self.write(DRIVER_FEATURES, VERSION_1_HIGH_BIT);
         self.write(STATUS, ACKNOWLEDGE | DRIVER | FEATURES_OK);
-        self.has_status(FEATURES_OK)
+        self.has_status(FEATURES_OK).then_some(features)
     }
 
     /// # Safety

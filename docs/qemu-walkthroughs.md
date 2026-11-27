@@ -6,6 +6,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
 
 - [Boot and shell](#boot-and-shell)
   - [Probe a VirtIO block device](#probe-a-virtio-block-device)
+  - [Recover a VirtIO block marker after reboot](#recover-a-virtio-block-marker-after-reboot)
   - [Probe the QEMU host bridge](#probe-the-qemu-host-bridge)
 - [Goals and file grants](#goals-and-file-grants)
 - [Requests, replies and file streams](#requests-replies-and-file-streams)
@@ -101,6 +102,46 @@ with `Ctrl+a`, then `x`. Use the regular boot command to try the same
 kernel with no disk. The block line appears when a modern device is
 attached, and a failed probe reports the error before continuing to the
 shell.
+
+### Recover a VirtIO block marker after reboot
+
+Build the kernel, then run this block at the Linux prompt in `core`. It
+creates a fresh scratch image and attaches it writable with QEMU's
+write-back cache. [QEMU block cache options](https://www.qemu.org/docs/master/system/invocation.html)
+
+```sh
+disk="$(mktemp -t clavenar-demo.XXXXXX)"
+truncate -s 1M "$disk"
+printf 'CLVDEMO1' | dd of="$disk" conv=notrunc status=none
+
+qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
+  -kernel target/riscv64gc-unknown-none-elf/release/clavenar-kernel \
+  -global virtio-mmio.force-legacy=off \
+  -drive "file=$disk,format=raw,if=none,id=demo,cache=writeback,readonly=off" \
+  -device virtio-blk-device,drive=demo
+```
+
+The demo recognizes `CLVDEMO1` followed by zeros across all of sector 0.
+On a writable device with negotiated flush support, it writes `CLVSAVE1`
+and zero padding to a blank sector 1. Look for `virtio block demo flushed`
+before paging. The kernel prints it after the flush completes.
+[VirtIO block specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
+
+Quit QEMU with `Ctrl+a`, then `x`. In the same Linux terminal, boot with
+the existing `$disk` attached read-only.
+
+```sh
+qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
+  -kernel target/riscv64gc-unknown-none-elf/release/clavenar-kernel \
+  -global virtio-mmio.force-legacy=off \
+  -drive "file=$disk,format=raw,if=none,id=demo,readonly=on" \
+  -device virtio-blk-device,drive=demo
+```
+
+Look for `virtio block demo recovered` before `clsh>`. That line confirms
+the full marker sector matched. In the first boot, a read-only attachment
+with a blank sector 1 prints `virtio block demo read-only`, and an
+unrecognized, nonblank sector 1 prints `virtio block demo sector 1 occupied`.
 
 ### Probe the QEMU host bridge
 

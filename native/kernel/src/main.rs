@@ -93,14 +93,33 @@ fn probe_block() {
             uart::write(b" sector0=");
             write_hex(u64::from_be_bytes(probe.prefix) as usize);
             uart::write(b"\r\n");
+            if let Some(demo) = probe.demo {
+                use block::DemoOutcome::*;
+
+                uart::write(match demo {
+                    Ok(Flushed) => b"virtio block demo flushed\r\n",
+                    Ok(Recovered) => b"virtio block demo recovered\r\n",
+                    Ok(ReadOnly) => b"virtio block demo read-only\r\n",
+                    Ok(FlushUnavailable) => b"virtio block demo flush unavailable\r\n",
+                    Ok(Occupied) => b"virtio block demo sector 1 occupied\r\n",
+                    Ok(TooSmall) => b"virtio block demo needs two sectors\r\n",
+                    Err(error) => block_error_message(error),
+                });
+            }
         }
-        Err(error) => uart::write(match error {
-            block::ProbeError::Device => b"virtio block unavailable\r\n",
-            block::ProbeError::Empty => b"virtio block empty\r\n",
-            block::ProbeError::Read => b"virtio block read failed\r\n",
-            block::ProbeError::InvalidCompletion => b"virtio block invalid completion\r\n",
-            block::ProbeError::Timeout => b"virtio block timed out\r\n",
-        }),
+        Err(error) => uart::write(block_error_message(error)),
+    }
+}
+
+fn block_error_message(error: block::ProbeError) -> &'static [u8] {
+    match error {
+        block::ProbeError::Device => b"virtio block unavailable\r\n",
+        block::ProbeError::Empty => b"virtio block empty\r\n",
+        block::ProbeError::Read => b"virtio block read failed\r\n",
+        block::ProbeError::Write => b"virtio block write failed\r\n",
+        block::ProbeError::Flush => b"virtio block flush failed\r\n",
+        block::ProbeError::InvalidCompletion => b"virtio block invalid completion\r\n",
+        block::ProbeError::Timeout => b"virtio block timed out\r\n",
     }
 }
 

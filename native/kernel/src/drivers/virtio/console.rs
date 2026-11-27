@@ -70,7 +70,7 @@ pub(crate) struct Port {
 impl Port {
     fn start(&mut self) -> Result<(), ProbeError> {
         let device = &self.device;
-        if !device.negotiate(0)
+        if device.negotiate(0).is_none()
             || !self.receive.configure(device)
             || !self.transmit.configure(device)
         {
