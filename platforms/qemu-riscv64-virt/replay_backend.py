@@ -1,9 +1,12 @@
-"""Read and serve the recorded host replies for one combined greeting goal."""
+"""Serve and journal the recorded host replies for one combined greeting goal."""
 
+from collections.abc import Callable
 from contextlib import closing
 from pathlib import Path
 import re
 import sqlite3
+from typing import NamedTuple
+from uuid import uuid4
 
 from bridge_protocol import (
     BUDGET_EXHAUSTED, COMBINED_PLAN, COMBINED_TOOL, HostRequest, Reply, SEARCH_GREETING,
@@ -12,42 +15,125 @@ from bridge_protocol import (
 from ollama_backend import MAX_GENERATION_TOKENS, MAX_PROMPT_TOKENS, MAX_TOKENS
 
 
+class RecordedReply(NamedTuple):
+    request_id: str
+    reply: Reply
+
+
 class GoalReplay:
-    def __init__(self, session: str, goal: str, launch: str, plan: Reply, tool: Reply | None):
+    def __init__(
+        self, session: str, goal: str, launch: str, plan: RecordedReply, tool: RecordedReply | None
+    ):
         self.session = session
         self.goal = goal
         self.launch = launch
-        self.plan_reply = plan
-        self.tool_reply = tool
+        self.plan = plan
+        self.tool = tool
         self.plan_request: HostRequest | None = None
         self.tool_request: HostRequest | None = None
 
-    def reply(self, request: HostRequest) -> Reply:
-        plan = self.plan_request
-        if request == plan:
-            return self.plan_reply
-        if plan is None and request.selector == COMBINED_PLAN:
+    def reply(
+        self, request: HostRequest, *, record: Callable[[HostRequest, RecordedReply], None]
+    ) -> Reply:
+        plan_request = self.plan_request
+        if request == plan_request:
+            return self.plan.reply
+        if plan_request is None and request.selector == COMBINED_PLAN:
+            record(request, self.plan)
             self.plan_request = request
-            return self.plan_reply
+            return self.plan.reply
 
-        tool = self.tool_reply
-        if plan is None or tool is None:
+        tool = self.tool
+        if plan_request is None or tool is None:
             return Reply(SERVICE_UNAVAILABLE)
         if request == self.tool_request:
-            return tool
+            return tool.reply
 
         # The fresh boot assigns its own handles. Bind the second reply to the
         # goal and launch that actually received the first reply.
         if (
             self.tool_request is None
             and request.selector == COMBINED_TOOL
-            and request.goal_id == plan.goal_id
-            and request.launch_id == plan.launch_id
-            and request.request_id > plan.request_id
+            and request.goal_id == plan_request.goal_id
+            and request.launch_id == plan_request.launch_id
+            and request.request_id > plan_request.request_id
         ):
+            record(request, tool)
             self.tool_request = request
-            return tool
+            return tool.reply
         return Reply(SERVICE_UNAVAILABLE)
+
+
+class ReplayJournal:
+    def __init__(self, db: sqlite3.Connection, source: Path, replay: GoalReplay):
+        self.db = db
+        (mode,) = db.execute("PRAGMA journal_mode = WAL").fetchone()
+        if mode != "wal":
+            raise RuntimeError("could not enable WAL for the replay journal")
+        db.executescript(f"""
+            PRAGMA synchronous = FULL;
+            PRAGMA foreign_keys = ON;
+
+            CREATE TABLE IF NOT EXISTS replay_sessions (
+                id TEXT PRIMARY KEY NOT NULL,
+                source_journal TEXT NOT NULL,
+                source_session_id TEXT NOT NULL,
+                source_goal_id TEXT NOT NULL,
+                source_launch_id TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS replay_receipts (
+                session_id TEXT NOT NULL REFERENCES replay_sessions(id),
+                request_id TEXT NOT NULL,
+                goal_id TEXT NOT NULL,
+                launch_id TEXT NOT NULL,
+                source_request_id TEXT NOT NULL,
+                stage TEXT NOT NULL CHECK (stage IN ('model', 'tool')),
+                reply INTEGER NOT NULL CHECK (reply BETWEEN 0 AND 255),
+                result BLOB NOT NULL CHECK (length(result) <= {TOOL_RESULT_BYTES}),
+                PRIMARY KEY (session_id, request_id),
+                UNIQUE (session_id, source_request_id)
+            );
+        """)
+        self.session = uuid4().hex
+        with db:
+            db.execute(
+                """
+                INSERT INTO replay_sessions
+                    (id, source_journal, source_session_id, source_goal_id, source_launch_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (self.session, str(source), replay.session, replay.goal, replay.launch),
+            )
+
+    def record(self, request: HostRequest, recorded: RecordedReply) -> None:
+        # Commit the selected reply before returning it to the wire handler.
+        with self.db:
+            self.db.execute(
+                """
+                INSERT INTO replay_receipts
+                    (session_id, request_id, goal_id, launch_id, source_request_id, stage, reply, result)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.session, f"{request.request_id:016x}", f"{request.goal_id:016x}",
+                    f"{request.launch_id:016x}", recorded.request_id,
+                    "tool" if request.is_tool else "model", *recorded.reply,
+                ),
+            )
+
+
+def journal_files(path: Path) -> set[Path | tuple[int, int]]:
+    # SQLite uses adjacent files for its rollback journal and WAL.
+    files: set[Path | tuple[int, int]] = set()
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        entry = Path(f"{path}{suffix}").resolve()
+        files.add(entry)
+        try:
+            stat = entry.stat()
+        except FileNotFoundError:
+            continue
+        files.add((stat.st_dev, stat.st_ino))
+    return files
 
 
 def load_goal_replay(path: Path, session: str, goal: str) -> GoalReplay:
@@ -87,8 +173,8 @@ def load_goal_replay(path: Path, session: str, goal: str) -> GoalReplay:
     if not int(goal, 16) < recorded_id(launch) < plan_id:
         raise ValueError("replay requests have inconsistent ownership or order")
 
-    plan_reply = recorded_plan_reply(plan)
-    if plan_reply.status == SKIP:
+    plan_reply = RecordedReply(plan["request_id"], recorded_plan_reply(plan))
+    if plan_reply.reply.status == SKIP:
         if remaining:
             raise ValueError("a recorded skip must be the only request for its goal")
         return GoalReplay(session, goal, launch, plan_reply, None)
@@ -98,7 +184,8 @@ def load_goal_replay(path: Path, session: str, goal: str) -> GoalReplay:
     (tool,) = remaining
     if launch != tool["launch_id"] or recorded_id(tool["request_id"]) <= plan_id:
         raise ValueError("replay requests have inconsistent ownership or order")
-    return GoalReplay(session, goal, launch, plan_reply, recorded_tool_reply(tool, goal))
+    tool_reply = RecordedReply(tool["request_id"], recorded_tool_reply(tool, goal))
+    return GoalReplay(session, goal, launch, plan_reply, tool_reply)
 
 
 def recorded_plan_reply(plan: sqlite3.Row) -> Reply:

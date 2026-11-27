@@ -1547,15 +1547,18 @@ the IDs. `bridge_journal` still points to the recorded database.
 ```sh
 replay_session=RECORDED_SESSION_ID
 replay_goal=RECORDED_GOAL_ID
+receipt_journal="$(mktemp -d)/replay-receipts.sqlite3"
 python3 platforms/qemu-riscv64-virt/host_bridge.py \
   --mode replay --replay-journal "$bridge_journal" \
-  --replay-session "$replay_session" --replay-goal "$replay_goal"
+  --replay-session "$replay_session" --replay-goal "$replay_goal" \
+  --journal "$receipt_journal"
 ```
 
-The broker prints the recorded session, goal and launch before booting the
-new VM. It opens the source journal read-only and serves the recorded
-host replies from that journal, so you can run replay with both providers
-offline.
+The broker prints a fresh `replay session` ID and the recorded session,
+goal and launch before booting the VM. It opens the source journal
+read-only and serves its saved host replies. You can stop both providers
+before replay.
+The default receipt journal is `target/host-bridge-replay.sqlite3`.
 
 At the new `clsh>` prompt, give the new goal both tool grants and its
 local file grant.
@@ -1572,16 +1575,50 @@ goal close
 
 The output depends on the recorded outcome.
 
-| Recorded outcome | `recv hello` | Local read audit |
-| --- | --- | --- |
-| Model search and successful host MCP call | `Hello from RamFS` and `Hello from MCP` | `read_bytes=18` |
-| Model skip | `host plan skipped the search` | `read_bytes=0` |
-| Model search and host MCP budget refusal | `host tool budget exhausted` | `read_bytes=18` |
+| Recorded outcome | `recv hello` | Local read audit | Receipt stage and reply |
+| --- | --- | --- | --- |
+| Model search and successful host MCP call | `Hello from RamFS` and `Hello from MCP` | `read_bytes=18` | `model 1`, `tool 1` |
+| Model skip | `host plan skipped the search` | `read_bytes=0` | `model 3` |
+| Model search and host MCP budget refusal | `host tool budget exhausted` | `read_bytes=18` | `model 1`, `tool 0` |
 
 After a `search` decision, the local MCP tool searches the fresh guest's
 file. Replay binds the saved replies in order to one new goal and launch.
 Repeating the guest commands in the same VM reports `host model unavailable`.
 Restart replay for another run.
+
+Quit QEMU with `Ctrl+a`, then `x`. In the host terminal, set
+`receipt_session` to the new `replay session` ID from the broker output.
+
+```sh
+receipt_session=REPLAY_SESSION_ID
+python3 - "$receipt_journal" "$receipt_session" <<'PY'
+from contextlib import closing
+from pathlib import Path
+import sqlite3
+import sys
+
+path = Path(sys.argv[1]).resolve().as_uri()
+with closing(sqlite3.connect(path + "?mode=ro", uri=True)) as journal:
+    print("source_journal source_session source_goal source_launch source_request "
+          "goal launch request stage reply result")
+    for row in journal.execute("""
+        SELECT s.source_journal, s.source_session_id, s.source_goal_id, s.source_launch_id,
+               r.source_request_id, r.goal_id, r.launch_id, r.request_id, r.stage, r.reply, r.result
+        FROM replay_sessions AS s
+        LEFT JOIN replay_receipts AS r ON r.session_id = s.id
+        WHERE s.id = ?
+        ORDER BY r.request_id
+    """, (sys.argv[2],)):
+        print(*row)
+PY
+```
+
+Each receipt links the fresh goal, launch and request to its source and
+records the reply the broker selected before sending it to the guest. For
+a successful host call, `result` contains `b'Hello from MCP'`. For a
+partial replay, use a recorded `search` and omit the `goal grant-file`
+command in the new VM. The guest stops at the local search and the query
+shows only the model receipt.
 
 A recorded `skip` must be the goal's sole request. A recorded `search`
 requires a second row for the same launch with a settled MCP result or a

@@ -20,10 +20,11 @@ from bridge_protocol import (
 )
 from mcp_backend import search_fixture
 from ollama_backend import MAX_TOKENS, TokenUsage, choose_action
-from replay_backend import load_goal_replay
+from replay_backend import ReplayJournal, journal_files, load_goal_replay
 
 KERNEL = Path("target/riscv64gc-unknown-none-elf/release/clavenar-kernel")
 JOURNAL = Path("target/host-bridge.sqlite3")
+REPLAY_JOURNAL = Path("target/host-bridge-replay.sqlite3")
 SOCKET_TIMEOUT = 5
 
 MOCK_MAX_UNITS = 2
@@ -333,7 +334,7 @@ def run_qemu(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--journal", type=Path, default=JOURNAL, help="live SQLite journal path")
+    parser.add_argument("--journal", type=Path, help="SQLite journal for live requests or replay receipts")
     parser.add_argument("--replay-journal", type=Path, help="source SQLite journal for offline replay")
     parser.add_argument("--replay-session", help="recorded session ID")
     parser.add_argument("--replay-goal", help="recorded hexadecimal goal handle")
@@ -376,12 +377,20 @@ def main() -> int:
         parser.error(f"build the RV64 release ELF from the Core repository first ({KERNEL})")
 
     if args.mode == "replay":
-        replay = load_goal_replay(*replay_source)
-        print(
-            f"replay source session={replay.session} goal={replay.goal} launch={replay.launch} "
-            f"journal={args.replay_journal.resolve()}", file=sys.stderr, flush=True,
-        )
-        return run_qemu(b"PONG", partial(serve_requests, handle=replay.reply))
+        source = args.replay_journal.resolve()
+        path = (args.journal or REPLAY_JOURNAL).resolve()
+        if journal_files(source) & journal_files(path):
+            parser.error("--journal must be separate from --replay-journal")
+        replay = load_goal_replay(source, args.replay_session, args.replay_goal)
+        with closing(sqlite3.connect(path)) as db:
+            journal = ReplayJournal(db, source, replay)
+            print(f"replay session={journal.session} journal={path}", file=sys.stderr, flush=True)
+            print(
+                f"replay source session={replay.session} goal={replay.goal} launch={replay.launch} "
+                f"journal={source}", file=sys.stderr, flush=True,
+            )
+            handle = partial(replay.reply, record=journal.record)
+            return run_qemu(b"PONG", partial(serve_requests, handle=handle))
 
     if args.mode in PROBE_REPLIES:
         return run_qemu(PROBE_REPLIES[args.mode])
@@ -414,7 +423,7 @@ def main() -> int:
 
         services = {MOCK_GREETING: Service(run_request, MOCK_MAX_UNITS)}
 
-    path = args.journal.resolve()
+    path = (args.journal or JOURNAL).resolve()
     with closing(sqlite3.connect(path, isolation_level=None)) as db:
         journal = Journal(db)
         session = journal.create_session(budget, model, call_budget)
