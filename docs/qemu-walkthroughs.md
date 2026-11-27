@@ -1535,10 +1535,14 @@ unknown remains `in_flight` and keeps its call reservation.
 ### Replay a combined goal offline
 
 Run the [combined walkthrough](#run-ollama-and-both-mcp-searches-in-one-goal)
-once and quit QEMU. From the journal query, take the session and goal IDs
-shared by the `tokens settled` and `calls settled` rows for the successful
-goal. In the same host Bash terminal, replace the two placeholders below
-with those IDs. `bridge_journal` still points to the recorded database.
+and quit QEMU. From the journal query, take the session and goal IDs for
+the recorded outcome you want to replay. A successful search has
+`tokens settled` and `calls settled` rows. The host tool budget refusal
+from the second goal has `tokens settled` and `calls denied` rows. If the
+model skipped the searches, that goal has one `tokens settled` row.
+
+In the same host Bash terminal, replace the two placeholders below with
+the IDs. `bridge_journal` still points to the recorded database.
 
 ```sh
 replay_session=RECORDED_SESSION_ID
@@ -1549,8 +1553,9 @@ python3 platforms/qemu-riscv64-virt/host_bridge.py \
 ```
 
 The broker prints the recorded session, goal and launch before booting the
-new VM. It opens the source journal read-only and serves both host replies
-from that journal, so you can run replay with both providers offline.
+new VM. It opens the source journal read-only and serves the recorded
+host replies from that journal, so you can run replay with both providers
+offline.
 
 At the new `clsh>` prompt, give the new goal both tool grants and its
 local file grant.
@@ -1565,15 +1570,23 @@ goal audit --reads
 goal close
 ```
 
-`recv hello` prints `Hello from RamFS` and `Hello from MCP`, and the read
-audit shows `read_bytes=18`. The local MCP tool searches the fresh guest's
-file. Replay binds the saved model and host tool replies in order to one
-new goal and launch. Repeating the guest commands in the same VM reports
-`host model unavailable`. Restart replay for another run.
+The output depends on the recorded outcome.
 
-The source must contain a settled model `search` decision followed by a
-settled MCP result for the same launch. A denied or in-flight operation,
-missing row, or inconsistent owner prevents the broker from starting QEMU.
+| Recorded outcome | `recv hello` | Local read audit |
+| --- | --- | --- |
+| Model search and successful host MCP call | `Hello from RamFS` and `Hello from MCP` | `read_bytes=18` |
+| Model skip | `host plan skipped the search` | `read_bytes=0` |
+| Model search and host MCP budget refusal | `host tool budget exhausted` | `read_bytes=18` |
+
+After a `search` decision, the local MCP tool searches the fresh guest's
+file. Replay binds the saved replies in order to one new goal and launch.
+Repeating the guest commands in the same VM reports `host model unavailable`.
+Restart replay for another run.
+
+A recorded `skip` must be the goal's sole request. A recorded `search`
+requires a second row for the same launch with a settled MCP result or a
+budget refusal with zero usage. An in-flight request, missing required row,
+or inconsistent owner prevents the broker from starting QEMU.
 
 ### Require an exact tool revision for a goal
 

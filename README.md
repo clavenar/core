@@ -89,10 +89,10 @@ and records both requests under the same goal and agent launch.
 
 ### Replay a recorded goal offline
 
-After a successful combined run, use `--mode replay` with the journal,
-recorded session and goal. The broker serves the saved model decision and
-host MCP result to one goal in a fresh VM. The guest still runs the local
-MCP search under its ordinary grants and budgets.
+After recording a combined run, use `--mode replay` with the journal,
+recorded session and goal. A saved model decision can skip the searches or
+run the local MCP search under the guest's grants and budgets. Replay then
+serves the recorded host MCP result or budget refusal for a search.
 [Replay a combined goal offline](docs/qemu-walkthroughs.md#replay-a-combined-goal-offline)
 
 ## Limit file reads to a directory
