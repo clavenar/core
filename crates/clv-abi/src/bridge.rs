@@ -12,6 +12,7 @@ const PLAN_FRAME_BYTES: usize = HEADER_BYTES + 1;
 const VERSION: u8 = 1;
 const PLAN_REQUEST: u8 = 1;
 const PLAN_REPLY: u8 = 2;
+pub const BUDGET_EXHAUSTED: u8 = 0;
 pub const SEARCH_GREETING: u8 = 1;
 
 #[derive(Clone, Copy)]
@@ -20,6 +21,7 @@ pub enum PlanFailure {
     Unavailable = 1,
     TimedOut = 2,
     InvalidReply = 3,
+    BudgetExhausted = 4,
 }
 
 impl PlanFailure {
@@ -28,6 +30,7 @@ impl PlanFailure {
             1 => Some(Self::Unavailable),
             2 => Some(Self::TimedOut),
             3 => Some(Self::InvalidReply),
+            4 => Some(Self::BudgetExhausted),
             _ => None,
         }
     }

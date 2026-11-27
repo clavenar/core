@@ -34,6 +34,19 @@ ELF entry addresses for `hello`, `shell`, `echo` and `grep`, then
 `Sv39 paging enabled` and the green `clsh>` prompt. Type `help` for the
 command reference. Press `Ctrl+a`, then `x`, to quit QEMU.
 
+## Run the QEMU host broker
+
+After building the kernel, use Python 3.10 or later with its standard
+`sqlite3` module. Run this from the `core` repository root.
+
+```sh
+python3 platforms/qemu-riscv64-virt/host_bridge.py --budget-units 2
+```
+
+The broker gives this VM a two-unit mock allowance and stores its
+reservations and replies in `target/host-bridge.sqlite3`.
+[Run two goals against the host allowance](docs/qemu-walkthroughs.md#run-a-host-backed-mock-plan)
+
 ## Limit file reads to a directory
 
 At a fresh `clsh>` prompt, give `hello` a file that the shell can read but

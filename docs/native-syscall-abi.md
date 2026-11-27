@@ -1,7 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.60 adds a goal-scoped call for the host-backed mock planner.
+Kernel 0.0.61 adds a distinct budget-exhausted reply for the host-backed mock planner.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -365,16 +365,18 @@ boot probe. Each frame starts with its total length in bytes.
 | 3–10 | Request ID as a little-endian 64-bit integer |
 | 11 | Selector for version 1 plan frames, which are 12 bytes long |
 
-The plan request uses selector 1 for `find-greeting`. A reply with selector 1
-chooses the pinned search. The kernel assembles frames across reads, discards
+The plan request uses selector 1 for `find-greeting`. In a reply, selector 1
+chooses the pinned search and selector 0 reports host budget exhaustion.
+The kernel assembles frames across reads, discards
 complete frames addressed to another launch and retires the port for plan
 requests if a length falls outside the frame bounds. The guest client checks
 the returned version, kind, request ID and action before asking the kernel
 to invoke the existing registered file tool.
 
-Failure codes in `a1` and the `HostPlanFailed` reply are 1 for unavailable
-or denied, 2 for timeout, and 3 for an invalid reply. The typed failure
-reply spends one byte of the agent's reply allowance.
+Failure codes in `a1` are 1 for unavailable or denied, 2 for timeout and 3
+for an invalid reply. The agent uses the same codes in a `HostPlanFailed`
+reply and uses code 4 for host budget exhaustion. The typed failure reply
+spends one byte of the agent's reply allowance.
 [QEMU walkthrough](qemu-walkthroughs.md#run-a-host-backed-mock-plan)
 
 ### Goal creation

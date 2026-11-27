@@ -1,4 +1,4 @@
-pub use clv_abi::bridge::{PlanFailure, SEARCH_GREETING};
+pub use clv_abi::bridge::{BUDGET_EXHAUSTED, PlanFailure, SEARCH_GREETING};
 use clv_abi::{
     SYS_HOST_BRIDGE,
     bridge::{MAX_FRAME_BYTES, POLL_PLAN, SUBMIT_PLAN},

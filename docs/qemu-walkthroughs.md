@@ -66,82 +66,25 @@ starts a fresh quantum when the timer fires or a stopped task is replaced.
 ### Probe the QEMU host bridge
 
 Run this from an interactive terminal in the Core repository after building
-the kernel. The Python 3 fixture creates a private Unix socket and launches
+the kernel. The host broker creates a private Unix socket and launches
 QEMU with a single modern VirtIO console port. The UART carries `clsh>`.
 The boot probe exchanges four-byte `PING` and `PONG` messages after Sv39
 activation, with a 500 ms deadline. A successful probe leaves the port
 available for the host-backed plan. [VirtIO MMIO and console specification](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)
 
 ```sh
-python3 - search <<'PY'
-import socket
-import struct
-import subprocess
-import sys
-from tempfile import TemporaryDirectory
-
-plan = struct.Struct("<BBBQB")
-actions = {"search": 1, "invalid-plan": 2, "silent-plan": None}
-mode = sys.argv[1]
-reply = b"PONG" if mode in actions else mode.encode("ascii")
-
-def serve_plans(peer, wire, action):
-    while first := wire.read(1):
-        if first[0] != plan.size:
-            raise RuntimeError("invalid plan request length")
-        size, version, kind, request_id, selector = plan.unpack(
-            first + wire.read(plan.size - 1)
-        )
-        if (version, kind, selector) != (1, 1, 1) or request_id == 0:
-            raise RuntimeError("invalid plan request")
-        if action is not None:
-            peer.sendall(plan.pack(size, 1, 2, request_id, action))
-
-with TemporaryDirectory(prefix="clavenar-bridge-") as directory:
-    path = f"{directory}/bridge.sock"
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-        listener.settimeout(5)
-        listener.bind(path)
-        listener.listen(1)
-        with open("/dev/tty", "rb") as terminal:
-            guest = subprocess.Popen([
-                "qemu-system-riscv64", "-machine", "virt", "-accel", "tcg",
-                "-m", "128M", "-smp", "1", "-bios", "default", "-nographic",
-                "-nic", "none", "-kernel",
-                "target/riscv64gc-unknown-none-elf/release/clavenar-kernel",
-                "-global", "virtio-mmio.force-legacy=off",
-                "-chardev", f"socket,id=bridge,path={path},server=off",
-                "-device", "virtio-serial-device,max_ports=1",
-                "-device", "virtconsole,chardev=bridge,nr=0",
-            ], stdin=terminal)
-        try:
-            peer, _ = listener.accept()
-            with peer, peer.makefile("rb") as wire:
-                peer.settimeout(5)
-                if wire.read(4) != b"PING":
-                    raise RuntimeError("expected PING from the guest")
-                if reply:
-                    peer.sendall(reply)
-                if mode in actions:
-                    peer.settimeout(None)
-                    serve_plans(peer, wire, actions[mode])
-                raise SystemExit(guest.wait())
-        finally:
-            if guest.poll() is None:
-                guest.terminate()
-                guest.wait()
-PY
+bridge_journal="$(mktemp -d)/host-bridge.sqlite3"
+python3 platforms/qemu-riscv64-virt/host_bridge.py \
+  --journal "$bridge_journal" --budget-units 2
 ```
 
 Look for `host bridge ready` between `Sv39 paging enabled` and `clsh>`.
 At the prompt, run the host-backed mock plan example. Press `Ctrl+a`, then
-`x`, to exit QEMU. Pass `PONG` to answer the boot probe alone.
+`x`, to exit QEMU. Use `--mode probe-only` to exercise the boot probe by itself.
 [Host-backed mock plan](#run-a-host-backed-mock-plan)
 
-Rerun with `python3 - '' <<'PY'` to leave the host peer silent. The kernel
-prints `host bridge timed out` and continues to the shell. Use `PONX` as
-the reply to see `host bridge invalid reply`. The standard boot command
-skips the optional probe.
+Rerun with `--mode silent-probe` to see `host bridge timed out` before the
+shell, or `--mode invalid-probe` to see `host bridge invalid reply`.
 
 ### Launch a child and collect its result
 
@@ -1281,12 +1224,12 @@ toward the reply budget.
 
 ### Run a host-backed mock plan
 
-Start the bridge fixture above with its `search` argument. In revision 5,
+Start the host broker with the two-unit allowance above. In revision 5,
 `hello` requests an action from the host before invoking the registered
 `text.search@1` tool over MCP. The request carries a launch ID and plan
 selector. The approved action selects the literal `Hello` from the pinned
 definition, and the goal's grant supplies the file.
-[Host fixture](#probe-the-qemu-host-bridge) · [Revision 5 definition](../userspace/hello/definitions/find-greeting-v5.toml)
+[Start the broker](#probe-the-qemu-host-bridge) · [Revision 5 definition](../userspace/hello/definitions/find-greeting-v5.toml)
 
 ```text
 goal create --children 2 --allow-tool text.search@1 --read-bytes 18 --reply-bytes 1042
@@ -1304,17 +1247,52 @@ goal close
 `recv hello` prints `Hello from RamFS`. The delegation audit shows one
 accepted invocation of `text.search@1`, and the read audit shows
 `read_bytes=18`. The local MCP session and forwarded result consume
-462 reply bytes.
+462 guest reply bytes. The host broker reserves two mock units before
+dispatch and settles one before replying.
 
-Restart the fixture with `invalid-plan` or `silent-plan` in place of
-`search` and repeat the same commands. An unapproved action prints
+Repeat the commands in the **same QEMU boot**. With one host unit
+available, the broker declines the next request before dispatch.
+`recv hello` prints `host plan budget exhausted`, the delegation history
+is empty, and `goal audit --reads` reports `read_bytes=0`.
+
+Quit QEMU with `Ctrl+a`, then `x`. In the same host terminal, reopen the
+SQLite journal to inspect the recorded maximum and actual usage.
+
+```sh
+python3 - "$bridge_journal" <<'PY'
+from contextlib import closing
+from pathlib import Path
+import sqlite3
+import sys
+
+path = Path(sys.argv[1]).resolve().as_uri()
+with closing(sqlite3.connect(path + "?mode=ro", uri=True)) as journal:
+    print("session request state max_units used_units reply")
+    for row in journal.execute(
+        "SELECT session_id, request_id, state, max_units, used_units, reply "
+        "FROM requests ORDER BY session_id, request_id"
+    ):
+        print(*row)
+PY
+```
+
+The two rows share a host session ID and end in `settled 2 1 1` and
+`denied 2 0 0`. In the denied row, `max_units` records the required
+allowance. Replaying a request with the same session and launch ID
+returns the stored reply. Each QEMU launch has its own host session
+and allowance, even when it reuses a journal.
+
+Restart the broker with `--mode invalid-plan` or `--mode silent-plan`
+and run one goal in that boot. An unapproved action prints
 `invalid host plan reply`. A silent planner prints `host plan timed out`
 after two seconds. In both cases, the delegation history is empty,
 `read_bytes=0`, and the failure reply consumes one reply byte.
 
 With `silent-plan`, run `goal cancel` immediately after `agent run` to
 cancel while the request is pending. Then `wait hello` prints
-`hello cancelled` and the delegation and read histories are empty.
+`hello cancelled` and the delegation and read histories are empty. The
+journal keeps the operation `in_flight` with its two host units reserved.
+A replay of an `in_flight` request leaves that reservation in place.
 
 ### Require an exact tool revision for a goal
 

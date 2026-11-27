@@ -534,6 +534,7 @@ fn display_reply(kind: ReplyKind, bytes: &[u8]) {
             print(match reason {
                 Some(PlanFailure::Unavailable) => b"host bridge unavailable\r\n",
                 Some(PlanFailure::TimedOut) => b"host plan timed out\r\n",
+                Some(PlanFailure::BudgetExhausted) => b"host plan budget exhausted\r\n",
                 Some(PlanFailure::InvalidReply) | None => b"invalid host plan reply\r\n",
             });
         }

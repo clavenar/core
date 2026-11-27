@@ -136,6 +136,7 @@ fn run_plan(kind: RequestKind, bytes: &[u8]) -> usize {
             if host {
                 let failure = match bridge::plan_action() {
                     Ok(bridge::SEARCH_GREETING) => return mcp_client::run(&request),
+                    Ok(bridge::BUDGET_EXHAUSTED) => bridge::PlanFailure::BudgetExhausted,
                     Ok(_) => bridge::PlanFailure::InvalidReply,
                     Err(reason) => reason,
                 };
