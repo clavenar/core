@@ -161,7 +161,7 @@ impl Goal {
         outcome: Option<PublicationOutcome>,
     ) -> DiscardResult {
         let discarded = self.discard_rename(fs, outcome);
-        self.rename_policy.release_input(fs);
+        self.rename_policy.release_inputs(fs);
         discarded
     }
 }

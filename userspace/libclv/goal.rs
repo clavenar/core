@@ -87,12 +87,12 @@ pub fn create_with_preserved_file(
         allowed_tool,
         RenameOptions {
             directory: None,
-            preserve_file,
+            preserve_files: [preserve_file, None],
         },
     )
 }
 
-/// Binds the owner's rename directory and preserved input together at goal creation.
+/// Binds a rename directory and an optional preserved file for a single-rename goal.
 pub fn create_with_rename_options(
     options: CreateOptions,
     limits: ReadLimits,

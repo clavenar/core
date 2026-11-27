@@ -741,7 +741,7 @@ file. It selects whole lines containing a case-sensitive literal. Single or
 double quotes can enclose a pattern with spaces. An empty quoted pattern
 selects every line. The shell passes the opened file and the pattern together.
 A delegated search receives the same arguments using the agent's file grant.
-The interactive shell accepts up to 128 bytes for the entire command line.
+The interactive shell accepts up to 256 bytes for the entire command line.
 The launch argument can hold up to 64 bytes.
 
 ```text
@@ -1662,14 +1662,15 @@ with the original reviewer.
 ### Publish two renames in one commit
 
 At a fresh `clsh>` prompt, use `--rename-limit 2` to give the goal two
-staging slots. The shell stages the first rename and grants `hello`
-permission to stage the second. Both changes use the same RamFS base.
+staging slots and repeat `--preserve-file` to capture both inputs at
+creation. The shell stages the first rename and grants `hello` permission to
+stage the second. Both changes use the same RamFS base.
 
 ```text
 mkdir /work
 write /work/draft-a.txt alpha
 write /work/draft-b.txt beta
-goal create --rename-limit 2 --rename-under /work --require-rename-review echo
+goal create --rename-limit 2 --rename-under /work --require-rename-review echo --preserve-file /work/draft-a.txt --preserve-file /work/draft-b.txt
 goal stage-rename /work/draft-a.txt final-a.txt
 goal grant-file --stage-rename /work/draft-b.txt
 agent run hello --stage-rename final-b.txt
@@ -1688,6 +1689,18 @@ The diff shows both renames and a single reviewer receipt. Before commit
 together. The reads print `alpha` and `beta`. Both audit rows show
 `outcome=published` with the same base revision, new revision and reviewer.
 
+To check a failed postcondition, run the sequence again on a fresh boot with
+one of these changes.
+
+- Replace the file grant and agent launch with `agent run hello` to stage only
+  the first rename.
+- Run `write /work/draft-b.txt revised` after `goal create` and before either
+  rename is staged.
+
+In both cases `goal diff --via echo` reports `postcondition failed` and
+`goal commit` requires a passing review. Use `ls /work` and `cat` on the two
+draft paths to verify their names and contents at review time.
+
 For a conflict, start on a fresh boot and run `write /work/draft-b.txt revised`
 just before `goal commit`. The commit reports `commit conflict` and both
 audit rows report `outcome=conflict`. Before closing the goal, read the original
@@ -1698,8 +1711,7 @@ Both sources must be distinct. Each destination must be free in its parent
 directory and distinct from any other staged destination there. Discard,
 cancellation and goal expiry remove the entire pending batch. Revoking a
 file grant also removes the batch if it contains a rename staged under
-that grant. With `--preserve-file`, the batch must rename the selected file
-with its original contents.
+that grant.
 
 ## Helper accounting and revocation
 

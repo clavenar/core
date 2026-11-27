@@ -20,7 +20,7 @@ pub(crate) struct GoalOptions<'a> {
     pub read_under: Option<&'a [u8]>,
     pub allowed_helper: Option<Program>,
     pub allowed_tool: Option<ToolId>,
-    pub preserve_file: Option<&'a [u8]>,
+    pub preserve_files: [Option<&'a [u8]>; MAX_GOAL_RENAMES],
     pub rename_under: Option<&'a [u8]>,
     pub rename_limit: Option<usize>,
     pub require_rename_review: bool,
@@ -68,7 +68,11 @@ impl<'a> GoalOptions<'a> {
                     rest
                 }
                 GoalFlag::PreserveFile if matches!(command, GoalCommand::Create) => {
-                    parse_path(rest, &mut options.preserve_file)?
+                    let slot = options
+                        .preserve_files
+                        .iter_mut()
+                        .find(|slot| slot.is_none())?;
+                    parse_path(rest, slot)?
                 }
                 GoalFlag::RenameUnder if matches!(command, GoalCommand::Create) => {
                     parse_path(rest, &mut options.rename_under)?

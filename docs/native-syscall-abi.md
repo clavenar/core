@@ -1,8 +1,8 @@
 # Native syscall ABI
 
 The RV64 prototype implements 76 calls numbered from 0 through 75.
-Kernel 0.0.53 uses one call for delegation audits and one for read audits.
-Rebuild guest programs with the current `libclv` to use the compacted ABI.
+Kernel 0.0.54 adds a second preserved-file descriptor in version 2 of the
+goal creation request.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -280,7 +280,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 
 | Call | Arguments | Result in `a0` |
 | --- | --- | --- |
-| 33 `goal_create` | `a0` request address in the owner's stack, `a1` request size in bytes (88 for version 1) | Fresh goal handle, or -1 on rejection |
+| 33 `goal_create` | `a0` request address in the owner's stack, `a1` request size (88 bytes for version 1, 96 bytes for version 2) | Fresh goal handle, or -1 on rejection |
 | 34 `goal_run` | `a0` goal handle, `a1` program selector | Fresh child launch handle, or -1 on failure |
 | 35 `goal_status` | `a0` goal handle | State tag, member in `a1`, detail in `a2`, and goal deadline in `a3` (0 for unlimited, absolute guest nanoseconds while armed, all ones for expired) |
 | 36 `goal_close` | `a0` goal handle | 0 on release, 1 while running |
@@ -326,12 +326,12 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 
 ### Goal creation
 
-Call 33 copies a single request from the owner's stack. Version 1 uses
-eleven little-endian 64-bit words.
+Call 33 copies a single request from the owner's stack. Version 1 uses the
+first eleven little-endian 64-bit words. Version 2 adds word 11.
 
 | Word | Meaning |
 | --- | --- |
-| 0 | Request version (1) |
+| 0 | Request version (1 or 2) |
 | 1 | Lifetime child limit (1, 2 or 3) |
 | 2 | Policy flags |
 | 3 | Total reply bytes when flag bit 0 is set |
@@ -340,8 +340,9 @@ eleven little-endian 64-bit words.
 | 6 | Helper RamFS read bytes when bit 3 is set |
 | 7 | Optional read-directory descriptor |
 | 8 | Optional rename-directory descriptor |
-| 9 | Optional preserved-file descriptor |
+| 9 | Optional first preserved-file descriptor |
 | 10 | Timeout in milliseconds, zero for an untimed goal |
+| 11 | Optional second preserved-file descriptor (version 2) |
 
 Bits 1 and 4 are mutually exclusive. With neither set, the goal allows
 any helper permitted by its grants. Each budget word applies only when its
@@ -353,10 +354,11 @@ descriptor. A read or rename directory must be open in the owner's handle
 table. The goal pins the selected directories until close or owner exit.
 RamFS checks the source's directory ancestry at rename staging, review and
 commit. On call 6 it checks the open file's current parent ancestry before
-accounting for bytes or changing the cursor. A preserved input must be a
-linked writable file. The kernel retains that file and snapshots all its
-contents (0–256 bytes), independent of its descriptor cursor. The owner
-can close the supplied descriptors after creation.
+accounting for bytes or changing the cursor. Each preservation descriptor
+must resolve to a distinct linked writable file. The number of protected
+files must fit the goal's rename limit. The kernel retains each file and
+snapshots all its contents (0–256 bytes), independent of its descriptor
+cursor. The owner can close the supplied descriptors after creation.
 
 An unsupported version, wrong size, invalid stack range, unknown flags,
 invalid policy, descriptor or timeout, busy slot, or exhausted handles
@@ -481,9 +483,9 @@ Set `a3` to 0 to preview the diff or to 1 to request review. For a goal
 that allows owner review, the kernel checks the whole diff once the goal
 has completed successfully and the full copy has succeeded. RamFS verifies
 the revision, each source's identity at its original name, each free
-destination and the goal's rename scope. A goal with a preserved input
-must include a rename of that file with its original contents. A conflict
-takes precedence over a failed postcondition.
+destination and the goal's rename scope. The batch must include a rename
+of every preserved file with the bytes captured at goal creation. A
+conflict takes precedence over a failed postcondition.
 
 An approved owner review returns a nonzero, single-use token in `a2` and an
 absolute guest deadline in nanoseconds in `a3`. With a zero token, `a3`
@@ -493,7 +495,7 @@ contains one of these verdicts.
 | --- | --- |
 | 0 | Preview. Also returned for an empty diff or a goal that allows owner review and has yet to complete successfully. |
 | 2 | Conflict. The base revision, original source or destination has changed. |
-| 3 | Postcondition failed. A source falls outside the rename scope, or the diff fails to rename the preserved input with its original contents. |
+| 3 | Postcondition failed. A source falls outside the rename scope, or a preserved file is missing from the batch or has different contents. |
 | 4 | Review unavailable. The kernel cannot prepare publication, represent the deadline or allocate a token. |
 | 5 | Supervisor review required. A passing delegated review issues or renews approval. |
 
@@ -524,7 +526,7 @@ writes to linked files and publication advance the revision. A mutation
 requiring a new revision fails if the counter is exhausted.
 
 Successful publication, cancellation, goal expiry, close or owner exit
-releases the preserved input.
+releases the preserved files.
 
 Call 63 requires a linked writable RamFS file and an empty file-grant slot.
 The direct agent receives read access and permission to stage a rename.
@@ -539,7 +541,7 @@ Call 66 accepts the owner's open goal handle in any goal state. It releases
 the references held by the pending batch and invalidates its review token.
 The owner can discard a proposal even when its review returned no token.
 The public file and RamFS revision stay intact. The goal retains its lifecycle
-state, file grant, preserved input, budgets and audit history. A ready or
+state, file grant, preserved files, budgets and audit history. A ready or
 running goal can stage a replacement under the same rules.
 
 ### Delegating a rename review
@@ -636,7 +638,7 @@ derived from that grant, including copies already held by helpers. If the
 batch contains a rename staged through the grant, the call also discards
 the batch and invalidates its review token. Selectors 0 and 1 of call 73
 include these discard rows. The discard flag in `a1` describes that same
-revocation. The goal retains its preserved input.
+revocation. The goal retains its preserved files.
 Only the owning shell can call it. Each read and revocation runs
 to completion on the boot hart. Bytes delivered earlier stay charged. A later
 read using a revoked descriptor fails before copying or charging bytes. Other

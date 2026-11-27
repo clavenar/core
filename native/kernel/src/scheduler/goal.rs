@@ -259,6 +259,7 @@ impl Scheduler {
         if self.current != SHELL_TASK_INDEX
             || self.goal.is_some()
             || !(1..=MAX_CHILDREN).contains(&options.child_limit)
+            || files.rename.preserve_files.iter().flatten().count() > rename_limit
         {
             return None;
         }

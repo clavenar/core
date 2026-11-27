@@ -14,7 +14,7 @@ use command::Command;
 use core::panic::PanicInfo;
 use help::Entry;
 
-const LINE_LIMIT: usize = 128;
+const LINE_LIMIT: usize = 256;
 
 // SAFETY: The kernel enters this unique symbol with an aligned user stack.
 #[unsafe(no_mangle)]

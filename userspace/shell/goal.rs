@@ -344,17 +344,23 @@ fn create_goal(options: &GoalOptions<'_>) -> Option<usize> {
         require_rename_review: options.require_rename_review,
         rename_limit: options.rename_limit.unwrap_or(1),
     };
-    // Keep all three descriptors open until the kernel has resolved the goal's policies.
+    // Keep the policy descriptors open through goal creation.
     let read_directory = open_policy_handle(options.read_under)?;
     let rename_directory = open_policy_handle(options.rename_under)?;
-    let preserve_file = open_policy_handle(options.preserve_file)?;
+    let [first_file, second_file] = options.preserve_files;
+    let preserve_files = [
+        open_policy_handle(first_file)?,
+        open_policy_handle(second_file)?,
+    ];
     goal::create_with_policy(
         policy,
         goal::FileOptions {
             read_directory: read_directory.as_ref().map(OpenHandle::id),
             rename: goal::RenameOptions {
                 directory: rename_directory.as_ref().map(OpenHandle::id),
-                preserve_file: preserve_file.as_ref().map(OpenHandle::id),
+                preserve_files: preserve_files
+                    .each_ref()
+                    .map(|file| file.as_ref().map(OpenHandle::id)),
             },
         },
         options.timeout_ms,

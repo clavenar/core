@@ -14,7 +14,7 @@ const _: () = assert!(DIFF_CAPACITY <= RENAME_DIFF_MAX_BYTES);
 pub(crate) struct RenamePolicy {
     // RamFS refuses rmdir on this directory for the lifetime of the owning goal.
     pub(crate) directory: DirectoryId,
-    preserved_file: Option<PreservedFile>,
+    preserved_files: [Option<PreservedFile>; MAX_GOAL_RENAMES],
 }
 
 impl RenamePolicy {
@@ -23,18 +23,29 @@ impl RenamePolicy {
             None => DirectoryId::Root,
             Some(fd) => caller.directory_for_handle(fd)?,
         };
-        let preserved_file = match options.preserve_file {
-            Some(fd) => Some(PreservedFile::capture(fs, caller.node_for_handle(fd)?)?),
-            None => None,
-        };
+        let mut preserved_files = [const { None }; MAX_GOAL_RENAMES];
+        for (input, fd) in preserved_files.iter_mut().zip(options.preserve_files) {
+            if let Some(fd) = fd {
+                *input = Some(PreservedFile::capture(fs, caller.node_for_handle(fd)?)?);
+            }
+        }
+        if let [Some(first), Some(second)] = &preserved_files
+            && first.file_index == second.file_index
+        {
+            return None;
+        }
+        // Retain the files only after every descriptor and identity has been checked.
+        for input in preserved_files.iter().flatten() {
+            fs.retain(Node::WritableFile(input.file_index));
+        }
         Some(Self {
             directory,
-            preserved_file,
+            preserved_files,
         })
     }
 
-    pub(crate) fn release_input(&mut self, fs: &mut RamFs) {
-        if let Some(input) = self.preserved_file.take() {
+    pub(crate) fn release_inputs(&mut self, fs: &mut RamFs) {
+        for input in self.preserved_files.iter_mut().filter_map(Option::take) {
             fs.release(Node::WritableFile(input.file_index));
         }
     }
@@ -48,15 +59,13 @@ struct PreservedFile {
 }
 
 impl PreservedFile {
-    fn capture(fs: &mut RamFs, node: Node) -> Option<Self> {
+    fn capture(fs: &RamFs, node: Node) -> Option<Self> {
         let (file_index, file) = fs.linked_file(node)?;
-        let snapshot = Self {
+        Some(Self {
             file_index,
             contents: file.contents,
             length: file.length,
-        };
-        fs.retain(node);
-        Some(snapshot)
+        })
     }
 
     fn matches(&self, file: &WritableFile) -> bool {
@@ -210,7 +219,7 @@ impl StagedRenames {
         {
             return Err(PublicationError::PostconditionFailed);
         }
-        if let Some(input) = &policy.preserved_file {
+        for input in policy.preserved_files.iter().flatten() {
             let includes_input = self
                 .iter()
                 .any(|rename| rename.file_index == input.file_index);

@@ -230,7 +230,7 @@ pub struct ReadLimits {
 #[derive(Clone, Copy, Default)]
 pub struct RenameOptions {
     pub directory: Option<usize>,
-    pub preserve_file: Option<usize>,
+    pub preserve_files: [Option<usize>; MAX_GOAL_RENAMES],
 }
 
 /// Owner's descriptors for the independent RamFS policies of one goal.
@@ -432,8 +432,10 @@ impl CreatePolicy {
     }
 }
 
-/// Version, six policy words, three optional RamFS handles and timeout in milliseconds.
-pub type EncodedGoalCreate = [[u8; 8]; 11];
+const GOAL_CREATE_V1_WORDS: usize = 11;
+
+/// Version 2 appends an optional second preserved-file handle to the version 1 request.
+pub type EncodedGoalCreate = [[u8; 8]; GOAL_CREATE_V1_WORDS + 1];
 
 pub struct GoalCreateRequest {
     pub policy: CreatePolicy,
@@ -442,18 +444,20 @@ pub struct GoalCreateRequest {
 }
 
 impl GoalCreateRequest {
-    const VERSION: u64 = 1;
+    const VERSION: u64 = 2;
 
     pub fn encode(&self) -> Option<EncodedGoalCreate> {
+        let [first_file, second_file] = self.files.rename.preserve_files;
         let handles = [
             self.files.read_directory,
             self.files.rename.directory,
-            self.files.rename.preserve_file,
+            first_file,
+            second_file,
         ];
         if handles.contains(&Some(NO_RAMFS_HANDLE)) || self.timeout_ms == Some(0) {
             return None;
         }
-        let [read_directory, rename_directory, preserved_file] =
+        let [read_directory, rename_directory, first_file, second_file] =
             handles.map(|handle| handle.unwrap_or(NO_RAMFS_HANDLE) as u64);
         let [children, flags, replies, selector, reads, helper_reads] =
             self.policy.registers()?.map(|word| word as u64);
@@ -468,33 +472,37 @@ impl GoalCreateRequest {
                 helper_reads,
                 read_directory,
                 rename_directory,
-                preserved_file,
+                first_file,
                 self.timeout_ms.unwrap_or(0) as u64,
+                second_file,
             ]
             .map(u64::to_le_bytes),
         )
     }
 
-    pub fn decode(encoded: &EncodedGoalCreate) -> Option<Self> {
+    pub fn decode(encoded: &[[u8; 8]]) -> Option<Self> {
+        let (prefix, extra) = encoded.split_first_chunk::<GOAL_CREATE_V1_WORDS>()?;
         let [
             version,
             policy @ ..,
             read_directory,
             rename_directory,
-            preserved_file,
+            first_file,
             timeout_ms,
-        ] = encoded.map(u64::from_le_bytes);
-        if version != Self::VERSION {
-            return None;
-        }
+        ] = prefix.map(u64::from_le_bytes);
         let handle = |word: u64| (word != NO_RAMFS_HANDLE as u64).then_some(word as usize);
+        let second_file = match (version, extra) {
+            (1, []) => None,
+            (Self::VERSION, [word]) => handle(u64::from_le_bytes(*word)),
+            _ => return None,
+        };
         Some(Self {
             policy: CreatePolicy::from_registers(policy.map(|word| word as usize))?,
             files: FileOptions {
                 read_directory: handle(read_directory),
                 rename: RenameOptions {
                     directory: handle(rename_directory),
-                    preserve_file: handle(preserved_file),
+                    preserve_files: [handle(first_file), second_file],
                 },
             },
             timeout_ms: (timeout_ms != 0).then_some(timeout_ms as usize),

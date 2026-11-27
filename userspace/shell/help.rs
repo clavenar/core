@@ -60,7 +60,7 @@ entries! {
         "  --read-bytes N" => "Limit all file reads in bytes",
         "  --read-under <dir>" => "Limit file reads to this directory tree",
         "  --helper-read-bytes N" => "Limit helper reads in bytes",
-        "  --preserve-file <path>" => "Save input for rename review",
+        "  --preserve-file <path>" => "Require original bytes (repeat with --rename-limit 2)",
         "  --rename-under <dir>" => "Limit renames to this directory tree",
         "  --rename-limit 1|2" => "Allow up to two renames in one commit (default 1)",
         "  --require-rename-review echo" => "Require echo to review a rename before commit",

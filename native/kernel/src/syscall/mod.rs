@@ -604,11 +604,12 @@ fn read_goal_create_request(
     length: usize,
 ) -> Option<GoalCreateRequest> {
     let mut words: EncodedGoalCreate = [[0; 8]; _];
+    let words = words.get_mut(..length / size_of::<[u8; 8]>())?;
     let bytes = words.as_flattened_mut();
     if length != bytes.len() || !stack.copy_from_user(address, bytes) {
         return None;
     }
-    GoalCreateRequest::decode(&words)
+    GoalCreateRequest::decode(words)
 }
 
 fn open_file(
