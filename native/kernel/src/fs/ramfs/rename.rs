@@ -76,6 +76,10 @@ pub(crate) struct StagedRename {
 }
 
 impl StagedRename {
+    pub(crate) fn base_revision(&self) -> u64 {
+        self.base.0
+    }
+
     pub(crate) fn diff(&self) -> (&[u8], usize) {
         let length = self.source_len + self.new_name_len;
         (&self.names[self.names.len() - length..], self.source_len)
@@ -90,7 +94,7 @@ impl StagedRename {
         let (source, new_name) = names.split_at(split);
         PublicationRecord {
             outcome,
-            base_revision: self.base.0,
+            base_revision: self.base_revision(),
             revision: fs.revision.0,
             source,
             new_name,

@@ -1,7 +1,7 @@
 pub(crate) mod pipe;
 
 use clv_abi::agent::{DELEGATION_HEADER_BYTES, DELEGATION_REQUEST_MAX_BYTES, EncodedResumeReceipt};
-use clv_abi::goal::EncodedGoalObservation;
+use clv_abi::goal::{EncodedGoalObservation, EncodedRenameReviewReceipt};
 use clv_abi::{
     FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, PATH_MAX_BYTES, ReplyKind, RequestKind,
 };
@@ -32,11 +32,16 @@ impl MessageKind {
             Self::Request(RequestKind::PlanIntent) => length == 1,
             Self::Request(RequestKind::PlanDefinition) => length == 2,
             Self::Request(RequestKind::StageRename) => (1..=PATH_MAX_BYTES).contains(&length),
-            Self::Request(RequestKind::ObserveGoal | RequestKind::ResumeAgent) => length == 0,
+            Self::Request(
+                RequestKind::ObserveGoal | RequestKind::ResumeAgent | RequestKind::ReviewRename,
+            ) => length == 0,
             Self::Reply(ReplyKind::GoalObservation) => {
                 length == size_of::<EncodedGoalObservation>()
             }
             Self::Reply(ReplyKind::AgentResumed) => length == size_of::<EncodedResumeReceipt>(),
+            Self::Reply(ReplyKind::RenameReviewed) => {
+                length == size_of::<EncodedRenameReviewReceipt>()
+            }
             Self::Reply(
                 ReplyKind::Denied
                 | ReplyKind::ReadFailed

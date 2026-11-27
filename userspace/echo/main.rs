@@ -21,6 +21,13 @@ extern "C" fn _start() -> ! {
             ..
         }) => clv::exit(usize::from(!clv::agent::resume_granted())),
         Some(LaunchRequest::Received {
+            kind: RequestKind::ReviewRename,
+            ..
+        }) => {
+            let mut diff = [0; clv_abi::goal::RENAME_DIFF_MAX_BYTES];
+            clv::exit(usize::from(clv::goal::review_granted(&mut diff).is_none()))
+        }
+        Some(LaunchRequest::Received {
             kind: RequestKind::Echo,
             bytes,
             ..

@@ -22,18 +22,19 @@ use clv_abi::{
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_CREATE_WITH_TIMEOUT, SYS_GOAL_DIFF,
     SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
     SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
-    SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_OBSERVE,
-    SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
+    SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER,
+    SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
     SYS_GOAL_PUBLICATION_DECISIONS, SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
     SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS,
-    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT,
-    SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN,
-    SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_FILE_ARG, SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
-    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_GRANTED,
+    SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
+    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
+    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
+    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
+    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -212,6 +213,23 @@ pub(crate) fn dispatch(
         SYS_GOAL_LAUNCH_FINISH_MONITOR => {
             scheduler.launch_finish_monitor(a0).unwrap_or(SYSCALL_ERROR)
         }
+        SYS_GOAL_LAUNCH_RENAME_REVIEWER => spawn_with_request(
+            scheduler,
+            fs,
+            Program::Echo as usize,
+            LaunchScope::RenameReviewer(a0),
+            RequestKind::ReviewRename,
+            0,
+            0,
+        )
+        .unwrap_or(SYSCALL_ERROR),
+        SYS_GOAL_REVIEW_GRANTED => scheduler
+            .review_granted_rename(fs, |names| stack.copy_to_user(names, a0, a1))
+            .map_or(SYSCALL_ERROR, |(count, source_len, verdict)| {
+                frame.registers[REG_A1] = source_len;
+                frame.registers[REG_A2] = verdict.map_or_else(|reason| reason as usize, |()| 1);
+                count
+            }),
         SYS_GOAL_OBSERVE => scheduler
             .observe_goal(|bytes| stack.copy_to_user(bytes, a0, a1))
             .unwrap_or(SYSCALL_ERROR),
@@ -527,7 +545,14 @@ pub(crate) fn dispatch(
             .send_reply(None, a1, |bytes| stack.copy_from_user(a0, bytes))
             .unwrap_or(SYSCALL_ERROR),
         SYS_REPLY_SEND => ReplyKind::from_raw(a2)
-            .filter(|kind| !matches!(kind, ReplyKind::GoalObservation | ReplyKind::AgentResumed))
+            .filter(|kind| {
+                !matches!(
+                    kind,
+                    ReplyKind::GoalObservation
+                        | ReplyKind::AgentResumed
+                        | ReplyKind::RenameReviewed
+                )
+            })
             .and_then(|kind| {
                 scheduler.send_reply(Some(kind), a1, |bytes| stack.copy_from_user(a0, bytes))
             })

@@ -5,7 +5,8 @@ use super::color;
 use super::command::{GoalFlag, Subcommand};
 use clv::goal::{
     self, CancelResult, CloseResult, CommitResult, DiscardResult, FileRecipient, GoalDeadline,
-    GoalObservation, GoalStatus, PublicationError, ReplyBudget, ReviewToken, TimedRenameReview,
+    GoalObservation, GoalStatus, PublicationError, RenameReviewReceipt, ReplyBudget, ReviewToken,
+    TimedRenameReview,
 };
 use clv::{agent, print};
 use clv_abi::agent::{NO_DEFINITION, SHA256_BYTES};
@@ -26,6 +27,13 @@ pub(super) struct CurrentGoal {
     review: Option<ReviewToken>,
 }
 
+fn with_current(current: &mut Option<CurrentGoal>, action: impl FnOnce(&mut CurrentGoal)) {
+    match current {
+        Some(goal) => action(goal),
+        None => print(b"no current goal\r\n"),
+    }
+}
+
 pub(super) fn command(
     arguments: &[u8],
     current: &mut Option<CurrentGoal>,
@@ -37,21 +45,18 @@ pub(super) fn command(
         (Subcommand::Create, arguments) => create(arguments, current),
         (Subcommand::GrantFile, arguments) => grant_file(handle, arguments),
         (Subcommand::StageRename, arguments) => stage_rename(handle, arguments),
-        (
-            action @ (Subcommand::Diff
-            | Subcommand::Commit
-            | Subcommand::Discard
-            | Subcommand::RevokeFile
-            | Subcommand::Cancel),
-            b"",
-        ) => match (action, current) {
-            (Subcommand::Commit, Some(goal)) => commit(goal),
-            (Subcommand::Discard, Some(goal)) => discard(goal),
-            (Subcommand::RevokeFile, Some(goal)) => revoke_file(goal),
-            (Subcommand::Cancel, Some(goal)) => cancel(goal),
-            (_, Some(goal)) => show_diff(goal),
-            (_, None) => print(b"no current goal\r\n"),
-        },
+        (Subcommand::Diff, arguments) => {
+            let reviewer = match split_word(arguments) {
+                (b"", b"") => None,
+                (b"--via", b"echo") => Some(children),
+                _ => return Entry::GoalDiff.usage(),
+            };
+            with_current(current, |goal| show_diff(goal, reviewer));
+        }
+        (Subcommand::Commit, b"") => with_current(current, commit),
+        (Subcommand::Discard, b"") => with_current(current, discard),
+        (Subcommand::RevokeFile, b"") => with_current(current, revoke_file),
+        (Subcommand::Cancel, b"") => with_current(current, cancel),
         (Subcommand::Run, arguments) => children.run_in_goal(handle, arguments),
         (Subcommand::Observe, arguments) => children.observe_goal(handle, arguments),
         (Subcommand::Audit, option) => audit::show(handle, option),
@@ -183,27 +188,54 @@ fn stage_rename(goal: Option<usize>, arguments: &[u8]) {
     }
 }
 
-fn show_diff(goal: &mut CurrentGoal) {
+fn show_diff(goal: &mut CurrentGoal, reviewer: Option<&mut Children>) {
     let mut buffer = [0; clv_abi::goal::RENAME_DIFF_MAX_BYTES];
     goal.review = None;
-    match goal::review_with_deadline(goal.handle, &mut buffer) {
-        Some((goal::GoalDiff::Empty, _)) => print(b"no staged changes\r\n"),
-        Some((goal::GoalDiff::Rename { source, new_name }, review)) => {
-            print_line(&[b"rename ", source, b" -> ", new_name]);
-            match review {
-                TimedRenameReview::Preview => print(b"preview only\r\n"),
-                TimedRenameReview::Ready(review) => {
-                    goal.review = Some(review.token);
-                    print_review_deadline(review.deadline_ns);
-                }
-                TimedRenameReview::Blocked(reason) => print(match reason {
-                    PublicationError::Conflict => b"conflict\r\n",
-                    PublicationError::PostconditionFailed => b"postcondition failed\r\n",
-                    PublicationError::Unavailable => b"review unavailable\r\n",
-                }),
-            }
-        }
-        None => print(b"cannot read goal diff\r\n"),
+    let result = if reviewer.is_some() {
+        goal::diff(goal.handle, &mut buffer).map(|diff| (diff, TimedRenameReview::Preview))
+    } else {
+        goal::review_with_deadline(goal.handle, &mut buffer)
+    };
+    let Some((diff, mut review)) = result else {
+        return print(b"cannot read goal diff\r\n");
+    };
+    let goal::GoalDiff::Rename { source, new_name } = diff else {
+        return print(b"no staged changes\r\n");
+    };
+    print_line(&[b"rename ", source, b" -> ", new_name]);
+    if let Some(children) = reviewer {
+        let Some(receipt) = children.review_rename(goal.handle) else {
+            return print(b"cannot review rename via echo\r\n");
+        };
+        print_reviewer(&receipt);
+        review = receipt.review;
+    }
+    if let TimedRenameReview::Ready(approved) = review {
+        goal.review = Some(approved.token);
+    }
+    print_review(review);
+}
+
+pub(super) fn print_reviewer(receipt: &RenameReviewReceipt) {
+    print_line(&[
+        b"reviewed by supervisor=",
+        &hex(receipt.reviewer),
+        b" goal=",
+        &hex(receipt.goal),
+        b" base=",
+        decimal(receipt.base_revision as usize, &mut [0; DIGITS]),
+    ]);
+}
+
+pub(super) fn print_review(review: TimedRenameReview) {
+    match review {
+        TimedRenameReview::Preview => print(b"preview only\r\n"),
+        TimedRenameReview::Ready(review) => print_review_deadline(review.deadline_ns),
+        TimedRenameReview::Blocked(reason) => print(match reason {
+            PublicationError::Conflict => b"conflict\r\n",
+            PublicationError::PostconditionFailed => b"postcondition failed\r\n",
+            PublicationError::Unavailable => b"review unavailable\r\n",
+        }),
     }
 }
 

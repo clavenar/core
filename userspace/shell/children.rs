@@ -154,7 +154,15 @@ impl Children {
             return print(b"pending\r\n");
         };
         monitor.collected = true;
-        if !print_report(monitor.handle, status, ReplyKind::GoalObservation) {
+        let mut buffer = [0; MESSAGE_MAX_BYTES];
+        if let Some(bytes) = receive_report(
+            monitor.handle,
+            status,
+            ReplyKind::GoalObservation,
+            &mut buffer,
+        ) {
+            super::goal::print_observation(bytes);
+        } else {
             print(match status {
                 ChildStatus::Cancelled => b"goal monitor cancelled\r\n",
                 _ => b"goal observation unavailable\r\n",
@@ -170,9 +178,31 @@ impl Children {
     }
 
     fn collect_echo_report(&mut self, handle: usize, expected: ReplyKind) -> bool {
+        let mut buffer = [0; MESSAGE_MAX_BYTES];
+        let Some(bytes) = self.wait_echo_report(handle, expected, &mut buffer) else {
+            return false;
+        };
+        display_reply(expected, bytes);
+        true
+    }
+
+    pub(super) fn review_rename(&mut self, goal: usize) -> Option<clv::goal::RenameReviewReceipt> {
+        let handle = clv::goal::launch_rename_reviewer(goal)?;
+        let mut buffer = [0; MESSAGE_MAX_BYTES];
+        let bytes = self.wait_echo_report(handle, ReplyKind::RenameReviewed, &mut buffer)?;
+        let receipt = clv::goal::RenameReviewReceipt::decode(bytes)?;
+        (receipt.reviewer == handle && receipt.goal == goal).then_some(receipt)
+    }
+
+    fn wait_echo_report<'a>(
+        &mut self,
+        handle: usize,
+        expected: ReplyKind,
+        buffer: &'a mut [u8],
+    ) -> Option<&'a [u8]> {
         // Keep the report handle for its completion event. Named waits use the ordinary child.
         self.echo_report_handle = handle;
-        clv::wait(handle).is_some_and(|status| print_report(handle, status, expected))
+        receive_report(handle, clv::wait(handle)?, expected, buffer)
     }
 
     pub(super) fn run_agent(
@@ -421,17 +451,20 @@ fn spawn_scoped(
     handle
 }
 
-fn print_report(handle: usize, status: ChildStatus, expected: ReplyKind) -> bool {
-    let mut buffer = [0; MESSAGE_MAX_BYTES];
-    let reply = clv::receive_reply(handle, &mut buffer);
+fn receive_report(
+    handle: usize,
+    status: ChildStatus,
+    expected: ReplyKind,
+    buffer: &mut [u8],
+) -> Option<&[u8]> {
+    let reply = clv::receive_reply(handle, buffer);
     if matches!(status, ChildStatus::Exited(0))
         && let Some(ChildReply::Received { kind, bytes, .. }) = reply
         && kind == expected
     {
-        display_reply(kind, bytes);
-        true
+        Some(bytes)
     } else {
-        false
+        None
     }
 }
 
@@ -463,6 +496,14 @@ fn display_reply(kind: ReplyKind, bytes: &[u8]) {
         ReplyKind::DelegationFailed => print(b"cannot delegate child\r\n"),
         ReplyKind::GoalObservation => super::goal::print_observation(bytes),
         ReplyKind::AgentResumed => super::goal::print_resume_receipt(bytes),
+        ReplyKind::RenameReviewed => {
+            if let Some(receipt) = clv::goal::RenameReviewReceipt::decode(bytes) {
+                super::goal::print_reviewer(&receipt);
+                super::goal::print_review(receipt.review);
+            } else {
+                print(b"invalid rename review receipt\r\n");
+            }
+        }
     }
 }
 

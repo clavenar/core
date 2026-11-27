@@ -77,6 +77,8 @@ struct PendingEvent {
 enum LaunchGrant {
     ObserveGoal(usize),
     ObserveOnFinish,
+    /// The pending rename records the boot-unique launch allowed to review it.
+    ReviewRename,
     /// The agent's original child launch. Every resume ends this suspension's grants.
     ResumeAgent(usize),
 }
@@ -109,6 +111,7 @@ pub(crate) enum LaunchScope {
     File(usize),
     FileWithPipe(usize),
     GoalObserver(usize),
+    RenameReviewer(usize),
     ResumeSupervisor(usize),
     Goal {
         handle: usize,
@@ -336,6 +339,7 @@ impl Scheduler {
                 Some(LaunchGrant::ObserveGoal(handle))
             }
             LaunchScope::ResumeSupervisor(agent) => Some(self.agent_resume_grant(agent)?),
+            LaunchScope::RenameReviewer(_) => Some(LaunchGrant::ReviewRename),
             _ => None,
         };
         let launch = self
@@ -350,6 +354,12 @@ impl Scheduler {
             LaunchScope::Plain
             | LaunchScope::GoalObserver(_)
             | LaunchScope::ResumeSupervisor(_) => TaskFs::empty(),
+            LaunchScope::RenameReviewer(handle) => {
+                self.goal
+                    .as_mut()?
+                    .bind_rename_reviewer(handle, launch.handle)?;
+                TaskFs::empty()
+            }
             LaunchScope::Goal {
                 handle: goal,
                 reply_bytes,

@@ -80,8 +80,10 @@ entries! {
         "goal observe --collect" => "Collect the monitor's report or show pending",
     },
     StageRename { "goal stage-rename <source> <new-name>" => "Stage a file rename" },
+    GoalDiff {
+        "goal diff [--via echo]" => "Review a staged rename directly or through a supervisor",
+    },
     GoalActions {
-        "goal diff" => "Preview or review a staged rename",
         "goal commit" => "Publish the rename before the review expires",
         "goal discard" => "Drop the staged rename",
         "goal status" => "Show goal state",
@@ -150,6 +152,7 @@ pub(super) fn goals() {
             GoalRun,
             GoalObserve,
             StageRename,
+            GoalDiff,
             GoalActions,
             Audit,
             GoalEnd,

@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements calls 0–88. The caller places the call number in
+The RV64 prototype implements calls 0–90. The caller places the call number in
 `a7`, passes up to six arguments in `a0`–`a5`, and executes `ecall`.
 The per-call descriptions give the result registers and error values.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -15,6 +15,7 @@ The per-call descriptions give the result registers and error values.
   - [Background goal monitors](#background-goal-monitors)
   - [Delegating one agent resume](#delegating-one-agent-resume)
 - [Rename review and publication](#rename-review-and-publication)
+  - [Delegating a rename review](#delegating-a-rename-review)
 - [Goal membership and delegated authority](#goal-membership-and-delegated-authority)
 - [Audit records](#audit-records)
 - [Status and reply accounting](#status-and-reply-accounting)
@@ -198,6 +199,7 @@ queued reply.
 | 7 `DelegationFailed` | Empty | The agent could not start the requested helper |
 | 8 `GoalObservation` | 64 bytes | Kernel snapshot requested by the observer through call 85. Call 26 rejects this tag. |
 | 9 `AgentResumed` | 32 bytes | Kernel receipt for a supervisor's successful call 87. Call 26 rejects this tag. |
+| 10 `RenameReviewed` | 40 bytes | Kernel receipt for a passing or blocked delegated review through call 90. Call 26 rejects this tag. |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -329,6 +331,8 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 86 `agent_launch_supervisor` | `a0` suspended agent handle, `a1` program selector | Fresh shell-owned supervisor launch handle, or -1 on rejection |
 | 87 `agent_resume_granted` | None | 0 after resuming the bound child and queuing its receipt, or -1 on failure |
 | 88 `goal_launch_finish_monitor` | `a0` open goal handle | Fresh shell-owned monitor launch handle, or -1 on rejection |
+| 89 `goal_launch_rename_reviewer` | `a0` completed goal handle | Fresh shell-owned `echo` launch handle bound to the pending rename, or -1 on rejection |
+| 90 `goal_review_granted` | `a0` reviewer's stack destination, `a1` capacity in bytes | Total diff length in `a0`, source path length in `a1`, verdict (1–4) in `a2`. Failure to deliver returns -1 in `a0`. |
 
 ### Goal deadlines
 
@@ -362,12 +366,12 @@ Reading this assignment through call 25 leaves the inspection grant live.
 
 An observer starts with an empty RamFS handle table. It runs outside the
 goal's membership and budgets. The grant works in every state of an open
-goal, including after expiry. Calls 84 and 86 share one dedicated slot when
-the selected program is `echo`. The kernel reports task 5 as the sender of
-its replies. Ordinary `echo` launches, agents and helpers use task 3. Each
-launch has its own handle, request and reply mailboxes, and RamFS handle
-table. The two slots have separate stacks and Sv39 roots and share the
-read/execute image pages. Other program selectors use their ordinary slot.
+goal, including after expiry. Calls 84 and 86 with `echo` share task 5
+with the rename reviewer launched by call 89. The kernel reports task 5 as
+the sender of their replies. Ordinary `echo` launches, agents and helpers
+use task 3. Each launch has its own handle, request and reply mailboxes,
+and RamFS handle table. The two slots have separate stacks and Sv39 roots
+and share the read/execute image pages. Other program selectors use their ordinary slot.
 A busy report slot rejects another `echo` report launch. Reusing either
 slot replaces only that slot's previous results.
 
@@ -430,8 +434,7 @@ A resume by the owner or any supervisor ends every grant for that
 suspension. A later suspension of the same agent requires a fresh grant.
 Repeating call 40 on an already suspended agent preserves the current
 suspension. Goal cancellation, expiry, closure or supervisor exit also
-invalidates unused authority. Reviewing and committing a rename still
-require the owner.
+invalidates unused resume authority.
 
 ## Rename review and publication
 
@@ -465,12 +468,13 @@ preview or blocked review and returns the deadline for a passing review.
 
 The first passing review starts a 60-second token lifetime on the kernel's monotonic
 clock. QEMU `virt` provides a 10 MHz RISC-V time counter, so each tick is
-100 nanoseconds. Both review calls reuse a live token. For a timed goal,
-call 75 reports the earlier of the token and goal deadlines. If only the
-token has expired, a passing review issues a fresh token. The goal deadline
-stays fixed. A rejected review clears the token and leaves the frozen
-diff available. A failed copy returns -1 before checking the change or
-altering its token. Call 67 reads the diff without changing review state.
+100 nanoseconds. Direct and delegated reviews reuse a live token. For a
+timed goal, call 75 and the delegated receipt report the earlier of the
+token and goal deadlines. If only the token has expired, a passing review
+issues a fresh token. The goal deadline stays fixed. A rejected review
+clears the token and leaves the frozen diff available. A failed copy
+returns -1 before checking the change or altering its token. Call 67 reads
+the diff without changing review state.
 Discard, cancellation, goal expiry, successful close and owner exit invalidate the token.
 Revoking a file grant invalidates the token for a rename staged through that grant.
 
@@ -511,7 +515,8 @@ Ordinary direct children receive read access only. Delegating a file to a
 helper requires a delegable grant. Call 72 verifies that the caller is the
 goal's live agent and that its open descriptor carries this goal's rename
 permission. It uses the same slot, basename checks and publication rules as
-call 66. Only the goal owner can review and commit the proposal.
+call 66. The owner can review the proposal directly or delegate one review
+through call 89. Only the owner can commit it.
 
 Call 74 accepts the owner's open goal handle in any goal state. It releases
 the reference held by the pending rename and invalidates its review token.
@@ -519,6 +524,36 @@ The owner can discard a proposal even when its review returned no token.
 The public file and RamFS revision stay intact. The goal retains its lifecycle
 state, file grant, preserved input, budgets and audit history. A ready or
 running goal can stage a replacement under the same rules.
+
+### Delegating a rename review
+
+Call 89 requires a successfully completed goal with a pending rename and
+an available reporting slot. It binds that specific change to a fresh
+`echo` launch and queues an empty `ReviewRename` request (kind 10).
+The reviewer starts with an empty RamFS handle table and runs outside the
+goal's membership and byte budgets. Reading the request through call 25
+leaves the grant available. Call 24 cannot issue this assignment.
+
+Call 90 copies the full frozen diff in call 67's format to the reviewer.
+RamFS applies the same checks as for the owner's review. The reviewer gets
+the verdict in `a2`. The kernel queues a `RenameReviewed` reply for the
+owner under the reviewer's launch handle. Call 27 returns task 5 as the
+sender and five little-endian RV64 words in the payload.
+
+| Word | Meaning |
+| --- | --- |
+| 0 | Reviewer launch handle |
+| 1 | Goal handle |
+| 2 | RamFS revision recorded when the rename was staged |
+| 3 | Owner's commit token on success, zero on a blocked review |
+| 4 | Absolute guest deadline in nanoseconds on success, or the reason the review was blocked (2–4 above) |
+
+If the destination is too small or invalid, or the reply mailbox is full,
+call 90 returns -1 and the reviewer can retry. Delivering either verdict consumes the
+grant. A blocked review clears any earlier token. Removing the pending rename
+or ending the reviewer launch invalidates unused authority. A later goal or
+rename needs a fresh grant. Only the owner's receipt carries the token, and
+publication still requires the owner's explicit call 69 and its final RamFS checks.
 
 ## Goal membership and delegated authority
 

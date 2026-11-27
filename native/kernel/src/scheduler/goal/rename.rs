@@ -1,13 +1,14 @@
 use clv_abi::audit::{PublicationOutcome, RenameDenial, RenameRecord};
 use clv_abi::goal::{
-    CommitResult, DiscardResult, GoalDeadline, GoalStatus, PublicationError, ReviewToken,
-    TimedRenameReview, TimedReviewToken,
+    CommitResult, DiscardResult, GoalDeadline, GoalStatus, PublicationError, RenameReviewReceipt,
+    ReviewToken, TimedRenameReview, TimedReviewToken,
 };
-use clv_abi::{LaunchParent, PATH_MAX_BYTES};
+use clv_abi::{LaunchParent, PATH_MAX_BYTES, ReplyKind};
 
 use super::{Goal, Scheduler};
 use crate::arch::monotonic_nanos;
 use crate::fs::ramfs::{RamFs, RenamePolicy, StagedRename, TaskFs};
+use crate::scheduler::LaunchGrant;
 
 const REVIEW_LIFETIME_NS: u64 = 60 * 1_000_000_000;
 
@@ -19,20 +20,18 @@ fn review_is_live(review: TimedReviewToken, now_ns: u64) -> bool {
 pub(super) struct PendingRename {
     change: StagedRename,
     review_token: Option<TimedReviewToken>,
+    reviewer: Option<usize>,
     from_file_grant: bool,
 }
 
 impl PendingRename {
-    fn review(
-        &mut self,
+    fn check_review(
+        &self,
         fs: &RamFs,
         policy: &RenamePolicy,
         next_handle: &mut usize,
     ) -> Result<TimedReviewToken, PublicationError> {
-        if let Err(reason) = self.change.check(fs, policy) {
-            self.review_token = None;
-            return Err(reason);
-        }
+        self.change.check(fs, policy)?;
         let now_ns = monotonic_nanos();
         if let Some(review) = self
             .review_token
@@ -40,7 +39,6 @@ impl PendingRename {
         {
             return Ok(review);
         }
-        self.review_token = None;
         let deadline_ns = now_ns
             .checked_add(REVIEW_LIFETIME_NS)
             .ok_or(PublicationError::Unavailable)?;
@@ -49,13 +47,38 @@ impl PendingRename {
             .get()
             .checked_add(1)
             .ok_or(PublicationError::Unavailable)?;
-        let review = TimedReviewToken { token, deadline_ns };
-        self.review_token = Some(review);
-        Ok(review)
+        Ok(TimedReviewToken { token, deadline_ns })
+    }
+}
+
+fn review_with_goal_deadline(
+    result: Result<TimedReviewToken, PublicationError>,
+    deadline: GoalDeadline,
+) -> TimedRenameReview {
+    match result {
+        Ok(mut review) => {
+            if let GoalDeadline::At(at) = deadline {
+                review.deadline_ns = review.deadline_ns.min(at);
+            }
+            TimedRenameReview::Ready(review)
+        }
+        Err(reason) => TimedRenameReview::Blocked(reason),
     }
 }
 
 impl Goal {
+    pub(in crate::scheduler) fn bind_rename_reviewer(
+        &mut self,
+        handle: usize,
+        reviewer: usize,
+    ) -> Option<()> {
+        if self.handle != handle || !matches!(self.status(), GoalStatus::Completed { .. }) {
+            return None;
+        }
+        self.rename.as_mut()?.reviewer = Some(reviewer);
+        Some(())
+    }
+
     fn stage_rename(
         &mut self,
         fs: &mut RamFs,
@@ -81,6 +104,7 @@ impl Goal {
         self.rename = Some(PendingRename {
             change,
             review_token: None,
+            reviewer: None,
             from_file_grant,
         });
         Ok(())
@@ -195,19 +219,57 @@ impl Scheduler {
             return None;
         }
         let result = if can_review {
-            match pending.review(fs, &goal.rename_policy, &mut self.next_handle) {
-                Ok(mut review) => {
-                    if let GoalDeadline::At(at) = goal.deadline {
-                        review.deadline_ns = review.deadline_ns.min(at);
-                    }
-                    TimedRenameReview::Ready(review)
-                }
-                Err(reason) => TimedRenameReview::Blocked(reason),
-            }
+            let checked = pending.check_review(fs, &goal.rename_policy, &mut self.next_handle);
+            pending.review_token = checked.ok();
+            review_with_goal_deadline(checked, goal.deadline)
         } else {
             TimedRenameReview::Preview
         };
         Some((count, source_len, result))
+    }
+
+    pub(crate) fn review_granted_rename(
+        &mut self,
+        fs: &RamFs,
+        deliver: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<(usize, usize, Result<(), PublicationError>)> {
+        let launch = self.tasks[self.current].launch.as_ref()?;
+        if launch.grant != Some(LaunchGrant::ReviewRename) || launch.reply.is_some() {
+            return None;
+        }
+        self.live_parent(launch.parent)?;
+        let goal = self.goal.as_ref()?;
+        let pending = goal
+            .rename
+            .as_ref()
+            .filter(|pending| pending.reviewer == Some(launch.handle))?;
+        let (names, source_len) = pending.change.diff();
+        let count = names.len();
+        if !deliver(names) {
+            return None;
+        }
+
+        // Keep the current token and next handle intact if the receipt cannot be queued.
+        let mut next_handle = self.next_handle;
+        let checked = pending.check_review(fs, &goal.rename_policy, &mut next_handle);
+        let receipt = RenameReviewReceipt {
+            reviewer: launch.handle,
+            goal: goal.handle,
+            base_revision: pending.change.base_revision(),
+            review: review_with_goal_deadline(checked, goal.deadline),
+        }
+        .encode();
+        let bytes = receipt.as_flattened();
+        self.send_reply(Some(ReplyKind::RenameReviewed), bytes.len(), |reply| {
+            reply.copy_from_slice(bytes);
+            true
+        })?;
+        let pending = self.goal.as_mut()?.rename.as_mut()?;
+        pending.review_token = checked.ok();
+        pending.reviewer = None;
+        self.next_handle = next_handle;
+        self.tasks[self.current].launch.as_mut()?.grant = None;
+        Some((count, source_len, checked.map(|_| ())))
     }
 
     pub(crate) fn discard_goal_rename(

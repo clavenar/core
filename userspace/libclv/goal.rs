@@ -7,8 +7,8 @@ pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CommitResult, CreateOptions, DiscardResult,
     EncodedGoalObservation, FileOptions, FileRecipient, GoalDeadline, GoalDiff, GoalObservation,
-    GoalStatus, PublicationError, ReadLimits, RenameOptions, RenameReview, ReviewToken,
-    TimedRenameReview, TimedReviewToken,
+    GoalStatus, PublicationError, ReadLimits, RenameOptions, RenameReview, RenameReviewReceipt,
+    ReviewToken, TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -19,13 +19,13 @@ use clv_abi::{
     SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_CREATE_WITH_TIMEOUT, SYS_GOAL_DIFF,
     SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
     SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
-    SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_OBSERVE,
-    SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
+    SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER,
+    SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_AUDIT, SYS_GOAL_PUBLICATION_AUDIT_WITH_CANCELLATION,
     SYS_GOAL_PUBLICATION_DECISIONS, SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
     SYS_GOAL_READ_AUDIT, SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS,
-    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_WITH_DEADLINE,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS,
+    SYS_GOAL_RENAME_AUDIT, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_GRANTED,
+    SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -274,6 +274,30 @@ pub fn review_with_deadline(
     Some((diff, TimedRenameReview::from_registers(token, detail)?))
 }
 
+/// Gives one echo launch authority to review this completed goal's pending rename.
+pub fn launch_rename_reviewer(goal: usize) -> Option<usize> {
+    syscall_result(syscall(SYS_GOAL_LAUNCH_RENAME_REVIEWER, goal, 0, 0))
+}
+
+/// Reads the bound diff and verdict. The kernel sends any commit token to the owner.
+pub fn review_granted(buffer: &mut [u8]) -> Option<(GoalDiff<'_>, Result<(), PublicationError>)> {
+    let (count, source_len, status, _) = ecall(
+        SYS_GOAL_REVIEW_GRANTED,
+        buffer.as_mut_ptr().expose_provenance(),
+        buffer.len(),
+        0,
+        0,
+        0,
+    );
+    let diff = decode_diff(buffer.get(..count)?, source_len)?;
+    let verdict = if status == 1 {
+        Ok(())
+    } else {
+        Err(PublicationError::from_register(status)?)
+    };
+    Some((diff, verdict))
+}
+
 fn read_diff(
     number: usize,
     goal: usize,
@@ -287,13 +311,19 @@ fn read_diff(
         0,
         0,
     );
-    let names = buffer.get(..count)?;
-    let diff = match names.split_at_checked(source_len)? {
+    Some((
+        decode_diff(buffer.get(..count)?, source_len)?,
+        token,
+        status,
+    ))
+}
+
+fn decode_diff(names: &[u8], source_len: usize) -> Option<GoalDiff<'_>> {
+    Some(match names.split_at_checked(source_len)? {
         ([], []) => GoalDiff::Empty,
         ([], _) | (_, []) => return None,
         (source, new_name) => GoalDiff::Rename { source, new_name },
-    };
-    Some((diff, token, status))
+    })
 }
 
 pub fn commit(goal: usize, token: ReviewToken) -> Option<CommitResult> {

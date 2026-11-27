@@ -61,6 +61,17 @@ pub enum PublicationError {
     Unavailable = 4,
 }
 
+impl PublicationError {
+    pub const fn from_register(value: usize) -> Option<Self> {
+        match value {
+            2 => Some(Self::Conflict),
+            3 => Some(Self::PostconditionFailed),
+            4 => Some(Self::Unavailable),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RenameReview {
     Preview,
@@ -82,9 +93,10 @@ impl RenameReview {
         Some(match (ReviewToken::new(token), status) {
             (None, 0) => Self::Preview,
             (Some(token), 1) => Self::Ready(token),
-            (None, 2) => Self::Blocked(PublicationError::Conflict),
-            (None, 3) => Self::Blocked(PublicationError::PostconditionFailed),
-            (None, 4) => Self::Blocked(PublicationError::Unavailable),
+            (None, status) => match PublicationError::from_register(status) {
+                Some(reason) => Self::Blocked(reason),
+                None => return None,
+            },
             _ => return None,
         })
     }
@@ -123,6 +135,48 @@ impl TimedRenameReview {
                 _ => None,
             },
         }
+    }
+}
+
+pub type EncodedRenameReviewReceipt = [[u8; 8]; 5];
+
+/// The owner's receipt for a review performed by a single authorized launch.
+pub struct RenameReviewReceipt {
+    pub reviewer: usize,
+    pub goal: usize,
+    pub base_revision: u64,
+    pub review: TimedRenameReview,
+}
+
+impl RenameReviewReceipt {
+    pub fn encode(&self) -> EncodedRenameReviewReceipt {
+        let (token, detail) = self.review.review_registers(true);
+        [
+            self.reviewer as u64,
+            self.goal as u64,
+            self.base_revision,
+            token as u64,
+            detail as u64,
+        ]
+        .map(u64::to_le_bytes)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let (words, []) = bytes.as_chunks::<8>() else {
+            return None;
+        };
+        let words: &EncodedRenameReviewReceipt = words.try_into().ok()?;
+        let [reviewer, goal, base_revision, token, detail] = words.map(u64::from_le_bytes);
+        let review = TimedRenameReview::from_registers(token as usize, detail as usize)?;
+        if reviewer == 0 || goal == 0 || review == TimedRenameReview::Preview {
+            return None;
+        }
+        Some(Self {
+            reviewer: reviewer as usize,
+            goal: goal as usize,
+            base_revision,
+            review,
+        })
     }
 }
 

@@ -10,6 +10,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
 - [Delegation and read limits](#delegation-and-read-limits)
 - [Mock planning and registered tools](#mock-planning-and-registered-tools)
 - [Reviewed renames](#reviewed-renames)
+  - [Review a staged rename through echo](#review-a-staged-rename-through-echo)
 - [Helper accounting and revocation](#helper-accounting-and-revocation)
 
 ## Boot and shell
@@ -41,10 +42,10 @@ program's validated entry address. If loading fails, it prints
 The kernel activates paging, prints `Sv39 paging enabled`, and starts `hello`
 as task 1 and the shell as task 2. Task 3 runs ordinary `echo` launches,
 including agents and helpers. Task 4 runs `grep`. Task 5 runs `echo` for
-an immediate goal observation or a delegated resume. Task 6 runs `echo` for
-a background goal monitor. Tasks 3, 5 and 6 share the read/execute pages
-of one ELF. Each task receives its ID in `a0` and has its own Sv39 root
-and 4 KiB read/write, non-executable stack.
+immediate goal observations, delegated resumes and rename reviews. Task 6
+runs `echo` for a background goal monitor. Tasks 3, 5 and 6 share the
+read/execute pages of one ELF. Each task receives its ID in `a0` and has
+its own Sv39 root and 4 KiB read/write, non-executable stack.
 The stack starts at `0x00402000` for one- and two-page images and immediately
 after the image for larger programs. The initial stack pointer is at the
 top of that page. Nonempty syscall buffers must fit within the calling
@@ -652,9 +653,9 @@ The second report shows `Cancelled` for the same child, `deadline=expired`
 and `available=24 reserved=0 spent=0`. The reply audit shows `entries=0`
 and `wait hello` reports `hello cancelled`. Each observation launches a
 fresh `echo` and collects its reply and exit status. A running ordinary
-`echo` can continue while the observer runs. Immediate observations and
-delegated resumes share task 5. A background monitor can wait in task 6
-while either runs.
+`echo` can continue while the observer runs. Immediate observations,
+delegated resumes and rename reviews share task 5. A background monitor
+can wait in task 6 while any of them runs.
 
 ## Requests, replies and file streams
 
@@ -1377,6 +1378,34 @@ and reply bytes.
 To check a read-only grant, repeat from a fresh boot through `goal diff`
 using `goal grant-file /work/draft.txt`. The agent exits with status 1
 and the diff is empty.
+
+### Review a staged rename through echo
+
+At a fresh `clsh>` prompt, let `hello` stage a rename and ask a separate
+`echo` process to review it.
+
+```text
+write /draft.txt keep
+goal create --preserve-file /draft.txt
+goal grant-file --stage-rename /draft.txt
+agent run hello --stage-rename final.txt
+wait hello
+goal diff --via echo
+goal commit
+cat /final.txt
+goal close
+```
+
+`hello` exits with status 0. The diff shows `rename /draft.txt -> final.txt`,
+identifies the reviewer, goal and base revision, and reports `ready to commit`
+with a guest deadline. You can still read `/draft.txt` at this point. Only
+after `goal commit` does `/final.txt` contain `keep`.
+
+To see a blocked review, repeat on a fresh boot and insert
+`write /draft.txt changed` immediately after `goal create`, before the file
+grant. The agent still exits with status 0, but the reviewer reports
+`postcondition failed`. The shell refuses the commit. Before closing the
+goal, `cat /draft.txt` prints `changed` and `cat /final.txt` fails to open.
 
 ### Revoke a rename grant after review
 
