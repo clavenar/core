@@ -24,6 +24,12 @@ struct GoalMonitor {
     handle: usize,
     reply_kind: ReplyKind,
     collected: bool,
+    restart: Option<FinishMonitorRestart>,
+}
+
+struct FinishMonitorRestart {
+    goal: usize,
+    attempted: bool,
 }
 
 struct Helper<'a> {
@@ -102,6 +108,8 @@ impl Children {
         }
     }
 
+    // Keep goal option parsing off the shell command loop's stack frame.
+    #[inline(never)]
     pub(super) fn run_in_goal(&mut self, goal: Option<usize>, arguments: &[u8]) {
         let Some((options, program, b"")) = goal_program(arguments, GoalCommand::Run) else {
             return Entry::GoalRun.usage();
@@ -125,8 +133,15 @@ impl Children {
         let monitor = match split_word(arguments) {
             (b"--collect", b"") => return self.collect_goal_monitor(),
             (b"--disarm", b"") => return self.disarm_read_denial_watch(),
-            (b"--on-finish", b"echo") => Some((GoalMonitorKind::Finish, 0)),
-            (b"--on-publication", b"echo") => Some((GoalMonitorKind::Publication, 0)),
+            (b"--on-finish", arguments) => {
+                let restart_once = match split_word(arguments) {
+                    (b"echo", b"") => false,
+                    (b"echo", b"--restart-once") => true,
+                    _ => return Entry::GoalObserve.usage(),
+                };
+                Some((GoalMonitorKind::Finish, 0, restart_once))
+            }
+            (b"--on-publication", b"echo") => Some((GoalMonitorKind::Publication, 0, false)),
             (b"--on-read-denial", arguments) => {
                 let (b"echo", options) = split_word(arguments) else {
                     return Entry::GoalObserve.usage();
@@ -143,7 +158,7 @@ impl Children {
                     }
                     _ => return Entry::GoalObserve.usage(),
                 };
-                Some((GoalMonitorKind::ReadDenial, threshold))
+                Some((GoalMonitorKind::ReadDenial, threshold, false))
             }
             (b"echo", b"") => None,
             _ => return Entry::GoalObserve.usage(),
@@ -151,7 +166,7 @@ impl Children {
         let Some(goal) = goal else {
             return print(b"no current goal\r\n");
         };
-        if let Some((monitor, threshold)) = monitor {
+        if let Some((monitor, threshold, restart_once)) = monitor {
             let (launch, reply_kind) = match monitor {
                 GoalMonitorKind::Finish => (
                     clv::goal::launch_finish_monitor(goal),
@@ -173,6 +188,10 @@ impl Children {
                 handle,
                 reply_kind,
                 collected: false,
+                restart: restart_once.then_some(FinishMonitorRestart {
+                    goal,
+                    attempted: false,
+                }),
             });
             return print_handle(b"goal monitor=", handle);
         }
@@ -202,16 +221,50 @@ impl Children {
         let Some(monitor) = self.monitor.as_mut().filter(|monitor| !monitor.collected) else {
             return print(b"no goal monitor to collect\r\n");
         };
-        let Some(status) = clv::wait(monitor.handle) else {
-            return print(b"pending\r\n");
-        };
-        monitor.collected = true;
         let mut buffer = [0; MESSAGE_MAX_BYTES];
-        if let Some(bytes) = receive_report(monitor.handle, status, monitor.reply_kind, &mut buffer)
-        {
-            display_reply(monitor.handle, monitor.reply_kind, bytes);
-        } else {
-            print(match status {
+        loop {
+            let Some(status) = clv::wait(monitor.handle) else {
+                return print(b"pending\r\n");
+            };
+            monitor.collected = true;
+            let reply = clv::receive_reply(monitor.handle, &mut buffer);
+            let fault = match status {
+                ChildStatus::Faulted(cause) if monitor.restart.is_some() => Some(cause),
+                _ => None,
+            };
+            if let Some(ChildReply::Received { kind, bytes, .. }) = reply
+                && kind == monitor.reply_kind
+                && (matches!(status, ChildStatus::Exited(0)) || fault.is_some())
+            {
+                return display_reply(monitor.handle, kind, bytes);
+            }
+            if let Some(cause) = fault
+                && let Some(restart) = &mut monitor.restart
+            {
+                if matches!(reply, Some(ChildReply::Empty)) && !restart.attempted {
+                    restart.attempted = true;
+                    if let Some(replacement) = clv::goal::restart_finish_monitor(restart.goal) {
+                        print_line(&[
+                            b"goal monitor=",
+                            &hex(monitor.handle),
+                            b" faulted scause=",
+                            &hex(cause),
+                            b" restarted as ",
+                            &hex(replacement),
+                        ]);
+                        monitor.handle = replacement;
+                        monitor.collected = false;
+                        continue;
+                    }
+                }
+                return print_line(&[
+                    b"goal monitor=",
+                    &hex(monitor.handle),
+                    b" faulted scause=",
+                    &hex(cause),
+                ]);
+            }
+            return print(match status {
                 ChildStatus::Cancelled => b"goal monitor cancelled\r\n",
                 _ => b"goal observation unavailable\r\n",
             });

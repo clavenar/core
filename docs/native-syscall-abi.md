@@ -1,8 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.79 adds durable recovery of the pinned `find-greeting@7` host MCP
-search through the broker's SQLite journal.
+Kernel 0.0.80 adds guarded restart of the goal-finish monitor.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -346,7 +345,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 68 `goal_observe` | `a0` observer's stack destination, `a1` capacity in bytes | 64 after copying the snapshot and queuing the same record for the parent, or -1 on failure |
 | 69 `agent_launch_supervisor` | `a0` suspended agent handle, `a1` program selector | Fresh shell-owned supervisor launch handle, or -1 on rejection |
 | 70 `agent_resume_granted` | None | 0 after resuming the bound child and queuing its receipt, or -1 on failure |
-| 71 `goal_monitor` | `a2` operation. Arm (0) takes the goal in `a0` and trigger in `a1` (0 finish, 1 publication, 2 read-scope denial). Trigger 2 takes the threshold in `a3` (0 for the default of 1). See [read-denial watch](#read-denial-watch) for operations 1–3. | Fresh shell-owned launch handle or the selected operation's result. Failure returns -1. |
+| 71 `goal_monitor` | `a2` operation. Arm (0) takes the goal in `a0` and trigger in `a1` (0 finish, 1 publication, 2 read-scope denial). Trigger 2 takes the threshold in `a3` (0 for the default of 1). Operations 1–3 apply to the [read-denial watch](#read-denial-watch). Restart (4) takes the original goal in `a0` and zeros in `a1` and `a3`. | Fresh shell-owned launch handle or the selected operation's result. Failure returns -1. |
 | 72 `goal_launch_rename_reviewer` | `a0` completed goal handle | Fresh shell-owned `echo` launch handle bound to the pending rename, or -1 on rejection |
 | 73 `goal_publication_decisions_with_reviewer` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` zero-based row index, `a4` [history view](#publication-audit) (0–3) | Retained row count (0–4) in `a0`, overwritten count in `a1`, reviewer in `a2` and goal handle in `a3`, or -1 in `a0` on failure |
 | 74 `goal_rename_diff` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` = 0 for a preview or 1 for a review | Total bytes in `a0`, number of renames in `a1`, approval token or zero in `a2`, deadline or verdict in `a3`. Failure returns -1 in `a0`. |
@@ -556,6 +555,16 @@ from task 6 by its launch handle. The report survives closing the finished
 goal and records the deadline as it stood at capture. Closing a ready goal
 before capture cancels the waiting monitor. Its wait result is cancellation
 and its reply mailbox is empty. Owner exit stops any live monitor.
+
+Operation 4 starts a replacement finish monitor on the same open goal
+only while its state is completed or failed and its deadline is valid.
+The replacement uses the same observation grant and a fresh launch handle.
+It captures the terminal state and settled budget during the replacement
+call. The shell consumes the old completion and checks the reply mailbox
+before using this operation. With `--restart-once`, it retries at most
+once on a fault with an empty mailbox and accepts a valid report already
+queued by a faulted monitor.
+[Restart walkthrough](qemu-walkthroughs.md#restart-a-faulted-goal-monitor)
 
 With trigger 1, the monitor receives the zero-byte `ObservePublication`
 request (kind 14) and waits for the staged batch to be published or

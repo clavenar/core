@@ -1,5 +1,7 @@
 use clv_abi::audit::{PublicationObservation, ReadDenialEvent, ReadDenialSnapshot};
-use clv_abi::goal::{GoalMonitorKind, GoalObservation, MAX_READ_DENIAL_THRESHOLD};
+use clv_abi::goal::{
+    GoalDeadline, GoalMonitorKind, GoalObservation, GoalStatus, MAX_READ_DENIAL_THRESHOLD,
+};
 use clv_abi::{LaunchParent, Program, ReplyKind, RequestKind, TaskCompletion};
 
 use crate::arch::riscv64::trap::TrapFrame;
@@ -90,6 +92,18 @@ impl Scheduler {
         // Finish and publication can report a snapshot from before the launch.
         self.wake_goal_monitor();
         Some(handle)
+    }
+
+    pub(crate) fn restart_finish_monitor(&mut self, goal: usize) -> Option<usize> {
+        let (status, deadline) = self.goal_status(goal)?;
+        if !matches!(
+            status,
+            GoalStatus::Completed { .. } | GoalStatus::Failed { .. }
+        ) || deadline == GoalDeadline::Expired
+        {
+            return None;
+        }
+        self.launch_goal_monitor(goal, GoalMonitorKind::Finish, 0)
     }
 
     pub(in crate::scheduler) fn wake_goal_monitor(&mut self) {

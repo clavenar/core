@@ -14,8 +14,8 @@ pub use clv_abi::goal::{
     RenameOptions, RenameReviewReceipt, ReviewToken, TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::goal::{
-    DISARM_READ_WATCH, GoalCreateRequest, TAKE_READ_WATCH_SUPPRESSED, WAIT_READ_WATCH_UPDATE,
-    decode_rename_batch,
+    DISARM_READ_WATCH, GoalCreateRequest, RESTART_FINISH_MONITOR, TAKE_READ_WATCH_SUPPRESSED,
+    WAIT_READ_WATCH_UPDATE, decode_rename_batch,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -544,6 +544,11 @@ pub fn launch_observer(goal: usize, program: Program) -> Option<usize> {
 /// Starts an isolated echo monitor for one terminal snapshot of this goal.
 pub fn launch_finish_monitor(goal: usize) -> Option<usize> {
     launch_monitor(goal, GoalMonitorKind::Finish)
+}
+
+/// Starts a replacement finish monitor while the original terminal goal remains eligible.
+pub fn restart_finish_monitor(goal: usize) -> Option<usize> {
+    syscall_result(syscall(SYS_GOAL_MONITOR, goal, 0, RESTART_FINISH_MONITOR))
 }
 
 /// Starts an isolated echo monitor for the disposition of a rename transaction.

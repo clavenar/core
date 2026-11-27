@@ -695,6 +695,9 @@ pub const DISARM_READ_WATCH: usize = 1;
 pub const TAKE_READ_WATCH_SUPPRESSED: usize = 2;
 pub const WAIT_READ_WATCH_UPDATE: usize = 3;
 
+/// Call 71 operation for a replacement finish monitor on a terminal goal.
+pub const RESTART_FINISH_MONITOR: usize = 4;
+
 /// Call 35's four status words followed by call 43's four reply-budget words.
 pub type EncodedGoalObservation = [[u8; 8]; 8];
 

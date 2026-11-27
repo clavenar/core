@@ -9,7 +9,8 @@ use clv_abi::audit::{
 use clv_abi::bridge::{BridgeFailure, MAX_FRAME_BYTES, POLL, SUBMIT, SUBMIT_TOOL};
 use clv_abi::goal::{
     DISARM_READ_WATCH, EncodedGoalCreate, FileRecipient, GoalCreateRequest, GoalMonitorKind,
-    RENAME_DIFF_HEADER_BYTES, ReviewToken, TAKE_READ_WATCH_SUPPRESSED, WAIT_READ_WATCH_UPDATE,
+    RENAME_DIFF_HEADER_BYTES, RESTART_FINISH_MONITOR, ReviewToken, TAKE_READ_WATCH_SUPPRESSED,
+    WAIT_READ_WATCH_UPDATE,
 };
 use clv_abi::tool::{FILE_TOOL_MCP, FILE_TOOL_STDIO, ToolId};
 use clv_abi::{
@@ -168,6 +169,7 @@ pub(crate) fn dispatch(
         SYS_GOAL_MONITOR => match a2 {
             0 => GoalMonitorKind::from_register(a1)
                 .and_then(|kind| scheduler.launch_goal_monitor(a0, kind, a3)),
+            RESTART_FINISH_MONITOR if a1 == 0 && a3 == 0 => scheduler.restart_finish_monitor(a0),
             DISARM_READ_WATCH if a1 == 0 => scheduler.disarm_read_denial_watch(a0, fs),
             TAKE_READ_WATCH_SUPPRESSED if a1 == 0 => scheduler.take_read_denial_suppressed(a0),
             WAIT_READ_WATCH_UPDATE

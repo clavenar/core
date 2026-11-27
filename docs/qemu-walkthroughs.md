@@ -11,6 +11,7 @@ handles and ordinary RamFS changes live for one boot.
   - [Recover a previous journal record](#recover-a-previous-journal-record)
   - [Probe the QEMU host bridge](#probe-the-qemu-host-bridge)
 - [Goals and file grants](#goals-and-file-grants)
+  - [Restart a faulted goal monitor](#restart-a-faulted-goal-monitor)
 - [Requests, replies and file streams](#requests-replies-and-file-streams)
 - [Delegation and read limits](#delegation-and-read-limits)
   - [Watch for a read-scope denial](#watch-for-a-read-scope-denial)
@@ -449,6 +450,36 @@ The monitor reports `Cancelled` for that child, the wait prints
 `hello cancelled`, the diff is empty and the original file contains `keep`.
 A deadline that expires while the agent is suspended also wakes the monitor
 and the report includes `deadline=expired`.
+
+### Restart a faulted goal monitor
+
+At a fresh `clsh>` prompt, arm a finish monitor with one restart available
+when you collect its report.
+
+```text
+goal create --reply-bytes 10
+agent run --suspended echo
+goal observe --on-finish echo --restart-once
+goal observe --collect
+agent resume
+wait echo
+goal observe --collect
+goal budget
+goal observe --collect
+goal close
+```
+
+The first collection prints `pending`. After the agent exits, the monitor
+reports `Completed` with `available=0 reserved=0 spent=10`. Collecting
+again prints `no goal monitor to collect`.
+
+In a temporary build that faults the first finish monitor before call 68,
+collection prints the fault and both launch handles, then collects the
+replacement's report in the same command. The goal still spends 10 reply
+bytes. If both attempts fault before reporting, collection prints the
+second fault and the monitor is finished. A fault after call 68 leaves the
+queued report available for one collection. A replacement requires the
+original goal to remain open and its deadline to be valid.
 
 ### Reserve reply bytes for children
 

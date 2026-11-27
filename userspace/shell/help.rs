@@ -83,7 +83,9 @@ entries! {
     GoalRun { "goal run [--reply-bytes N] <program>" => "Start a child in the goal" },
     GoalObserve {
         "goal observe echo" => "Read goal state, deadline and reply budget through echo",
-        "goal observe --on-finish echo" => "Start a monitor for the final goal state and budget",
+        "goal observe --on-finish echo [--restart-once]" =>
+            "Start a monitor for the final goal state and budget",
+        "  --restart-once" => "Retry once on collection after a fault before a report",
         "goal observe --on-publication echo" => "Monitor the publication or discard of a rename",
         "goal observe --on-read-denial echo [--after-denials N]" =>
             "Alert after N out-of-scope reads (default 1, max 16)",
