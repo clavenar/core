@@ -15,21 +15,39 @@ use crate::{LaunchParent, NO_CHILD_HANDLE};
 pub const AUDIT_CAPACITY: usize = 4;
 /// Agent, program, reply bytes, file flag, denial code and child handle, in RV64 words.
 pub type EncodedRecord = [[u8; 8]; 6];
-/// Call 57 appends the calling agent's child launch handle. Zero identifies the shell.
+/// Delegation decision followed by the calling agent's child launch handle (zero for the shell).
 pub type EncodedRecordWithCaller = [[u8; 8]; 7];
-/// Call 63 appends a tool state, raw versioned ID and the measured ELF SHA-256.
+/// Delegation audit row with caller, tool state, raw versioned ID and measured ELF SHA-256.
 pub type EncodedRecordWithTool = [[u8; 8]; 13];
-/// Program selector in every audit view when the requested tool revision is unknown.
+/// Program selector in the audit when the requested tool revision is unknown.
 pub const UNRESOLVED_TOOL_PROGRAM: usize = usize::MAX;
 /// Child, requested bytes, allowance before the decision, and flags, in RV64 words.
 /// Flag bit 0 marks an unlimited allowance and bit 1 marks a budget denial.
 pub type EncodedReplyRecord = [[u8; 8]; 4];
 /// Child, requested capacity, file bytes available for this call, prior allowance, flags.
 pub type EncodedReadRecord = [[u8; 8]; 5];
-/// Call 59 appends the scope of the effective read allowance.
+/// Read budget decision followed by the scope of the effective allowance.
 pub type EncodedReadRecordWithLimit = [[u8; 8]; 6];
-/// Call 70 uses the call 59 layout for budget decisions and flag 4 for an out-of-scope read.
+/// Read audit row with flag 4 reserved for directory-scope denials.
 pub type EncodedReadDecision = EncodedReadRecordWithLimit;
+
+/// Selects the `goal_read_audit` history in `a3`.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub enum ReadAuditView {
+    Budget = 0,
+    Decisions = 1,
+}
+
+impl ReadAuditView {
+    pub const fn from_register(value: usize) -> Option<Self> {
+        Some(match value {
+            0 => Self::Budget,
+            1 => Self::Decisions,
+            _ => return None,
+        })
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct DelegationRequest {

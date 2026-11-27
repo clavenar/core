@@ -1,8 +1,8 @@
 use clv_abi::audit::{
-    AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, EncodedPublicationRecord,
-    EncodedReadDecision, EncodedReadRecordWithLimit, EncodedRecordWithTool, EncodedRenameRecord,
-    EncodedReplyRecord, PublicationAuditView, PublicationReviewer, ReadRecord, ReadRecordWithLimit,
-    ReplyRecord,
+    AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, DelegationRecordWithTool,
+    EncodedPublicationRecord, EncodedReadDecision, EncodedReadRecordWithLimit,
+    EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationAuditView,
+    PublicationReviewer, ReadAuditView, ReadRecord, ReadRecordWithLimit, ReplyRecord,
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
@@ -14,13 +14,12 @@ pub use clv_abi::goal::{
 use clv_abi::goal::{GoalCreateRequest, decode_rename_batch};
 use clv_abi::tool::ToolId;
 use clv_abi::{
-    MESSAGE_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
-    SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
-    SYS_GOAL_CREATE, SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
-    SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
-    SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER,
-    SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
-    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
+    MESSAGE_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE,
+    SYS_GOAL_COMMIT, SYS_GOAL_CREATE, SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO,
+    SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER,
+    SYS_GOAL_LAUNCH_RENAME_REVIEWER, SYS_GOAL_OBSERVE,
+    SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT, SYS_GOAL_RENAME_AUDIT,
     SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW_BATCH_GRANTED,
     SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
     SYS_GOAL_STATUS,
@@ -295,40 +294,39 @@ pub struct AuditSnapshot<Record = DelegationRecord> {
 
 /// Reads the retained decisions in launch-attempt order without consuming them.
 pub fn audit(goal: usize) -> Option<AuditSnapshot> {
-    Some(snapshot(SYS_GOAL_AUDIT, goal, DelegationRecord::decode)?.0)
+    let (records, _) = snapshot(SYS_GOAL_AUDIT, goal, 0, |record| {
+        DelegationRecordWithTool::decode(record).map(|record| record.delegation.decision)
+    })?;
+    Some(records)
 }
 
 /// Reads the same retained decisions together with the caller authenticated at delegation.
 pub fn audit_with_caller(goal: usize) -> Option<AuditSnapshot<DelegationRecordWithCaller>> {
-    Some(
-        snapshot(
-            SYS_GOAL_AUDIT_WITH_CALLER,
-            goal,
-            DelegationRecordWithCaller::decode,
-        )?
-        .0,
-    )
+    let (records, _) = snapshot(SYS_GOAL_AUDIT, goal, 0, |record| {
+        DelegationRecordWithTool::decode(record).map(|record| record.delegation)
+    })?;
+    Some(records)
 }
 
-/// Borrows the extended wire records so each decision can be decoded in place.
+/// Reads the delegation history into the caller's buffer for decoding in place.
 pub fn audit_with_tool(
     goal: usize,
     records: &mut [EncodedRecordWithTool; AUDIT_CAPACITY],
 ) -> Option<(&[EncodedRecordWithTool], usize)> {
-    let (rows, overwritten, _) = audit_rows(SYS_GOAL_AUDIT_WITH_TOOL, goal, records)?;
+    let (rows, overwritten, _) = audit_rows(SYS_GOAL_AUDIT, goal, 0, records)?;
     Some((rows, overwritten))
 }
 
 /// Reads the goal members' reply-budget decisions in send-attempt order.
 pub fn reply_audit(goal: usize) -> Option<AuditSnapshot<ReplyRecord>> {
-    Some(snapshot(SYS_GOAL_REPLY_AUDIT, goal, ReplyRecord::decode)?.0)
+    Some(snapshot(SYS_GOAL_REPLY_AUDIT, goal, 0, ReplyRecord::decode)?.0)
 }
 
 pub fn reply_audit_rows(
     goal: usize,
     records: &mut [EncodedReplyRecord; AUDIT_CAPACITY],
 ) -> Option<(&[EncodedReplyRecord], usize)> {
-    let (rows, overwritten, _) = audit_rows(SYS_GOAL_REPLY_AUDIT, goal, records)?;
+    let (rows, overwritten, _) = audit_rows(SYS_GOAL_REPLY_AUDIT, goal, 0, records)?;
     Some((rows, overwritten))
 }
 
@@ -337,7 +335,7 @@ pub fn rename_audit_rows(
     goal: usize,
     records: &mut [EncodedRenameRecord; AUDIT_CAPACITY],
 ) -> Option<(&[EncodedRenameRecord], usize)> {
-    let (rows, overwritten, _) = audit_rows(SYS_GOAL_RENAME_AUDIT, goal, records)?;
+    let (rows, overwritten, _) = audit_rows(SYS_GOAL_RENAME_AUDIT, goal, 0, records)?;
     Some((rows, overwritten))
 }
 
@@ -426,16 +424,22 @@ fn read_publication_row(
     })
 }
 
-/// Returns the retained RamFS read decisions and the total bytes delivered over the goal's lifetime.
+/// Returns the retained RamFS budget decisions and the total bytes delivered over the goal's lifetime.
 pub fn read_audit(goal: usize) -> Option<(AuditSnapshot<ReadRecord>, usize)> {
-    snapshot(SYS_GOAL_READ_AUDIT, goal, ReadRecord::decode)
+    snapshot(
+        SYS_GOAL_READ_AUDIT,
+        goal,
+        ReadAuditView::Budget as usize,
+        |record| ReadRecordWithLimit::decode(record).map(|entry| entry.read),
+    )
 }
 
 /// Includes the scope of each read's effective allowance in the same snapshot.
 pub fn read_audit_with_limit(goal: usize) -> Option<(AuditSnapshot<ReadRecordWithLimit>, usize)> {
     snapshot(
-        SYS_GOAL_READ_AUDIT_WITH_LIMIT,
+        SYS_GOAL_READ_AUDIT,
         goal,
+        ReadAuditView::Budget as usize,
         ReadRecordWithLimit::decode,
     )
 }
@@ -444,7 +448,12 @@ pub fn read_audit_rows_with_limit(
     goal: usize,
     records: &mut [EncodedReadRecordWithLimit; AUDIT_CAPACITY],
 ) -> Option<(&[EncodedReadRecordWithLimit], usize, usize)> {
-    audit_rows(SYS_GOAL_READ_AUDIT_WITH_LIMIT, goal, records)
+    audit_rows(
+        SYS_GOAL_READ_AUDIT,
+        goal,
+        ReadAuditView::Budget as usize,
+        records,
+    )
 }
 
 /// Includes directory-scope denials alongside byte-budget decisions in read-attempt order.
@@ -452,16 +461,22 @@ pub fn read_decision_rows(
     goal: usize,
     records: &mut [EncodedReadDecision; AUDIT_CAPACITY],
 ) -> Option<(&[EncodedReadDecision], usize, usize)> {
-    audit_rows(SYS_GOAL_READ_DECISIONS, goal, records)
+    audit_rows(
+        SYS_GOAL_READ_AUDIT,
+        goal,
+        ReadAuditView::Decisions as usize,
+        records,
+    )
 }
 
 fn snapshot<Record: Copy, const WORDS: usize>(
     number: usize,
     goal: usize,
+    view: usize,
     decode: impl Fn(&[[u8; 8]; WORDS]) -> Option<Record>,
 ) -> Option<(AuditSnapshot<Record>, usize)> {
     let mut records = [[[0; 8]; WORDS]; AUDIT_CAPACITY];
-    let (rows, overwritten, total) = audit_rows(number, goal, &mut records)?;
+    let (rows, overwritten, total) = audit_rows(number, goal, view, &mut records)?;
     let mut entries = [None; AUDIT_CAPACITY];
     for (entry, record) in entries.iter_mut().zip(rows) {
         *entry = Some(decode(record)?);
@@ -478,6 +493,7 @@ fn snapshot<Record: Copy, const WORDS: usize>(
 fn audit_rows<Record>(
     number: usize,
     goal: usize,
+    view: usize,
     records: &mut [Record; AUDIT_CAPACITY],
 ) -> Option<(&[Record], usize, usize)> {
     let (count, overwritten, total, _) = ecall(
@@ -485,7 +501,7 @@ fn audit_rows<Record>(
         goal,
         records.as_mut_ptr().expose_provenance(),
         core::mem::size_of_val(records),
-        0,
+        view,
         0,
     );
     Some((records.get(..count)?, overwritten, total))

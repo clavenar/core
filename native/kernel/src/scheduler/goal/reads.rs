@@ -1,5 +1,5 @@
 use clv_abi::audit::{
-    EncodedReadDecision, EncodedReadRecordWithLimit, ReadDecision, ReadLimitScope, ReadRecord,
+    EncodedReadDecision, ReadAuditView, ReadDecision, ReadLimitScope, ReadRecord,
     ReadRecordWithLimit,
 };
 use clv_abi::goal::ReadLimits;
@@ -9,15 +9,9 @@ use super::audit::AuditHistory;
 use crate::fs::ramfs::{DirectoryId, RamFs};
 use crate::scheduler::Scheduler;
 
-pub(crate) enum ReadAudit {
-    Budget,
-    BudgetWithLimit,
-    Decisions,
-}
-
 struct ReadScope {
     directory: DirectoryId,
-    // Calls 55 and 59 retain budget decisions even when scope denials fill this history.
+    // Scope denials can evict rows here while the budget history retains them.
     audit: AuditHistory<EncodedReadDecision>,
 }
 
@@ -42,7 +36,7 @@ pub(super) struct GoalReads {
     goal_limit: Option<usize>,
     helper_remaining: Option<usize>,
     spent: usize,
-    budget_audit: AuditHistory<EncodedReadRecordWithLimit>,
+    budget_audit: AuditHistory<EncodedReadDecision>,
     scope: Option<ReadScope>,
 }
 
@@ -143,20 +137,15 @@ impl Scheduler {
     pub(crate) fn goal_read_audit(
         &self,
         handle: usize,
-        view: ReadAudit,
+        view: ReadAuditView,
         copy: impl FnOnce(&[u8]) -> bool,
     ) -> Option<(usize, usize, usize)> {
         let reads = &self.shell_goal(handle)?.reads;
-        let (count, overwritten) = match view {
-            ReadAudit::Budget => reads
-                .budget_audit
-                .read_projected(|[read @ .., _]| *read, copy),
-            ReadAudit::BudgetWithLimit => reads.budget_audit.read(copy),
-            ReadAudit::Decisions => match &reads.scope {
-                Some(scope) => scope.audit.read(copy),
-                None => reads.budget_audit.read(copy),
-            },
-        }?;
+        let history = match (view, &reads.scope) {
+            (ReadAuditView::Decisions, Some(scope)) => &scope.audit,
+            (ReadAuditView::Budget, _) | (ReadAuditView::Decisions, None) => &reads.budget_audit,
+        };
+        let (count, overwritten) = history.read(copy)?;
         Some((count, overwritten, reads.spent))
     }
 }

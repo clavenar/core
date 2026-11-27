@@ -7,7 +7,6 @@ mod rename;
 use self::audit::{AuditHistory, PublicationHistory};
 use self::budget::ReplyReservation;
 use self::reads::GoalReads;
-pub(crate) use self::reads::ReadAudit;
 use self::rename::PendingRenames;
 use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin, ResumeReceipt};
 use clv_abi::audit::{
@@ -32,12 +31,6 @@ use crate::programs::GOAL_MONITOR_TASK_INDEX;
 pub(crate) enum DelegationTarget {
     Program { selector: usize, with_file: bool },
     FileTool(ToolId),
-}
-
-pub(crate) enum DelegationAudit {
-    Decision,
-    Caller,
-    Tool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

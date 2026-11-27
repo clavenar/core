@@ -2,7 +2,7 @@ use clv_abi::agent::{
     AgentLaunch, NO_DEFINITION, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
     RUN_STAGE_RENAME, RUN_SUSPENDED,
 };
-use clv_abi::audit::{DelegationDenial, PublicationAuditView};
+use clv_abi::audit::{DelegationDenial, PublicationAuditView, ReadAuditView};
 use clv_abi::goal::{
     EncodedGoalCreate, FileRecipient, GoalCreateRequest, RENAME_DIFF_HEADER_BYTES, ReviewToken,
 };
@@ -15,13 +15,12 @@ use clv_abi::{
     SYS_AGENT_RESUME_GRANTED, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
     SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STAGE_RENAME,
     SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE,
-    SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
-    SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
-    SYS_GOAL_CREATE, SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
-    SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
-    SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER,
-    SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
-    SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
+    SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL,
+    SYS_GOAL_CLOSE, SYS_GOAL_COMMIT, SYS_GOAL_CREATE, SYS_GOAL_DISCARD,
+    SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME,
+    SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_LAUNCH_FINISH_MONITOR,
+    SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER, SYS_GOAL_OBSERVE,
+    SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT, SYS_GOAL_RENAME_AUDIT,
     SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW_BATCH_GRANTED,
     SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
     SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT,
@@ -43,8 +42,7 @@ use crate::ipc::pipe::PipeResult;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::usercopy::UserStack;
 use crate::scheduler::{
-    DelegationAudit, DelegationTarget, LaunchScope, Mailbox, ReadAudit, ReceiveResult, Scheduler,
-    WaitResult,
+    DelegationTarget, LaunchScope, Mailbox, ReceiveResult, Scheduler, WaitResult,
 };
 
 const CONSOLE_WRITE_LIMIT: usize = 128;
@@ -209,18 +207,10 @@ pub(crate) fn dispatch(
             frame.registers[REG_A3] = spent;
             flags
         }),
-        SYS_GOAL_AUDIT | SYS_GOAL_AUDIT_WITH_CALLER | SYS_GOAL_AUDIT_WITH_TOOL => {
-            let view = match number {
-                SYS_GOAL_AUDIT => DelegationAudit::Decision,
-                SYS_GOAL_AUDIT_WITH_CALLER => DelegationAudit::Caller,
-                _ => DelegationAudit::Tool,
-            };
-            write_audit_result(
-                frame,
-                scheduler
-                    .goal_delegation_audit(a0, view, |bytes| stack.copy_to_user(bytes, a1, a2)),
-            )
-        }
+        SYS_GOAL_AUDIT => write_audit_result(
+            frame,
+            scheduler.goal_delegation_audit(a0, |bytes| stack.copy_to_user(bytes, a1, a2)),
+        ),
         SYS_GOAL_REPLY_AUDIT => write_audit_result(
             frame,
             scheduler.goal_reply_audit(a0, |bytes| stack.copy_to_user(bytes, a1, a2)),
@@ -243,20 +233,15 @@ pub(crate) fn dispatch(
                     count
                 })
         }
-        SYS_GOAL_READ_AUDIT | SYS_GOAL_READ_AUDIT_WITH_LIMIT | SYS_GOAL_READ_DECISIONS => {
-            let view = match number {
-                SYS_GOAL_READ_AUDIT => ReadAudit::Budget,
-                SYS_GOAL_READ_AUDIT_WITH_LIMIT => ReadAudit::BudgetWithLimit,
-                _ => ReadAudit::Decisions,
-            };
-            scheduler
-                .goal_read_audit(a0, view, |bytes| stack.copy_to_user(bytes, a1, a2))
-                .map_or(SYSCALL_ERROR, |(count, overwritten, spent)| {
-                    frame.registers[REG_A1] = overwritten;
-                    frame.registers[REG_A2] = spent;
-                    count
-                })
-        }
+        SYS_GOAL_READ_AUDIT => ReadAuditView::from_register(a3)
+            .and_then(|view| {
+                scheduler.goal_read_audit(a0, view, |bytes| stack.copy_to_user(bytes, a1, a2))
+            })
+            .map_or(SYSCALL_ERROR, |(count, overwritten, spent)| {
+                frame.registers[REG_A1] = overwritten;
+                frame.registers[REG_A2] = spent;
+                count
+            }),
         SYS_GOAL_GRANT_FILE | SYS_GOAL_GRANT_DELEGABLE_FILE | SYS_GOAL_GRANT_FILE_FOR_RENAME => {
             let mode = match number {
                 SYS_GOAL_GRANT_DELEGABLE_FILE => FileGrantMode::Delegate(FileRecipient::Any),
