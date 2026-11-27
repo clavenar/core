@@ -7,49 +7,29 @@ from functools import partial
 from pathlib import Path
 import socket
 import sqlite3
-import struct
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from typing import BinaryIO, NamedTuple
 from uuid import uuid4
 
+from bridge_protocol import (
+    BUDGET_EXHAUSTED, COMBINED_PLAN, COMBINED_TOOL, HostRequest, INVALID_REPLY, MCP_SEARCH,
+    MOCK_GREETING, MODEL_GREETING, REQUEST_SIZES, Reply, SEARCH_GREETING, SERVICE_UNAVAILABLE,
+    SKIP, TOOL_OK, decode_request, encode_reply,
+)
 from mcp_backend import search_fixture
 from ollama_backend import MAX_TOKENS, TokenUsage, choose_action
+from replay_backend import load_goal_replay
 
 KERNEL = Path("target/riscv64gc-unknown-none-elf/release/clavenar-kernel")
 JOURNAL = Path("target/host-bridge.sqlite3")
 SOCKET_TIMEOUT = 5
 
-PLAN = struct.Struct("<BBBQB")
-TOOL = struct.Struct("<BBBQBQ")
-COMBINED = struct.Struct("<BBBQBQQ")
-VERSION = 1
-PLAN_REQUEST = 1
-PLAN_REPLY = 2
-TOOL_REQUEST = 3
-TOOL_REPLY = 4
-MOCK_GREETING = 1
-MODEL_GREETING = 2
-MCP_SEARCH = 3
-COMBINED_PLAN = 4
-COMBINED_TOOL = 5
-BUDGET_EXHAUSTED = 0
-SEARCH_GREETING = 1
-TOOL_OK = 1
-INVALID_REPLY = 2
-SKIP = 3
-SERVICE_UNAVAILABLE = 4
-
 MOCK_MAX_UNITS = 2
 MOCK_USED_UNITS = 1
 MOCK_ACTIONS = {"search": SEARCH_GREETING, "invalid-plan": INVALID_REPLY, "silent-plan": None}
 PROBE_REPLIES = {"probe-only": b"PONG", "invalid-probe": b"PONX", "silent-probe": b""}
-
-
-class Reply(NamedTuple):
-    status: int
-    data: bytes = b""
 
 
 class RequestResult(NamedTuple):
@@ -58,17 +38,6 @@ class RequestResult(NamedTuple):
 
 
 RequestRunner = Callable[[str], RequestResult | None]
-
-
-class HostRequest(NamedTuple):
-    request_id: int
-    selector: int
-    goal_id: int | None = None
-    launch_id: int | None = None
-
-    @property
-    def is_tool(self) -> bool:
-        return self.selector in (MCP_SEARCH, COMBINED_TOOL)
 
 
 class Service(NamedTuple):
@@ -293,54 +262,35 @@ def run_mcp_search(port: int, operation_id: str) -> RequestResult | None:
     return RequestResult(reply, result.used_calls)
 
 
-def decode_request(frame: bytes) -> HostRequest:
-    length, version, kind, request_id, selector = PLAN.unpack_from(frame)
-    if version != VERSION or request_id == 0:
-        raise ValueError("invalid host request header")
-    if kind == PLAN_REQUEST and length == PLAN.size and selector in (MOCK_GREETING, MODEL_GREETING):
-        return HostRequest(request_id, selector)
-    if kind == TOOL_REQUEST and length == TOOL.size and selector == MCP_SEARCH:
-        goal = TOOL.unpack(frame)[5]
-        if goal == 0:
-            raise ValueError("invalid host tool goal ID")
-        return HostRequest(request_id, selector, goal)
-    if length == COMBINED.size and (kind, selector) in (
-        (PLAN_REQUEST, COMBINED_PLAN), (TOOL_REQUEST, COMBINED_TOOL)
-    ):
-        goal, launch = COMBINED.unpack(frame)[5:]
-        if not 0 < goal < launch < request_id:
-            raise ValueError("invalid combined request owner")
-        return HostRequest(request_id, selector, goal, launch)
-    raise ValueError("invalid host request kind or selector")
+def handle_live_request(
+    journal: Journal, session: str, services: dict[int, Service], request: HostRequest
+) -> Reply | None:
+    service = services.get(request.selector)
+    if service is None:
+        return Reply(SERVICE_UNAVAILABLE)
+    reply = journal.handle_request(session, request, service)
+    if reply is None and request.selector != MOCK_GREETING:
+        return Reply(SERVICE_UNAVAILABLE)
+    return reply
 
 
 def serve_requests(
     peer: socket.socket,
     wire: BinaryIO,
-    journal: Journal,
-    session: str,
-    services: dict[int, Service],
+    handle: Callable[[HostRequest], Reply | None],
 ) -> None:
     while first := wire.read(1):
         length = first[0]
-        if length not in (PLAN.size, TOOL.size, COMBINED.size):
+        if length not in REQUEST_SIZES:
             raise ValueError("invalid host request length")
         peer.settimeout(SOCKET_TIMEOUT)
         body = wire.read(length - 1)
         if len(body) != length - 1:
             raise ValueError("truncated host request")
         request = decode_request(first + body)
-        service = services.get(request.selector)
-        reply = Reply(SERVICE_UNAVAILABLE)
-        if service is not None:
-            reply = journal.handle_request(session, request, service)
-            if reply is None and request.selector != MOCK_GREETING:
-                reply = Reply(SERVICE_UNAVAILABLE)
+        reply = handle(request)
         if reply is not None:
-            length = PLAN.size + len(reply.data)
-            reply_kind = TOOL_REPLY if request.is_tool else PLAN_REPLY
-            header = PLAN.pack(length, VERSION, reply_kind, request.request_id, reply.status)
-            peer.sendall(header + reply.data)
+            peer.sendall(encode_reply(request, reply))
         peer.settimeout(None)
 
 
@@ -383,7 +333,10 @@ def run_qemu(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--journal", type=Path, default=JOURNAL, help="SQLite journal path")
+    parser.add_argument("--journal", type=Path, default=JOURNAL, help="live SQLite journal path")
+    parser.add_argument("--replay-journal", type=Path, help="source SQLite journal for offline replay")
+    parser.add_argument("--replay-session", help="recorded session ID")
+    parser.add_argument("--replay-goal", help="recorded hexadecimal goal handle")
     parser.add_argument("--budget-units", type=int, default=2, help="mock units per VM session")
     parser.add_argument(
         "--budget-tokens", type=int, default=MAX_TOKENS, help="tokens per model session"
@@ -394,11 +347,17 @@ def main() -> int:
     parser.add_argument("--budget-calls", type=int, default=1, help="MCP tool calls per VM session")
     parser.add_argument(
         "--mode",
-        choices=(*MOCK_ACTIONS, "ollama", "mcp", "combined", *PROBE_REPLIES),
+        choices=(*MOCK_ACTIONS, "ollama", "mcp", "combined", "replay", *PROBE_REPLIES),
         default="search",
         help="host response to exercise",
     )
     args = parser.parse_args()
+    replay_source = (args.replay_journal, args.replay_session, args.replay_goal)
+    if args.mode == "replay":
+        if None in replay_source:
+            parser.error("--mode replay requires --replay-journal, --replay-session and --replay-goal")
+    elif any(value is not None for value in replay_source):
+        parser.error("replay options require --mode replay")
     if not 0 <= args.budget_units < 2**63:
         parser.error("--budget-units must be a nonnegative SQLite integer")
     if not 0 <= args.budget_tokens < 2**63:
@@ -415,6 +374,14 @@ def main() -> int:
         parser.error(f"--mode {args.mode} requires --mcp-port between 1 and 65535")
     if not KERNEL.is_file():
         parser.error(f"build the RV64 release ELF from the Core repository first ({KERNEL})")
+
+    if args.mode == "replay":
+        replay = load_goal_replay(*replay_source)
+        print(
+            f"replay source session={replay.session} goal={replay.goal} launch={replay.launch} "
+            f"journal={args.replay_journal.resolve()}", file=sys.stderr, flush=True,
+        )
+        return run_qemu(b"PONG", partial(serve_requests, handle=replay.reply))
 
     if args.mode in PROBE_REPLIES:
         return run_qemu(PROBE_REPLIES[args.mode])
@@ -457,10 +424,8 @@ def main() -> int:
             flush=True,
         )
 
-        def serve(peer, wire):
-            serve_requests(peer, wire, journal, session, services)
-
-        return run_qemu(b"PONG", serve)
+        handle = partial(handle_live_request, journal, session, services)
+        return run_qemu(b"PONG", partial(serve_requests, handle=handle))
 
 
 if __name__ == "__main__":

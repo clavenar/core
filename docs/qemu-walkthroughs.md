@@ -14,6 +14,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
   - [Run a model-backed plan](#run-a-model-backed-plan)
   - [Search a host MCP fixture](#search-a-host-mcp-fixture)
   - [Run Ollama and both MCP searches in one goal](#run-ollama-and-both-mcp-searches-in-one-goal)
+  - [Replay a combined goal offline](#replay-a-combined-goal-offline)
 - [Reviewed renames](#reviewed-renames)
   - [Review a staged rename through echo](#review-a-staged-rename-through-echo)
   - [Require a supervisor review before commit](#require-a-supervisor-review-before-commit)
@@ -1530,6 +1531,49 @@ and distinct request IDs. The model reserves 2,080 tokens and settles its
 reported usage. The tool reserves and settles one call. The next goal's tool
 row is `denied` with zero calls used. A tool request whose outcome is
 unknown remains `in_flight` and keeps its call reservation.
+
+### Replay a combined goal offline
+
+Run the [combined walkthrough](#run-ollama-and-both-mcp-searches-in-one-goal)
+once and quit QEMU. From the journal query, take the session and goal IDs
+shared by the `tokens settled` and `calls settled` rows for the successful
+goal. In the same host Bash terminal, replace the two placeholders below
+with those IDs. `bridge_journal` still points to the recorded database.
+
+```sh
+replay_session=RECORDED_SESSION_ID
+replay_goal=RECORDED_GOAL_ID
+python3 platforms/qemu-riscv64-virt/host_bridge.py \
+  --mode replay --replay-journal "$bridge_journal" \
+  --replay-session "$replay_session" --replay-goal "$replay_goal"
+```
+
+The broker prints the recorded session, goal and launch before booting the
+new VM. It opens the source journal read-only and serves both host replies
+from that journal, so you can run replay with both providers offline.
+
+At the new `clsh>` prompt, give the new goal both tool grants and its
+local file grant.
+
+```text
+goal create --children 2 --allow-tool text.search@1 --allow-tool host.text.search@1 --read-bytes 18 --reply-bytes 1088
+goal grant-file --delegate-to grep --argument Hello /hello.txt
+agent run hello --plan find-greeting@8
+wait hello
+recv hello
+goal audit --reads
+goal close
+```
+
+`recv hello` prints `Hello from RamFS` and `Hello from MCP`, and the read
+audit shows `read_bytes=18`. The local MCP tool searches the fresh guest's
+file. Replay binds the saved model and host tool replies in order to one
+new goal and launch. Repeating the guest commands in the same VM reports
+`host model unavailable`. Restart replay for another run.
+
+The source must contain a settled model `search` decision followed by a
+settled MCP result for the same launch. A denied or in-flight operation,
+missing row, or inconsistent owner prevents the broker from starting QEMU.
 
 ### Require an exact tool revision for a goal
 

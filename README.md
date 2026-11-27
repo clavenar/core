@@ -87,6 +87,14 @@ The broker applies independent model token and host tool call allowances
 and records both requests under the same goal and agent launch.
 [Run the combined walkthrough](docs/qemu-walkthroughs.md#run-ollama-and-both-mcp-searches-in-one-goal)
 
+### Replay a recorded goal offline
+
+After a successful combined run, use `--mode replay` with the journal,
+recorded session and goal. The broker serves the saved model decision and
+host MCP result to one goal in a fresh VM. The guest still runs the local
+MCP search under its ordinary grants and budgets.
+[Replay a combined goal offline](docs/qemu-walkthroughs.md#replay-a-combined-goal-offline)
+
 ## Limit file reads to a directory
 
 At a fresh `clsh>` prompt, give `hello` a file that the shell can read but

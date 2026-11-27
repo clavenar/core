@@ -5,6 +5,7 @@ from http.client import HTTPConnection
 import json
 from typing import NamedTuple
 
+from bridge_protocol import valid_tool_text
 from host_json import HTTP_ERRORS, decode_json
 
 PROTOCOL_VERSION = "2025-11-25"
@@ -13,8 +14,6 @@ TOOL_NAME = "text.search"
 PATTERN = "Hello"
 TIMEOUT_SECONDS = 2
 RESPONSE_BYTES = 4096
-# 32-byte guest frame minus the 11-byte header and one status byte.
-RESULT_BYTES = 20
 
 
 class SearchResult(NamedTuple):
@@ -96,11 +95,10 @@ def read_text(reply: dict) -> bytes | None:
     if not isinstance(item, dict) or item.get("type") != "text":
         return None
     text = item.get("text")
-    if not isinstance(text, str) or len(text) > RESULT_BYTES:
+    if not isinstance(text, str) or not text.isascii():
         return None
-    if not all(" " <= char <= "~" for char in text.removesuffix("\n")):
-        return None
-    return text.encode("ascii")
+    encoded = text.encode("ascii")
+    return encoded if valid_tool_text(encoded) else None
 
 
 def post(

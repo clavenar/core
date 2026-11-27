@@ -433,6 +433,8 @@ pub(super) fn print_observation(bytes: &[u8]) {
     }
 }
 
+// Keep the publication report's formatting buffer out of other reply paths.
+#[inline(never)]
 pub(super) fn print_publication_observation(bytes: &[u8]) {
     let Some(snapshot) = PublicationObservation::decode(bytes) else {
         return print(b"invalid publication observation\r\n");
