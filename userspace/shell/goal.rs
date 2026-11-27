@@ -272,6 +272,9 @@ fn commit(goal: &mut CurrentGoal) {
         Some(CommitResult::Conflict) => color::print_line(color::RED, b"commit conflict"),
         Some(CommitResult::ReviewExpired) => color::print_line(color::YELLOW, b"review expired"),
         Some(CommitResult::PostconditionFailed) => print(b"postcondition failed\r\n"),
+        Some(CommitResult::StorageFailed) => {
+            color::print_line(color::RED, b"durable commit storage failed")
+        }
         None => {
             if matches!(
                 goal::status_with_deadline(goal.handle),
@@ -324,11 +327,12 @@ fn create(arguments: &[u8], current: &mut Option<CurrentGoal>) {
                 handle,
                 agent: None,
                 review: None,
-                require_rename_review: options.require_rename_review,
+                require_rename_review: options.require_rename_review || options.durable,
             });
             print_handle(b"goal created ", handle);
         }
         None if current.is_some() => print(b"goal already open\r\n"),
+        None if options.durable => print(b"cannot create durable goal\r\n"),
         None => print(b"cannot create goal\r\n"),
     }
 }
@@ -344,6 +348,7 @@ fn create_goal(options: &GoalOptions<'_>) -> Option<usize> {
         allowed_tools: options.allowed_tools,
         require_rename_review: options.require_rename_review,
         rename_limit: options.rename_limit.unwrap_or(1),
+        durable: options.durable,
     };
     // Keep the policy descriptors open through goal creation.
     let read_directory = open_policy_handle(options.read_under)?;

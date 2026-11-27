@@ -3,6 +3,7 @@ use clv_abi::audit::{
 };
 use clv_abi::goal::{MAX_GOAL_RENAMES, PublicationError, RENAME_DIFF_MAX_BYTES, RenameOptions};
 
+use super::durable::EncodedFile;
 use super::{
     CWD_PATH_CAPACITY, DirectoryId, NAME_LIMIT, Name, Node, RamFs, Revision, TaskFs,
     WRITABLE_FILE_CAPACITY, WritableFile,
@@ -15,14 +16,23 @@ pub(crate) struct RenamePolicy {
     // RamFS refuses rmdir on this directory for the lifetime of the owning goal.
     pub(crate) directory: DirectoryId,
     preserved_files: [Option<PreservedFile>; MAX_GOAL_RENAMES],
+    durable: bool,
 }
 
 impl RenamePolicy {
-    pub(crate) fn capture(caller: &TaskFs, fs: &mut RamFs, options: RenameOptions) -> Option<Self> {
+    pub(crate) fn capture(
+        caller: &TaskFs,
+        fs: &mut RamFs,
+        options: RenameOptions,
+        durable: bool,
+    ) -> Option<Self> {
         let directory = match options.directory {
             None => DirectoryId::Root,
             Some(fd) => caller.directory_for_handle(fd)?,
         };
+        if durable && directory != DirectoryId::Root {
+            return None;
+        }
         let mut preserved_files = [const { None }; MAX_GOAL_RENAMES];
         for (input, fd) in preserved_files.iter_mut().zip(options.preserve_files) {
             if let Some(fd) = fd {
@@ -41,7 +51,12 @@ impl RenamePolicy {
         Some(Self {
             directory,
             preserved_files,
+            durable,
         })
+    }
+
+    fn allows(&self, fs: &RamFs, index: usize, parent: DirectoryId) -> bool {
+        self.directory.contains(fs, parent) && (!self.durable || fs.can_save_file(index, parent))
     }
 
     pub(crate) fn release_inputs(&mut self, fs: &mut RamFs) {
@@ -143,9 +158,39 @@ pub(crate) struct StagedRenames {
     second: Option<StagedRename>,
 }
 
-struct PreparedRenames {
+pub(crate) struct PreparedRenames {
     names: [Option<(usize, Name)>; MAX_GOAL_RENAMES],
     revision: Revision,
+    durable: bool,
+}
+
+impl PreparedRenames {
+    pub(crate) fn durable_file(&self, fs: &RamFs) -> Option<EncodedFile> {
+        if !self.durable {
+            return None;
+        }
+        let (index, name) = self.names[0]
+            .as_ref()
+            .expect("prepared rename has a source");
+        let file = fs.writable[*index]
+            .as_ref()
+            .expect("validated rename source");
+        Some(EncodedFile::new(name, file))
+    }
+
+    pub(crate) fn publish(self, fs: &mut RamFs) {
+        // The commit syscall holds exclusive access from preparation through publication.
+        for (index, name) in self.names.into_iter().flatten() {
+            fs.writable[index]
+                .as_mut()
+                .expect("validated rename source")
+                .name = name;
+            if self.durable {
+                fs.pin_durable_file(index);
+            }
+        }
+        fs.revision = self.revision;
+    }
 }
 
 impl StagedRenames {
@@ -204,7 +249,7 @@ impl StagedRenames {
         }
     }
 
-    fn prepare(
+    pub(crate) fn prepare(
         &self,
         fs: &RamFs,
         policy: &RenamePolicy,
@@ -215,7 +260,7 @@ impl StagedRenames {
         }
         if self
             .iter()
-            .any(|rename| !policy.directory.contains(fs, rename.parent))
+            .any(|rename| !policy.allows(fs, rename.file_index, rename.parent))
         {
             return Err(PublicationError::PostconditionFailed);
         }
@@ -229,29 +274,15 @@ impl StagedRenames {
             }
         }
         let revision = fs.revision.next().ok_or(PublicationError::Unavailable)?;
-        Ok(PreparedRenames { names, revision })
+        Ok(PreparedRenames {
+            names,
+            revision,
+            durable: policy.durable,
+        })
     }
 
     pub(crate) fn check(&self, fs: &RamFs, policy: &RenamePolicy) -> Result<(), PublicationError> {
         self.prepare(fs, policy).map(|_| ())
-    }
-
-    pub(crate) fn publish(
-        &self,
-        fs: &mut RamFs,
-        policy: &RenamePolicy,
-    ) -> Result<(), PublicationError> {
-        let prepared = self.prepare(fs, policy)?;
-        // The kernel runs this syscall without scheduling another task. Every
-        // source is linked and every destination has been validated above.
-        for (index, name) in prepared.names.into_iter().flatten() {
-            fs.writable[index]
-                .as_mut()
-                .expect("validated rename source")
-                .name = name;
-        }
-        fs.revision = prepared.revision;
-        Ok(())
     }
 }
 
@@ -265,7 +296,7 @@ impl RamFs {
         let (index, file) = self
             .linked_file(source)
             .ok_or(RenameDenial::InvalidSource)?;
-        if !policy.directory.contains(self, file.parent) {
+        if !policy.allows(self, index, file.parent) {
             return Err(RenameDenial::OutsideRenameScope);
         }
         if !Name::valid(new_name) {

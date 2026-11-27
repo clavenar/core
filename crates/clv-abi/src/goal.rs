@@ -168,6 +168,8 @@ pub enum CommitResult {
     Conflict = 1,
     PostconditionFailed = 2,
     ReviewExpired = 3,
+    // Publication audit reserves outcome codes 4 through 8.
+    StorageFailed = 9,
 }
 
 impl CommitResult {
@@ -177,6 +179,7 @@ impl CommitResult {
             1 => Self::Conflict,
             2 => Self::PostconditionFailed,
             3 => Self::ReviewExpired,
+            9 => Self::StorageFailed,
             _ => return None,
         })
     }
@@ -391,11 +394,14 @@ pub struct CreatePolicy {
     /// Only the bound echo supervisor can approve publication of a rename.
     pub require_rename_review: bool,
     pub rename_limit: usize,
+    /// Flush one root-level rename to the journal before publishing it.
+    pub durable: bool,
 }
 
 impl CreatePolicy {
     const REQUIRE_RENAME_REVIEW: usize = 1 << 5;
     const ALLOW_TWO_RENAMES: usize = 1 << 6;
+    const DURABLE: usize = 1 << 7;
 
     pub fn registers(&self) -> Option<[usize; 6]> {
         if let [first, Some(second)] = self.allowed_tools
@@ -411,20 +417,27 @@ impl CreatePolicy {
         }
         match self.rename_limit {
             1 => {}
-            MAX_GOAL_RENAMES => words[1] |= Self::ALLOW_TWO_RENAMES,
+            MAX_GOAL_RENAMES if !self.durable => words[1] |= Self::ALLOW_TWO_RENAMES,
             _ => return None,
+        }
+        if self.durable {
+            words[1] |= Self::DURABLE;
         }
         Some(words)
     }
 
     pub fn from_registers(mut words: [usize; 6], second_tool: Option<ToolId>) -> Option<Self> {
         let require_rename_review = words[1] & Self::REQUIRE_RENAME_REVIEW != 0;
+        let durable = words[1] & Self::DURABLE != 0;
         let rename_limit = if words[1] & Self::ALLOW_TWO_RENAMES != 0 {
+            if durable {
+                return None;
+            }
             MAX_GOAL_RENAMES
         } else {
             1
         };
-        words[1] &= !(Self::REQUIRE_RENAME_REVIEW | Self::ALLOW_TWO_RENAMES);
+        words[1] &= !(Self::REQUIRE_RENAME_REVIEW | Self::ALLOW_TWO_RENAMES | Self::DURABLE);
         let (options, read_limits, allowed_tool) =
             CreateOptions::from_registers_with_allowed_tool(words)?;
         if second_tool.is_some() && (allowed_tool.is_none() || allowed_tool == second_tool) {
@@ -436,6 +449,7 @@ impl CreatePolicy {
             allowed_tools: [allowed_tool, second_tool],
             require_rename_review,
             rename_limit,
+            durable,
         })
     }
 }

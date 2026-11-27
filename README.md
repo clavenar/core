@@ -2,11 +2,13 @@
 
 Clavenar is a Rust operating system for running programs and agents with
 explicit authority and resource limits. The native RV64 prototype boots on
-QEMU `virt` with OpenSBI. It runs isolated ELF programs, a shell and a
-volatile filesystem. The goal owner can grant a file, set a deadline and limit
-reads and replies. At goal creation the owner can require a separate
-supervisor to review a staged rename. The owner decides whether to publish it.
-[Try a required supervisor review](docs/qemu-walkthroughs.md#require-a-supervisor-review-before-commit)
+QEMU `virt` with OpenSBI. It runs isolated ELF programs, a shell and RamFS.
+The goal owner can grant a file, set a deadline and limit reads and replies.
+At goal creation the owner can require a separate supervisor to review a
+staged rename. The owner decides whether to publish it.
+A durable goal can save the resulting root-level file to a dedicated VirtIO
+block journal and restore it at boot.
+[Try a required supervisor review](docs/qemu-walkthroughs.md#require-a-supervisor-review-before-commit) · [Persist a reviewed rename](docs/qemu-walkthroughs.md#persist-a-reviewed-rename)
 
 ## Build and run the RV64 kernel
 

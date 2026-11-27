@@ -1,8 +1,9 @@
 # QEMU walkthroughs
 
 These examples use the native `clsh>` shell. Start each independent example
-with a fresh boot unless it explicitly continues the previous one. RamFS and
-goal handles live for one boot. [Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)
+with a fresh boot unless it explicitly continues the previous one. Goal
+handles and ordinary RamFS changes live for one boot.
+[Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)
 
 - [Boot and shell](#boot-and-shell)
   - [Probe a VirtIO block device](#probe-a-virtio-block-device)
@@ -22,6 +23,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
 - [Reviewed renames](#reviewed-renames)
   - [Review a staged rename through echo](#review-a-staged-rename-through-echo)
   - [Require a supervisor review before commit](#require-a-supervisor-review-before-commit)
+  - [Persist a reviewed rename](#persist-a-reviewed-rename)
   - [Trace a rename commit to its reviewer](#trace-a-rename-commit-to-its-reviewer)
   - [Publish two renames in one commit](#publish-two-renames-in-one-commit)
   - [Observe a reviewed publication](#observe-a-reviewed-publication)
@@ -31,8 +33,9 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
 
 In an ANSI terminal, the shell displays the `clsh>` prompt and help headings
 in green. `goal commit` prints `rename committed` in green, `review expired`
-or `goal deadline expired` in yellow, and `commit conflict` in red. The shell
-resets the color after each prompt, heading, or message.
+or `goal deadline expired` in yellow, and `commit conflict` or
+`durable commit storage failed` in red. The shell resets the color after
+each prompt, heading, or message.
 
 Type `help` for the full command reference. It groups commands by task, shows
 their arguments beside short descriptions, and lists options under the command
@@ -2137,6 +2140,91 @@ To check a stale approval, repeat on a fresh boot and insert
 `write /draft.txt revised` after `goal diff --via echo`. The second commit
 reports `commit conflict`. Before closing the goal, `cat /draft.txt`
 prints `revised` and `cat /final.txt` reports `cannot open path`.
+
+### Persist a reviewed rename
+
+From the Linux prompt in `core`, build the kernel and create a dedicated
+raw image. Sector 0 contains `CLVRNM01` followed by zeros. The two slots
+use the same record format as the journal demo.
+[Journal record format](#recover-a-previous-journal-record)
+
+Each payload contains a little-endian 16-bit basename length, the
+basename bytes and up to 256 bytes of file data.
+
+```sh
+durable_disk="$(mktemp -t clavenar-rename.XXXXXX)"
+truncate -s 1M "$durable_disk"
+printf 'CLVRNM01' | dd of="$durable_disk" conv=notrunc status=none
+
+boot_durable() {
+  qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic \
+    -kernel target/riscv64gc-unknown-none-elf/release/clavenar-kernel \
+    -global virtio-mmio.force-legacy=off \
+    -drive "file=${2:-$durable_disk},format=raw,if=none,id=durable,cache=writeback,readonly=$1,rerror=report,werror=report" \
+    -device virtio-blk-device,drive=durable
+}
+
+boot_durable off
+```
+
+Expect `durable rename journal ready` after Sv39 paging. Paste this block
+at `clsh>`.
+
+```text
+write /draft.txt keep
+goal create --durable --preserve-file /draft.txt --reply-bytes 0
+goal grant-file --stage-rename /draft.txt
+agent run hello --stage-rename final.txt
+wait hello
+goal diff --via echo
+goal commit
+cat /final.txt
+goal close
+```
+
+`--durable` requires approval from `echo`. After that approval,
+`goal commit` prints `rename committed` once the new record has been
+flushed and the file is visible as `/final.txt`.
+
+Exit QEMU with `Ctrl+a`, then `x`. In the same Linux terminal, run
+`boot_durable on` to attach the saved image read-only. Look for
+`durable rename recovered` before `clsh>`. Run `cat /final.txt` to see
+`keep`, and `cat /draft.txt` to see `cannot open path`.
+
+The journal holds one root-level file. Later durable renames can update
+that same file, alternating sectors. Ordinary edits and unlinks in RamFS
+are volatile, and boot recovers the highest valid generation.
+
+To inject a write failure, quit QEMU and run this block from the same
+Linux terminal.
+
+```sh
+fault_config="$(mktemp -t clavenar-rename-fault.XXXXXX)"
+printf '%s\n' '[inject-error]' 'event = "write_aio"' 'errno = "5"' > "$fault_config"
+boot_durable off "blkdebug:$fault_config:$durable_disk"
+```
+
+At `clsh>`, try to rename the recovered file again.
+
+```text
+goal create --durable --preserve-file /final.txt --reply-bytes 0
+goal grant-file --stage-rename /final.txt
+agent run hello --stage-rename replacement.txt
+wait hello
+goal diff --via echo
+goal commit
+cat /final.txt
+cat /replacement.txt
+goal audit --publication
+```
+
+Expect `durable commit storage failed`, followed by `keep` for
+`/final.txt` and `cannot open path` for `/replacement.txt`. The audit
+records `storage-failed` and the diff stays staged. With this write
+failure, the next boot still recovers `/final.txt`. A flush failure can
+happen after the new bytes reach the disk. In that case, the running guest
+keeps the original name, and recovery selects whichever valid record has
+the highest generation.
 
 ### Revoke a rename grant after review
 

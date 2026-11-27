@@ -227,6 +227,7 @@ pub(super) fn publication_outcome_label(outcome: PublicationOutcome) -> &'static
         PublicationOutcome::Commit(CommitResult::Conflict) => b"conflict",
         PublicationOutcome::Commit(CommitResult::PostconditionFailed) => b"postcondition-failed",
         PublicationOutcome::Commit(CommitResult::ReviewExpired) => b"review-expired",
+        PublicationOutcome::Commit(CommitResult::StorageFailed) => b"storage-failed",
         PublicationOutcome::Unavailable => b"unavailable",
         PublicationOutcome::Discarded => b"discarded",
         PublicationOutcome::DiscardedByCancel => b"discarded-by-cancel",

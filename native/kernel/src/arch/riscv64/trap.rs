@@ -4,7 +4,6 @@ use core::arch::{asm, global_asm};
 use super::{idle, timer};
 use crate::console::{write_hex, write_task};
 use crate::drivers::uart;
-use crate::drivers::virtio::console::Port;
 use crate::fs::ramfs::RamFs;
 use crate::memory::sv39::AddressSpace;
 use crate::memory::usercopy::SSTATUS_SUM;
@@ -80,7 +79,7 @@ fn supervisor_status() -> usize {
 /// vector and preparing all user address spaces.
 pub(crate) unsafe fn start(
     tasks: [(AddressSpace, usize); TASK_COUNT],
-    after_paging: impl FnOnce() -> Option<Port>,
+    after_paging: impl FnOnce(&mut Scheduler, &mut RamFs),
 ) -> ! {
     // SAFETY: No user task has run, and only this hart accesses the state.
     let state = unsafe { &mut *(&raw mut KERNEL_STATE) };
@@ -96,7 +95,7 @@ pub(crate) unsafe fn start(
         idle();
     }
     uart::write(b"Sv39 paging enabled\r\n");
-    scheduler.attach_host_bridge(after_paging());
+    after_paging(scheduler, &mut state.ramfs);
     let first_frame = *scheduler.current_frame();
     arm_timer();
     // SAFETY: The first task's code and stack are mapped in the active space.

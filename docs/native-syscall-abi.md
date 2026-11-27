@@ -1,7 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.65 adds a read-only monitor for rename publication and discard.
+Kernel 0.0.74 adds optional durable rename publication to the goal calls.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -53,8 +53,9 @@ to remove the empty directory. Use `exit` to stop the shell.
 
 RamFS starts with read-only `/hello.txt` and `/about.txt` and holds up to four
 directories besides the root and four writable files of 256 bytes each.
-Directories and writable files live in RAM until reboot. In the shell,
-absolute paths start at `/` and relative paths start at its current directory.
+Ordinary writes, unlinks and directory changes live for one boot. A durable
+rename journal can restore one of the writable files. In the shell, absolute
+paths start at `/` and relative paths start at its current directory.
 Within a path, `.` keeps the directory reached so far and `..` moves to its
 parent, staying at `/` when already there. Creating a file or directory
 requires an existing parent. Each task can hold four live handles, each with
@@ -455,7 +456,10 @@ any helper permitted by its grants. A second tool requires bit 4 and two
 distinct registered IDs. A host tool always requires an exact grant. Each
 budget word applies only when its
 flag is set, and zero then means a zero-byte budget. Bit 5 requires a
-supervisor rename review. Bit 6 allows two staged renames.
+supervisor rename review. Bit 6 allows two staged renames. Bit 7 makes the
+rename durable and requires supervisor review. With bit 7 set, bit 6 must
+be clear, the rename directory must be the root if supplied, and a writable
+rename journal with flush support must be available.
 
 An omitted descriptor is `NO_RAMFS_HANDLE` (all ones). Zero is a valid
 descriptor. A read or rename directory must be open in the owner's handle
@@ -650,6 +654,10 @@ destination and the goal's rename scope. The batch must include a rename
 of every preserved file with the bytes captured at goal creation. A
 conflict takes precedence over a failed postcondition.
 
+The durable scope permits one root-level file. After the journal binds to a
+file at the first durable commit or boot recovery, subsequent durable goals
+can stage renames only of that file's identity.
+
 An approved owner review returns a nonzero, single-use token in `a2` and an
 absolute guest deadline in nanoseconds in `a3`. With a zero token, `a3`
 contains one of these verdicts.
@@ -684,6 +692,16 @@ token and the diff is empty. With a live token, it repeats the RamFS checks
 before updating any names. A failed check preserves the public files and
 staged diff. Success updates all names in the same syscall, advances the
 revision once and clears the diff.
+
+For a durable goal, call 62 validates the approval and prepares the rename
+before writing the new basename and current file bytes to the alternate
+journal sector. It waits for the write and flush within one 500 ms guest
+deadline. After both complete, it publishes the prepared rename and
+returns 0. A storage failure returns 9, consumes the approval, keeps the
+original name public and leaves the diff staged. A write or flush error
+disables further journal writes for that boot.
+[Durable rename walkthrough](qemu-walkthroughs.md#persist-a-reviewed-rename)
+
 Public file and directory creation or removal, truncating opens, nonempty
 writes to linked files and publication advance the revision. A mutation
 requiring a new revision fails if the counter is exhausted.
@@ -711,8 +729,9 @@ running goal can stage a replacement under the same rules.
 
 ### Delegating a rename review
 
-Bit 5 of the creation flags requires an `echo` supervisor review for the
-goal's lifetime. It can be combined with file scopes, budgets and timeouts.
+Bit 5 or bit 7 of the creation flags requires an `echo` supervisor review
+for the goal's lifetime. Review can be combined with file scopes, budgets
+and timeouts.
 An owner review that copies the pending diff returns the names, a zero
 token and verdict 5.
 Direct inspection preserves an existing approval and its deadline.
@@ -994,7 +1013,7 @@ bytes and displays `<unavailable>` when the field could not be copied.
 | 5 | `invalid-source` — the owner's descriptor is invalid or the source is unavailable as a linked writable file |
 | 6 | `goal-inactive` — the goal has completed, failed or been cancelled |
 | 7 | `invalid-buffer` — the nonempty name does not fit inside the caller's user stack |
-| 8 | `outside-rename-scope` — the file's parent falls outside the goal's directory tree |
+| 8 | `outside-rename-scope` — the source falls outside the goal's directory tree or its durable file scope |
 | 9 | `base-changed` — the additional rename comes from a different RamFS revision |
 | 10 | `source-already-staged` — the source file already has a staged rename |
 | 11 | `destination-already-staged` — another staged rename targets the same destination path |
@@ -1045,16 +1064,17 @@ bytes. A published batch advances the revision by one.
 | 6 | `discarded-by-cancel` |
 | 7 | `discarded-by-revoke` |
 | 8 | `discarded-by-expiry` |
+| 9 | `storage-failed` |
 
 Register `a2` contains the supervisor's launch handle for a delegated
 approval, all ones for an owner's direct approval, or zero for a discard
 or an empty history.
 Register `a3` returns the goal handle on success. The identity comes from
 the approval the kernel consumed at commit, including commits that failed
-because of a conflict or an expired review. A passing review replaces the
-stored reviewer even when it reuses a live token. Another launch in the same
-task slot leaves earlier attribution intact. The shell prints the goal
-handle and reviewer on commit rows, using `reviewer=owner` for a direct review.
+because of a conflict, an expired review or a storage error. A passing review
+replaces the stored reviewer even when it reuses a live token. Another launch
+in the same task slot leaves earlier attribution intact. The shell prints the
+goal handle and reviewer on commit rows, using `reviewer=owner` for a direct review.
 
 The owner can reuse a single stack buffer to read indices zero through
 `count - 1`. To read a consistent set of rows, the shell first checks

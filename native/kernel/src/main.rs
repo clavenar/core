@@ -17,10 +17,12 @@ use console::write_hex;
 use core::panic::PanicInfo;
 use drivers::uart;
 use drivers::virtio::block;
-use drivers::virtio::console::{Console, ProbeError};
+use drivers::virtio::console::{Console, Port, ProbeError};
+use fs::ramfs::{RamFs, SavedFile};
 use memory::frame::FrameAllocator;
 use memory::sv39;
 use memory::user_image;
+use scheduler::Scheduler;
 
 // Make Cargo rebuild the kernel when the linker script changes.
 const _: &str = include_str!("../../linker/riscv64.ld");
@@ -35,7 +37,7 @@ extern "C" fn kernel_main() -> ! {
     );
     uart::write(banner.as_bytes());
 
-    probe_block();
+    let durable_disk = probe_block();
     // SAFETY: QEMU virt supplies the MMIO windows, and paging is still disabled.
     let bridge = unsafe { Console::discover() };
     // SAFETY: The single boot hart claims the frame pool here once.
@@ -47,7 +49,12 @@ extern "C" fn kernel_main() -> ! {
         &mut frames,
         pages,
         uart::BASE,
-        bridge.as_ref().map(Console::base),
+        [
+            bridge.as_ref().map(Console::base),
+            durable_disk.as_ref().map(block::Block::base),
+        ]
+        .into_iter()
+        .flatten(),
     )
     .expect("could not build supervisor mappings");
     let tasks = core::array::from_fn(|task| {
@@ -59,33 +66,60 @@ extern "C" fn kernel_main() -> ! {
             images[image].entry,
         )
     });
-    let probe_bridge = || {
-        let bridge = bridge?;
-        // SAFETY: This runs on the boot hart with the selected MMIO page mapped.
-        match unsafe { bridge.probe() } {
-            Ok(port) => {
-                uart::write(b"host bridge ready\r\n");
-                Some(port)
-            }
-            Err(error) => {
-                uart::write(match error {
-                    ProbeError::Device => b"host bridge unavailable\r\n",
-                    ProbeError::InvalidReply => b"host bridge invalid reply\r\n",
-                    ProbeError::Timeout => b"host bridge timed out\r\n",
-                });
-                None
-            }
-        }
+    let after_paging = |scheduler: &mut Scheduler, fs: &mut RamFs| {
+        scheduler.attach_durable_disk(durable_disk.and_then(|disk| recover_durable_disk(disk, fs)));
+        scheduler.attach_host_bridge(bridge.and_then(probe_bridge));
     };
     // SAFETY: The boot hart installed the trap vector and built every task's address space.
-    unsafe { trap::start(tasks, probe_bridge) }
+    unsafe { trap::start(tasks, after_paging) }
 }
 
-fn probe_block() {
-    // SAFETY: This is called once on the boot hart, before enabling paging.
-    let Some(result) = (unsafe { block::probe() }) else {
-        return;
+fn probe_bridge(bridge: Console) -> Option<Port> {
+    // SAFETY: This runs on the boot hart with the selected MMIO page mapped.
+    match unsafe { bridge.probe() } {
+        Ok(port) => {
+            uart::write(b"host bridge ready\r\n");
+            Some(port)
+        }
+        Err(error) => {
+            uart::write(match error {
+                ProbeError::Device => b"host bridge unavailable\r\n",
+                ProbeError::InvalidReply => b"host bridge invalid reply\r\n",
+                ProbeError::Timeout => b"host bridge timed out\r\n",
+            });
+            None
+        }
+    }
+}
+
+fn recover_durable_disk(disk: block::Block, fs: &mut RamFs) -> Option<block::JournalDisk> {
+    use block::JournalLoadError;
+    let (journal, saved) = match disk.open_journal(SavedFile::decode) {
+        Ok(recovered) => recovered,
+        Err(error) => {
+            uart::write(match error {
+                JournalLoadError::TooSmall => b"durable rename journal needs three sectors\r\n",
+                JournalLoadError::InvalidSlots => b"durable rename journal invalid slots\r\n",
+                JournalLoadError::Io(error) => block_error_message(error),
+            });
+            return None;
+        }
     };
+    if let Some(file) = saved {
+        fs.restore_durable_file(file);
+        uart::write(b"durable rename recovered\r\n");
+    }
+    uart::write(if journal.is_writable() {
+        b"durable rename journal ready\r\n"
+    } else {
+        b"durable rename journal writes unavailable\r\n"
+    });
+    Some(journal)
+}
+
+fn probe_block() -> Option<block::Block> {
+    // SAFETY: This is called once on the boot hart, before enabling paging.
+    let result = unsafe { block::probe() }?;
     match result {
         Ok(probe) => {
             uart::write(b"virtio block sectors=");
@@ -93,7 +127,7 @@ fn probe_block() {
             uart::write(b" sector0=");
             write_hex(u64::from_be_bytes(probe.prefix) as usize);
             uart::write(b"\r\n");
-            use block::{DemoOutcome, ScratchProbe, WriteRestriction};
+            use block::{DemoOutcome, JournalLoadError, ScratchProbe, WriteRestriction};
             match probe.scratch {
                 Some(ScratchProbe::Marker(demo)) => uart::write(match demo {
                     Ok(DemoOutcome::Flushed) => b"virtio block demo flushed\r\n",
@@ -109,11 +143,19 @@ fn probe_block() {
                     Err(error) => block_error_message(error),
                 }),
                 Some(ScratchProbe::Journal(Ok(probe))) => report_journal(probe),
-                Some(ScratchProbe::Journal(Err(error))) => uart::write(block_error_message(error)),
+                Some(ScratchProbe::Journal(Err(error))) => uart::write(match error {
+                    JournalLoadError::TooSmall => b"virtio block journal needs three sectors\r\n",
+                    JournalLoadError::InvalidSlots => b"virtio block journal invalid slots\r\n",
+                    JournalLoadError::Io(error) => block_error_message(error),
+                }),
                 None => {}
             }
+            probe.durable_disk
         }
-        Err(error) => uart::write(block_error_message(error)),
+        Err(error) => {
+            uart::write(block_error_message(error));
+            None
+        }
     }
 }
 
@@ -132,8 +174,6 @@ fn report_journal(probe: block::JournalProbe) {
         JournalUpdate::Blocked(WriteRestriction::FlushUnavailable) => {
             uart::write(b"virtio block journal flush unavailable\r\n");
         }
-        JournalUpdate::TooSmall => uart::write(b"virtio block journal needs three sectors\r\n"),
-        JournalUpdate::InvalidSlots => uart::write(b"virtio block journal invalid slots\r\n"),
         JournalUpdate::GenerationExhausted => {
             uart::write(b"virtio block journal generation exhausted\r\n");
         }

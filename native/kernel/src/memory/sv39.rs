@@ -42,7 +42,7 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
         frames: &mut FrameAllocator<'_>,
         user_code: [[Option<&Frame>; MAX_USER_IMAGE_PAGES]; PROGRAMS],
         uart: usize,
-        bridge: Option<usize>,
+        windows: impl IntoIterator<Item = usize>,
     ) -> Option<Self> {
         let kernel_middle = frames.allocate_zeroed()?;
         let kernel_leaves = frames.allocate_zeroed()?;
@@ -64,17 +64,17 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
             kernel_leaves.words_mut()[vpn_index(code, 0)] = 0;
         }
         map_range(mmio_leaves, uart, uart + FRAME_SIZE, READ | WRITE | DIRTY);
-        if let Some(bridge) = bridge {
+        for window in windows {
             // The selected transport must fit in the UART's supervisor leaf table.
-            if bridge >> SUPERPAGE_SHIFT != uart >> SUPERPAGE_SHIFT
-                || !bridge.is_multiple_of(FRAME_SIZE)
+            if window >> SUPERPAGE_SHIFT != uart >> SUPERPAGE_SHIFT
+                || !window.is_multiple_of(FRAME_SIZE)
             {
                 return None;
             }
             map_range(
                 mmio_leaves,
-                bridge,
-                bridge + FRAME_SIZE,
+                window,
+                window + FRAME_SIZE,
                 READ | WRITE | DIRTY,
             );
         }

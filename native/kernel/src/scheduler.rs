@@ -15,6 +15,7 @@ use clv_abi::{
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
+use crate::drivers::virtio::block::JournalDisk;
 use crate::drivers::virtio::console::Port;
 use crate::fs::ramfs::{RamFs, TaskFs};
 use crate::host_bridge::HostBridge;
@@ -193,6 +194,7 @@ pub(crate) struct Scheduler {
     tasks: [Task; TASK_COUNT],
     initial_status: usize,
     goal: Option<Goal>,
+    durable_disk: Option<JournalDisk>,
     host_bridge: Option<HostBridge>,
     /// The dedicated monitor owns this snapshot from wakeup until its grant is used or revoked.
     monitor_report: Option<MonitorReport>,
@@ -212,6 +214,7 @@ impl Scheduler {
             }),
             initial_status: sstatus,
             goal: None,
+            durable_disk: None,
             host_bridge: None,
             monitor_report: None,
             read_denial_watch: None,
@@ -223,6 +226,10 @@ impl Scheduler {
 
     pub(crate) fn attach_host_bridge(&mut self, port: Option<Port>) {
         self.host_bridge = port.map(HostBridge::new);
+    }
+
+    pub(crate) fn attach_durable_disk(&mut self, disk: Option<JournalDisk>) {
+        self.durable_disk = disk;
     }
 
     pub(crate) fn host_request_pending(&self) -> bool {

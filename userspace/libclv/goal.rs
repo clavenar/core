@@ -139,6 +139,7 @@ pub fn create_with_timeout(
             allowed_tools: [allowed_tool, None],
             require_rename_review: false,
             rename_limit: 1,
+            durable: false,
         },
         files,
         timeout_ms,

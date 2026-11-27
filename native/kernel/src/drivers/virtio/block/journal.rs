@@ -9,7 +9,7 @@ const DEMO_PAYLOADS: [&[u8]; 2] = [b"CLVSLOT1", b"CLVSLOT2"];
 const VERSION: u32 = 1;
 const RECORD_HEADER_BYTES: usize = 16;
 const CHECKSUM_OFFSET: usize = SECTOR_BYTES - size_of::<u32>();
-const MAX_PAYLOAD_BYTES: usize = CHECKSUM_OFFSET - RECORD_HEADER_BYTES;
+pub(super) const MAX_PAYLOAD_BYTES: usize = CHECKSUM_OFFSET - RECORD_HEADER_BYTES;
 
 #[derive(Clone, Copy)]
 struct Record<'a> {
@@ -78,6 +78,7 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct JournalRecord {
     pub(crate) generation: u64,
     pub(crate) sector: u64,
@@ -92,70 +93,106 @@ pub(crate) struct JournalProbe {
 pub(crate) enum JournalUpdate {
     Flushed(JournalRecord),
     Blocked(WriteRestriction),
-    TooSmall,
-    InvalidSlots,
     GenerationExhausted,
     Failed(ProbeError),
 }
 
-pub(super) fn run(block: &mut Block<'_>) -> Result<JournalProbe, ProbeError> {
-    if block.sectors <= SLOT_SECTORS[1] {
-        return Ok(JournalProbe {
-            recovered: None,
-            update: JournalUpdate::TooSmall,
+pub(crate) enum JournalLoadError {
+    TooSmall,
+    InvalidSlots,
+    Io(ProbeError),
+}
+
+pub(super) struct Journal {
+    latest: Option<JournalRecord>,
+}
+
+impl Journal {
+    pub(super) fn load<T>(
+        block: &mut Block,
+        decode: impl Fn(&[u8]) -> Option<T>,
+    ) -> Result<(Self, Option<T>), JournalLoadError> {
+        if block.sectors <= SLOT_SECTORS[1] {
+            return Err(JournalLoadError::TooSmall);
+        }
+        let slots = [
+            block
+                .read_sector(SLOT_SECTORS[0])
+                .map_err(JournalLoadError::Io)?,
+            block
+                .read_sector(SLOT_SECTORS[1])
+                .map_err(JournalLoadError::Io)?,
+        ];
+        let records = slots.each_ref().map(|sector| {
+            let record = Record::decode(sector)?;
+            Some((record, decode(record.payload)?))
         });
-    }
-    let slots = [
-        block.read_sector(SLOT_SECTORS[0])?,
-        block.read_sector(SLOT_SECTORS[1])?,
-    ];
-    let records = slots.each_ref().map(Record::decode);
-    if matches!(records, [Some(first), Some(second)] if first.generation == second.generation) {
-        return Ok(JournalProbe {
-            recovered: None,
-            update: JournalUpdate::InvalidSlots,
-        });
-    }
-    let latest = records
-        .into_iter()
-        .enumerate()
-        .filter_map(|(slot, record)| record.map(|record| (slot, record)))
-        .max_by_key(|(_, record)| record.generation);
-    if latest.is_none() && slots.iter().any(|slot| slot != &BLANK_SECTOR) {
-        return Ok(JournalProbe {
-            recovered: None,
-            update: JournalUpdate::InvalidSlots,
-        });
+        if matches!(&records, [Some((first, _)), Some((second, _))]
+            if first.generation == second.generation)
+        {
+            return Err(JournalLoadError::InvalidSlots);
+        }
+        let latest = records
+            .into_iter()
+            .enumerate()
+            .filter_map(|(slot, record)| record.map(|(record, value)| (slot, record, value)))
+            .max_by_key(|(_, record, _)| record.generation);
+        if let Some((slot, record, value)) = latest {
+            Ok((
+                Self {
+                    latest: Some(record.report(SLOT_SECTORS[slot])),
+                },
+                Some(value),
+            ))
+        } else if slots == [BLANK_SECTOR; 2] {
+            Ok((Self { latest: None }, None))
+        } else {
+            Err(JournalLoadError::InvalidSlots)
+        }
     }
 
-    let recovered = latest.map(|(slot, record)| record.report(SLOT_SECTORS[slot]));
-    if let Some(restriction) = block.write_restriction() {
-        return Ok(JournalProbe {
-            recovered,
-            update: JournalUpdate::Blocked(restriction),
-        });
+    pub(super) fn can_append(&self) -> bool {
+        self.latest
+            .is_none_or(|record| record.generation < u64::MAX)
     }
 
-    let generation = latest.map_or(0, |(_, record)| record.generation);
-    let Some(generation) = generation.checked_add(1) else {
-        return Ok(JournalProbe {
-            recovered,
-            update: JournalUpdate::GenerationExhausted,
-        });
-    };
-    // Keep the recovered record intact while writing its replacement in the other slot.
-    let slot = latest.map_or(0, |(slot, _)| 1 - slot);
-    let record = Record {
-        generation,
-        payload: DEMO_PAYLOADS[slot],
-    };
-    let bytes = record
-        .encode()
-        .expect("the journal demo record fits one sector");
-    let sector = SLOT_SECTORS[slot];
-    let update = match block.write_and_flush(sector, &bytes) {
-        Ok(()) => JournalUpdate::Flushed(record.report(sector)),
-        Err(error) => JournalUpdate::Failed(error),
-    };
+    fn next_slot(&self) -> usize {
+        // Keep the latest record intact while writing its replacement.
+        usize::from(
+            self.latest
+                .is_some_and(|record| record.sector == SLOT_SECTORS[0]),
+        )
+    }
+
+    pub(super) fn append(&mut self, block: &mut Block, payload: &[u8]) -> JournalUpdate {
+        if let Some(restriction) = block.write_restriction() {
+            return JournalUpdate::Blocked(restriction);
+        }
+        let generation = self.latest.map_or(0, |record| record.generation);
+        let Some(generation) = generation.checked_add(1) else {
+            return JournalUpdate::GenerationExhausted;
+        };
+        let record = Record {
+            generation,
+            payload,
+        };
+        let bytes = record
+            .encode()
+            .expect("the journal caller bounds the payload");
+        let sector = SLOT_SECTORS[self.next_slot()];
+        if let Err(error) = block.write_and_flush(sector, &bytes) {
+            return JournalUpdate::Failed(error);
+        }
+        let record = record.report(sector);
+        self.latest = Some(record);
+        JournalUpdate::Flushed(record)
+    }
+}
+
+pub(super) fn run(block: &mut Block) -> Result<JournalProbe, JournalLoadError> {
+    let (mut journal, _) = Journal::load(block, |_| Some(()))?;
+    let recovered = journal.latest;
+    let payload = DEMO_PAYLOADS[journal.next_slot()];
+    let update = journal.append(block, payload);
     Ok(JournalProbe { recovered, update })
 }

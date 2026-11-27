@@ -359,8 +359,20 @@ impl Scheduler {
                     || matches!(approval.reviewer, PublicationReviewer::Supervisor(_)))
         })?;
         let result = if review_is_live(approval.review, monotonic_nanos()) {
-            match pending.changes.publish(fs, &goal.rename_policy) {
-                Ok(()) => Some(CommitResult::Committed),
+            match pending.changes.prepare(fs, &goal.rename_policy) {
+                Ok(prepared) => {
+                    let saved = prepared.durable_file(fs).is_none_or(|file| {
+                        self.durable_disk
+                            .as_mut()
+                            .is_some_and(|disk| disk.save(file.payload()))
+                    });
+                    if saved {
+                        prepared.publish(fs);
+                        Some(CommitResult::Committed)
+                    } else {
+                        Some(CommitResult::StorageFailed)
+                    }
+                }
                 Err(PublicationError::Conflict) => Some(CommitResult::Conflict),
                 Err(PublicationError::PostconditionFailed) => {
                     Some(CommitResult::PostconditionFailed)

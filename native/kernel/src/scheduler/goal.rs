@@ -281,11 +281,17 @@ impl Scheduler {
             allowed_tools,
             require_rename_review,
             rename_limit,
+            durable,
         } = policy;
         if self.current != SHELL_TASK_INDEX
             || self.goal.is_some()
             || !(1..=MAX_CHILDREN).contains(&options.child_limit)
             || files.rename.preserve_files.iter().flatten().count() > rename_limit
+            || (durable
+                && !self
+                    .durable_disk
+                    .as_ref()
+                    .is_some_and(|disk| disk.is_writable()))
         {
             return None;
         }
@@ -305,7 +311,7 @@ impl Scheduler {
             Some(ms) => GoalDeadline::after_millis(monotonic_nanos(), ms)?,
             None => GoalDeadline::Unlimited,
         };
-        let rename_policy = RenamePolicy::capture(caller, fs, files.rename)?;
+        let rename_policy = RenamePolicy::capture(caller, fs, files.rename, durable)?;
         self.next_handle = next_handle;
         self.goal = Some(Goal {
             handle,
@@ -317,7 +323,7 @@ impl Scheduler {
             cancelled_before_launch: false,
             file_grants: [const { None }; MAX_GOAL_RENAMES],
             rename_policy,
-            require_rename_review,
+            require_rename_review: require_rename_review || durable,
             rename_limit,
             rename: None,
             publication_report: None,

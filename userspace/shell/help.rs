@@ -65,6 +65,7 @@ entries! {
         "  --rename-under <dir>" => "Limit renames to this directory tree",
         "  --rename-limit 1|2" => "Allow up to two renames in one commit (default 1)",
         "  --require-rename-review echo" => "Require echo to review a rename before commit",
+        "  --durable" => "Save one root file to the journal after echo review",
         "  --allow-helper <program> | --allow-tool <name@rev>" =>
             "Allow one helper or up to two exact tools (repeat --allow-tool)",
     },

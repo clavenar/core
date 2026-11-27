@@ -4,13 +4,14 @@ use super::mmio::Device;
 use super::queue::{DEVICE_WRITES, Descriptor, NEXT, Ring, RingMemory};
 use crate::arch::monotonic_nanos;
 
-pub(crate) use journal::{JournalProbe, JournalRecord, JournalUpdate};
+use journal::Journal;
+pub(crate) use journal::{JournalLoadError, JournalProbe, JournalRecord, JournalUpdate};
 
 const BLOCK_DEVICE: u32 = 2;
 const BLOCK_READ_ONLY: u32 = 1 << 5;
 const BLOCK_FLUSH: u32 = 1 << 9;
 const REQUEST_QUEUE: u32 = 0;
-const PROBE_TIMEOUT_NS: u64 = 500_000_000;
+const IO_TIMEOUT_NS: u64 = 500_000_000;
 const SECTOR_BYTES: usize = 512;
 const READ: u32 = 0;
 const WRITE: u32 = 1;
@@ -24,6 +25,7 @@ const DEMO_SECTOR: u64 = 1;
 const BLANK_SECTOR: Sector = [0; SECTOR_BYTES];
 const DEMO_HEADER: Sector = padded_sector(b"CLVDEMO1");
 const DEMO_MARKER: Sector = padded_sector(b"CLVSAVE1");
+const DURABLE_HEADER: Sector = padded_sector(b"CLVRNM01");
 
 const fn padded_sector(prefix: &[u8; 8]) -> Sector {
     let mut sector = BLANK_SECTOR;
@@ -79,11 +81,12 @@ pub(crate) struct Probe {
     pub(crate) sectors: u64,
     pub(crate) prefix: [u8; 8],
     pub(crate) scratch: Option<ScratchProbe>,
+    pub(crate) durable_disk: Option<Block>,
 }
 
 pub(crate) enum ScratchProbe {
     Marker(Result<DemoOutcome, ProbeError>),
-    Journal(Result<JournalProbe, ProbeError>),
+    Journal(Result<JournalProbe, JournalLoadError>),
 }
 
 pub(crate) enum DemoOutcome {
@@ -109,8 +112,8 @@ pub(crate) enum ProbeError {
     Timeout,
 }
 
-struct Block<'a> {
-    device: &'a Device,
+pub(crate) struct Block {
+    device: Device,
     queue: Ring<4>,
     request: *mut RequestMemory,
     sectors: u64,
@@ -118,36 +121,51 @@ struct Block<'a> {
     deadline: u64,
 }
 
-/// # Safety
-/// Call once on the boot hart before paging on QEMU RV64 virt, with its MMIO
-/// windows and the DMA storage accessible at their physical addresses.
-pub(crate) unsafe fn probe() -> Option<Result<Probe, ProbeError>> {
-    // SAFETY: The boot caller guarantees access to the virt transport windows.
-    let device = unsafe { Device::discover(BLOCK_DEVICE) }?;
-    let deadline = monotonic_nanos().saturating_add(PROBE_TIMEOUT_NS);
-    if !device.reset(deadline) {
-        return Some(Err(ProbeError::Timeout));
+pub(crate) struct JournalDisk {
+    block: Block,
+    journal: Journal,
+    failed: bool,
+}
+
+impl JournalDisk {
+    pub(crate) fn is_writable(&self) -> bool {
+        !self.failed && self.block.write_restriction().is_none() && self.journal.can_append()
     }
-    // SAFETY: Reset left the queue idle and the boot hart owns the static DMA storage.
-    let result = unsafe { probe_device(&device, deadline) };
-    if !device.reset(deadline) {
-        return Some(Err(ProbeError::Timeout));
+
+    pub(crate) fn save(&mut self, payload: &[u8]) -> bool {
+        if !self.is_writable() || payload.len() > journal::MAX_PAYLOAD_BYTES {
+            return false;
+        }
+        self.block.deadline = io_deadline();
+        if matches!(
+            self.journal.append(&mut self.block, payload),
+            JournalUpdate::Flushed(_)
+        ) {
+            return true;
+        }
+        // A timed-out request may still own the DMA buffers. Stop using the
+        // journal for this boot and keep the buffers reserved even if reset fails.
+        self.failed = true;
+        self.block.device.reset(self.block.deadline);
+        false
     }
-    Some(result)
+}
+
+fn io_deadline() -> u64 {
+    monotonic_nanos().saturating_add(IO_TIMEOUT_NS)
 }
 
 /// # Safety
-/// The caller must have reset the block device and own the resident DMA area.
-unsafe fn probe_device(device: &Device, deadline: u64) -> Result<Probe, ProbeError> {
-    let features = device
-        .negotiate(BLOCK_READ_ONLY | BLOCK_FLUSH)
-        .ok_or(ProbeError::Device)?;
-    // SAFETY: Capacity is the 64-bit field at offset zero of the block configuration.
-    let sectors = unsafe { device.config_u64(0, deadline) }.ok_or(ProbeError::Timeout)?;
-    if sectors == 0 {
-        return Err(ProbeError::Empty);
+/// Call once on the boot hart before paging on QEMU RV64 virt, with its MMIO
+/// windows and the DMA storage accessible at their physical addresses. Keep
+/// the retained device's window and DMA storage mapped while it is in use.
+pub(crate) unsafe fn probe() -> Option<Result<Probe, ProbeError>> {
+    // SAFETY: The boot caller guarantees access to the virt transport windows.
+    let device = unsafe { Device::discover(BLOCK_DEVICE) }?;
+    let deadline = io_deadline();
+    if !device.reset(deadline) {
+        return Some(Err(ProbeError::Timeout));
     }
-
     let memory = &raw mut DMA;
     // SAFETY: Reset completed, so the device has no access while we initialize these fields.
     let mut block = unsafe {
@@ -155,29 +173,84 @@ unsafe fn probe_device(device: &Device, deadline: u64) -> Result<Probe, ProbeErr
             device,
             queue: Ring::new(&raw mut (*memory).queue, REQUEST_QUEUE),
             request: &raw mut (*memory).request,
-            sectors,
-            features,
+            sectors: 0,
+            features: 0,
             deadline,
         }
     };
-    if !block.queue.configure(device) || !device.start() {
-        return Err(ProbeError::Device);
-    }
-    let first = block.read_sector(0)?;
-    let prefix = *first.first_chunk().expect("a sector holds eight bytes");
-    let scratch = match first {
-        DEMO_HEADER => Some(ScratchProbe::Marker(block.persist_marker())),
-        journal::HEADER => Some(ScratchProbe::Journal(journal::run(&mut block))),
-        _ => None,
-    };
-    Ok(Probe {
-        sectors,
-        prefix,
-        scratch,
+    let result = block.start().and_then(|()| block.inspect());
+    Some(match result {
+        Ok((mut probe, true)) => {
+            probe.durable_disk = Some(block);
+            Ok(probe)
+        }
+        result if block.device.reset(deadline) => result.map(|(probe, _)| probe),
+        _ => Err(ProbeError::Timeout),
     })
 }
 
-impl Block<'_> {
+impl Block {
+    fn start(&mut self) -> Result<(), ProbeError> {
+        self.features = self
+            .device
+            .negotiate(BLOCK_READ_ONLY | BLOCK_FLUSH)
+            .ok_or(ProbeError::Device)?;
+        // SAFETY: Capacity is the 64-bit field at offset zero of the block configuration.
+        self.sectors =
+            unsafe { self.device.config_u64(0, self.deadline) }.ok_or(ProbeError::Timeout)?;
+        if self.sectors == 0 {
+            return Err(ProbeError::Empty);
+        }
+        if !self.queue.configure(&self.device) || !self.device.start() {
+            return Err(ProbeError::Device);
+        }
+        Ok(())
+    }
+
+    fn inspect(&mut self) -> Result<(Probe, bool), ProbeError> {
+        let first = self.read_sector(0)?;
+        let scratch = match first {
+            DEMO_HEADER => Some(ScratchProbe::Marker(self.persist_marker())),
+            journal::HEADER => Some(ScratchProbe::Journal(journal::run(self))),
+            _ => None,
+        };
+        Ok((
+            Probe {
+                sectors: self.sectors,
+                prefix: *first.first_chunk().expect("a sector holds eight bytes"),
+                scratch,
+                durable_disk: None,
+            },
+            first == DURABLE_HEADER,
+        ))
+    }
+
+    pub(crate) fn base(&self) -> usize {
+        self.device.base()
+    }
+
+    pub(crate) fn open_journal<T>(
+        mut self,
+        decode: impl Fn(&[u8]) -> Option<T>,
+    ) -> Result<(JournalDisk, Option<T>), JournalLoadError> {
+        self.deadline = io_deadline();
+        let (journal, recovered) = match Journal::load(&mut self, decode) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.device.reset(self.deadline);
+                return Err(error);
+            }
+        };
+        Ok((
+            JournalDisk {
+                block: self,
+                journal,
+                failed: false,
+            },
+            recovered,
+        ))
+    }
+
     fn read_sector(&mut self, sector: u64) -> Result<Sector, ProbeError> {
         self.transfer(Request::Read(sector))?;
         // SAFETY: The completion covers the full sector and returns ownership of the buffer.
@@ -262,7 +335,7 @@ impl Block<'_> {
             }
         };
         submitted.map_err(|_| ProbeError::Device)?;
-        self.queue.notify(self.device);
+        self.queue.notify(&self.device);
 
         let expected = if kind == READ { SECTOR_BYTES + 1 } else { 1 };
         while monotonic_nanos() < self.deadline {

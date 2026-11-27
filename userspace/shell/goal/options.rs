@@ -24,6 +24,7 @@ pub(crate) struct GoalOptions<'a> {
     pub rename_under: Option<&'a [u8]>,
     pub rename_limit: Option<usize>,
     pub require_rename_review: bool,
+    pub durable: bool,
     pub suspended: bool,
     pub with_file: bool,
 }
@@ -100,6 +101,10 @@ impl<'a> GoalOptions<'a> {
                     options.require_rename_review = true;
                     rest
                 }
+                GoalFlag::Durable if matches!(command, GoalCommand::Create) && !options.durable => {
+                    options.durable = true;
+                    rest
+                }
                 GoalFlag::Suspended
                     if matches!(command, GoalCommand::AgentRun) && !options.suspended =>
                 {
@@ -122,6 +127,7 @@ impl<'a> GoalOptions<'a> {
             || options
                 .rename_limit
                 .is_some_and(|n| !(1..=MAX_GOAL_RENAMES).contains(&n))
+            || (options.durable && options.rename_limit == Some(MAX_GOAL_RENAMES))
         {
             return None;
         }
