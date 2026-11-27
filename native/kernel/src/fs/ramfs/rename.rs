@@ -151,10 +151,6 @@ impl StagedRenames {
         1 + usize::from(self.second.is_some())
     }
 
-    pub(crate) fn single(&self) -> Option<&StagedRename> {
-        self.second.is_none().then_some(&self.first)
-    }
-
     pub(crate) fn iter(&self) -> impl Iterator<Item = &StagedRename> {
         core::iter::once(&self.first).chain(self.second.as_ref())
     }

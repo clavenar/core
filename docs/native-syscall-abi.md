@@ -1,9 +1,9 @@
 # Native syscall ABI
 
-The RV64 prototype implements 84 calls numbered from 0 through 83.
-Kernel 0.0.51 compacts the syscall table and takes a versioned request
-for goal creation. Rebuild guest programs with the current `libclv`
-to use this ABI.
+The RV64 prototype implements 80 calls numbered from 0 through 79.
+Kernel 0.0.52 uses the batch diff format for all rename previews and
+reviews and compacts the syscall table. Rebuild guest programs with the
+current `libclv` to use this ABI.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -202,9 +202,9 @@ queued reply.
 | 5 `Matches` | 0–64 bytes | All selected lines, or zero bytes for no matches |
 | 6 `ResultTooLarge` | Empty | The matched lines exceed the reply capacity |
 | 7 `DelegationFailed` | Empty | The agent could not start the requested helper |
-| 8 `GoalObservation` | 64 bytes | Kernel snapshot requested by the observer through call 75. Call 26 rejects this tag. |
-| 9 `AgentResumed` | 32 bytes | Kernel receipt for a supervisor's successful call 77. Call 26 rejects this tag. |
-| 10 `RenameReviewed` | 40 bytes | Kernel receipt for a passing or blocked delegated review through call 80 or 83. Call 26 rejects this tag. |
+| 8 `GoalObservation` | 64 bytes | Kernel snapshot requested by the observer through call 72. Call 26 rejects this tag. |
+| 9 `AgentResumed` | 32 bytes | Kernel receipt for a supervisor's successful call 74. Call 26 rejects this tag. |
+| 10 `RenameReviewed` | 40 bytes | Kernel receipt for a passing or blocked delegated review through call 79. Call 26 rejects this tag. |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -312,25 +312,21 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 62 `agent_invoke_file_tool` | `a0` agent handle or zero for self, `a1` versioned tool ID, `a2` reply reservation, `a3` literal address, `a4` literal length (0–64) | Fresh helper handle on admission, or -1 on rejection |
 | 63 `goal_audit_with_tool` | Same arguments as call 50 | Retained delegation count and overwritten count as in call 57, with 104 bytes per entry |
 | 64 `goal_stage_rename` | `a0` goal handle, `a1` owner's file handle, `a2` new basename address, `a3` length (1–64 bytes) | 0 when staged, or -1 on rejection |
-| 65 `goal_diff` | `a0` goal handle, `a1` stack destination, `a2` capacity in bytes | Total bytes copied in `a0`, source path length in `a1`. An empty diff returns zero in both registers. Failure returns -1 in `a0`. |
-| 66 `goal_review` | Same arguments as call 65 | Same diff and lengths as call 65, with a token or zero in `a2` and review status in `a3` |
-| 67 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, 2 on a failed file postcondition, 3 for an expired matching token, or -1 for an invalid caller, goal, token, or unavailable revision |
-| 68 `goal_grant_file_for_rename` | `a0` goal handle, `a1` owner's file handle | 0 when the ready goal receives the grant, or -1 on rejection |
-| 69 `agent_stage_rename` | `a0` granted file handle, `a1` new basename address, `a2` length (1–64 bytes) | 0 when the calling agent stages the rename, or -1 on rejection |
-| 70 `goal_rename_audit` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes | Retained staging decision count (0–4), with overwritten count in `a1`, or -1 on failure |
-| 71 `goal_discard` | `a0` goal handle | 0 when a pending rename was discarded, 1 when the diff was already empty, or -1 for an invalid caller or goal |
-| 72 `goal_review_with_deadline` | Same arguments as call 66 | Same diff, lengths and token. With a nonzero token, `a3` holds the absolute guest deadline in nanoseconds. With a zero token, `a3` holds the call 66 review status. |
-| 73 `goal_read_decisions` | Same arguments as call 55 | Retained read decision count (0–4), overwritten count in `a1` and lifetime bytes delivered in `a2`, or -1 on failure |
-| 74 `goal_launch_observer` | `a0` open goal handle, `a1` program selector | Fresh shell-owned child handle, or -1 on rejection |
-| 75 `goal_observe` | `a0` observer's stack destination, `a1` capacity in bytes | 64 after copying the snapshot and queuing the same record for the parent, or -1 on failure |
-| 76 `agent_launch_supervisor` | `a0` suspended agent handle, `a1` program selector | Fresh shell-owned supervisor launch handle, or -1 on rejection |
-| 77 `agent_resume_granted` | None | 0 after resuming the bound child and queuing its receipt, or -1 on failure |
-| 78 `goal_launch_finish_monitor` | `a0` open goal handle | Fresh shell-owned monitor launch handle, or -1 on rejection |
-| 79 `goal_launch_rename_reviewer` | `a0` completed goal handle | Fresh shell-owned `echo` launch handle bound to the pending rename, or -1 on rejection |
-| 80 `goal_review_granted` | `a0` reviewer's stack destination, `a1` capacity in bytes | Total diff length in `a0`, source path length in `a1`, verdict (1–4) in `a2`. Failure to deliver returns -1 in `a0`. |
-| 81 `goal_publication_decisions_with_reviewer` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` zero-based row index, `a4` [history view](#publication-audit) (0–3) | Retained row count (0–4) in `a0`, overwritten count in `a1`, reviewer in `a2` and goal handle in `a3`, or -1 in `a0` on failure |
-| 82 `goal_rename_diff` | Same arguments as call 65, plus `a3` = 0 for a preview or 1 for a review | Total bytes in `a0`, number of renames in `a1`, token and review detail as in call 72. Failure returns -1 in `a0`. |
-| 83 `goal_review_batch_granted` | Same arguments as call 80 | Total bytes in `a0`, number of renames in `a1`, verdict (1–4) in `a2`. Failure to deliver returns -1 in `a0`. |
+| 65 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, 2 on a failed file postcondition, 3 for an expired matching token, or -1 for an invalid caller, goal, token, or unavailable revision |
+| 66 `goal_grant_file_for_rename` | `a0` goal handle, `a1` owner's file handle | 0 when the ready goal receives the grant, or -1 on rejection |
+| 67 `agent_stage_rename` | `a0` granted file handle, `a1` new basename address, `a2` length (1–64 bytes) | 0 when the calling agent stages the rename, or -1 on rejection |
+| 68 `goal_rename_audit` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes | Retained staging decision count (0–4), with overwritten count in `a1`, or -1 on failure |
+| 69 `goal_discard` | `a0` goal handle | 0 when a pending rename was discarded, 1 when the diff was already empty, or -1 for an invalid caller or goal |
+| 70 `goal_read_decisions` | Same arguments as call 55 | Retained read decision count (0–4), overwritten count in `a1` and lifetime bytes delivered in `a2`, or -1 on failure |
+| 71 `goal_launch_observer` | `a0` open goal handle, `a1` program selector | Fresh shell-owned child handle, or -1 on rejection |
+| 72 `goal_observe` | `a0` observer's stack destination, `a1` capacity in bytes | 64 after copying the snapshot and queuing the same record for the parent, or -1 on failure |
+| 73 `agent_launch_supervisor` | `a0` suspended agent handle, `a1` program selector | Fresh shell-owned supervisor launch handle, or -1 on rejection |
+| 74 `agent_resume_granted` | None | 0 after resuming the bound child and queuing its receipt, or -1 on failure |
+| 75 `goal_launch_finish_monitor` | `a0` open goal handle | Fresh shell-owned monitor launch handle, or -1 on rejection |
+| 76 `goal_launch_rename_reviewer` | `a0` completed goal handle | Fresh shell-owned `echo` launch handle bound to the pending rename, or -1 on rejection |
+| 77 `goal_publication_decisions_with_reviewer` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` zero-based row index, `a4` [history view](#publication-audit) (0–3) | Retained row count (0–4) in `a0`, overwritten count in `a1`, reviewer in `a2` and goal handle in `a3`, or -1 in `a0` on failure |
+| 78 `goal_rename_diff` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes, `a3` = 0 for a preview or 1 for a review | Total bytes in `a0`, number of renames in `a1`, approval token or zero in `a2`, deadline or verdict in `a3`. Failure returns -1 in `a0`. |
+| 79 `goal_review_batch_granted` | `a0` reviewer's stack destination, `a1` capacity in bytes | Total bytes in `a0`, number of renames in `a1`, verdict (1–4) in `a2`. Failure to deliver returns -1 in `a0`. |
 
 ### Goal creation
 
@@ -390,15 +386,15 @@ or successful publication.
 
 ### Read-only goal observers
 
-The goal owner uses call 74 to start an ordinary child in a separate address
+The goal owner uses call 71 to start an ordinary child in a separate address
 space. The kernel binds a one-use inspection grant to the new launch and the
-open goal. Calls 74 and 78 queue the zero-byte `ObserveGoal` request (kind 8).
+open goal. Calls 71 and 75 queue the zero-byte `ObserveGoal` request (kind 8).
 Reading this assignment through call 25 leaves the inspection grant live.
 
 An observer starts with an empty RamFS handle table. It runs outside the
 goal's membership and budgets. The grant works in every state of an open
-goal, including after expiry. Calls 74 and 76 with `echo` share task 5
-with the rename reviewer launched by call 79. The kernel reports task 5 as
+goal, including after expiry. Calls 71 and 73 with `echo` share task 5
+with the rename reviewer launched by call 76. The kernel reports task 5 as
 the sender of their replies. Ordinary `echo` launches, agents and helpers
 use task 3. Each launch has its own handle, request and reply mailboxes,
 and RamFS handle table. The two slots have separate stacks and Sv39 roots
@@ -406,7 +402,7 @@ and share the read/execute image pages. Other program selectors use their ordina
 A busy report slot rejects another `echo` report launch. Reusing either
 slot replaces only that slot's previous results.
 
-For a call 74 launch, call 75 takes one atomic sample from the bound goal.
+For a call 71 launch, call 72 takes one atomic sample from the bound goal.
 The record contains eight little-endian RV64 words. The first four encode
 the state tag, representative child, exit status or fault detail and deadline
 as in call 35. The next four encode the budget flags, available reply bytes,
@@ -419,13 +415,13 @@ unchanged.
 A successful sample consumes the grant. A short buffer, invalid destination
 range or occupied reply mailbox returns -1 before delivery and allows a
 retry. Closing the goal, owner exit or observer exit invalidates an unused
-call 74 grant. A later goal or launch in the same slot gets a fresh identity.
+call 71 grant. A later goal or launch in the same slot gets a fresh identity.
 Goal control, audit, review and publication calls retain their existing
 caller checks.
 
 ### Background goal monitors
 
-The goal owner uses call 78 to start one background `echo` in task 6. The
+The goal owner uses call 75 to start one background `echo` in task 6. The
 monitor has its own stack, Sv39 root and mailboxes, an empty RamFS handle
 table and one read-only observation grant. The ordinary `echo` and
 synchronous report slots remain available. A second launch returns -1
@@ -436,9 +432,9 @@ on its handle returns -1 immediately and call 27 returns an empty mailbox.
 Once the goal completes, fails or is cancelled, the kernel freezes the
 64-byte observation after settling member reservations, then makes the
 monitor runnable. Deadline cancellation includes the expired deadline. For
-an already terminal goal, the kernel captures the snapshot during call 78.
+an already terminal goal, the kernel captures the snapshot during call 75.
 
-The monitor uses call 75 to receive and send that frozen record once. The
+The monitor uses call 72 to receive and send that frozen record once. The
 owner can wait for its exit and receive the typed `GoalObservation` reply
 from task 6 by its launch handle. The report survives closing the finished
 goal and records the deadline as it stood at capture. Closing a ready goal
@@ -447,18 +443,18 @@ and its reply mailbox is empty. Owner exit stops any live monitor.
 
 ### Delegating one agent resume
 
-The owner uses call 76 to give a separate process one resume of a live,
+The owner uses call 73 to give a separate process one resume of a live,
 suspended agent. It binds the grant to the agent's original child launch
 and queues an empty `ResumeAgent` request (kind 9). An `echo` supervisor
 uses the same separate slot as an `echo` observer, so it can resume an
 agent that is itself running `echo`. The supervisor starts with an empty
 RamFS handle table and runs outside the goal's child limit and reply budget.
 
-Call 77 takes its target from the calling launch's grant. On success, it
+Call 74 takes its target from the calling launch's grant. On success, it
 makes the child runnable at its saved frame and queues an `AgentResumed`
 reply in the supervisor's mailbox for the owner. Call 27 returns the
 supervisor launch, goal, agent and resumed child handles as four consecutive
-little-endian RV64 words. An occupied mailbox makes call 77 fail before the
+little-endian RV64 words. An occupied mailbox makes call 74 fail before the
 resume. The supervisor can retry after its parent collects the pending reply.
 
 A resume by the owner or any supervisor ends every grant for that
@@ -473,23 +469,19 @@ Call 64 requires a linked writable RamFS file and a free staging slot in
 a ready or running goal. Each rename stays in the source directory. The
 kernel rejects an occupied name, `.`, `..`, and names containing a slash or
 NUL. Goals have one slot by default. Bit 6 of the goal creation flags
-allows two slots. Both renames must share a
-base revision, with distinct sources and distinct destination paths. A
+allows two slots. Both renames must share a base revision, with distinct
+sources and distinct destination paths. A
 rejected staging attempt preserves the existing diff.
 
-The rename diff and owner review calls require the goal owner. Calls 65,
-66 and 72 read a diff with at most one rename. The original
-absolute source path is followed immediately by the destination basename.
-`RENAME_DIFF_MAX_BYTES` covers the buffer. Call 82 reads the complete diff
-in staging order. Each entry begins with two little-endian 16-bit lengths
-for the source path and destination basename, followed by those two names
-back to back. The result in `a1` gives the number of entries, and
+The goal owner uses call 78 to read the complete diff in staging order.
+Each entry begins with two little-endian 16-bit lengths for the absolute
+source path and destination basename, followed by those two names back
+to back. The result in `a1` gives the number of entries, and
 `RENAME_BATCH_DIFF_MAX_BYTES` covers the full buffer. An empty diff accepts
 zero capacity and returns zero lengths. A short buffer or an invalid
-destination range fails before copying any bytes. The single-rename calls
-return -1 for two entries before copying or reviewing either entry.
+destination range fails before copying any bytes.
 
-Calls 66 and 72 request review, as does call 82 with `a3` = 1. For a goal
+Set `a3` to 0 to preview the diff or to 1 to request review. For a goal
 that allows owner review, the kernel checks the whole diff once the goal
 has completed successfully and the full copy has succeeded. RamFS verifies
 the revision, each source's identity at its original name, each free
@@ -497,36 +489,36 @@ destination and the goal's rename scope. A goal with a preserved input
 must include a rename of that file with its original contents. A conflict
 takes precedence over a failed postcondition.
 
-Call 66 returns the following status codes. Calls 72 and 82 use the same
-codes with a zero token and return the deadline with a passing token.
+An approved owner review returns a nonzero, single-use token in `a2` and an
+absolute guest deadline in nanoseconds in `a3`. With a zero token, `a3`
+contains one of these verdicts.
 
-| Status in `a3` | Meaning | Token in `a2` |
-| --- | --- | --- |
-| 0 | Preview for an empty diff, or for a pending rename on a goal that allows direct review and has yet to complete successfully. | 0 |
-| 1 | Ready to commit. The checks passed. | Nonzero, single-use |
-| 2 | Conflict. The base revision, original source or destination has changed. | 0 |
-| 3 | Postcondition failed. A source falls outside the rename scope, or the diff fails to rename the preserved input with its original contents. | 0 |
-| 4 | Review unavailable. The kernel cannot prepare publication, represent the deadline or allocate a token. | 0 |
-| 5 | Supervisor review required. The owner received the pending diff. A passing delegated review issues or renews approval. | 0 |
+| Verdict | Meaning |
+| --- | --- |
+| 0 | Preview. Also returned for an empty diff or a goal that allows owner review and has yet to complete successfully. |
+| 2 | Conflict. The base revision, original source or destination has changed. |
+| 3 | Postcondition failed. A source falls outside the rename scope, or the diff fails to rename the preserved input with its original contents. |
+| 4 | Review unavailable. The kernel cannot prepare publication, represent the deadline or allocate a token. |
+| 5 | Supervisor review required. A passing delegated review issues or renews approval. |
 
 The first passing review starts a 60-second token lifetime on the kernel's monotonic
 clock. QEMU `virt` provides a 10 MHz RISC-V time counter, so each tick is
 100 nanoseconds. A passing review reuses a live token. For a
-timed goal, owner reviews in calls 72 and 82 and the delegated receipt
-report the earlier of the token and goal deadlines. When the review token
+timed goal, the owner review and delegated receipt report the earlier of
+the token and goal deadlines. When the review token
 expires before the goal deadline, a passing review
 issues a fresh token. The goal deadline stays fixed. A blocked verdict
 (2–4) clears the token and leaves the frozen diff available. A failed copy
-returns -1 before checking the changes or altering their token. Call 65
-and call 82 in preview mode read without changing review state.
+returns -1 before checking the changes or altering their token. Preview
+mode preserves the existing review state.
 Discard, cancellation, goal expiry, successful close and owner exit invalidate the token.
 Revoking a file grant discards the whole batch if a rename depended on that
 grant and invalidates its token.
 
-Call 67 checks the caller, goal state, token and any requirement for
+Call 65 checks the caller, goal state, token and any requirement for
 supervisor approval. It consumes a matching, authorized token
 and returns 3 if only the token has expired. The batch remains staged for
-review or discard. Once the goal expires, call 67 returns -1 for the former
+review or discard. Once the goal expires, call 65 returns -1 for the former
 token and the diff is empty. With a live token, it repeats the RamFS checks
 before updating any names. A failed check preserves the public files and
 staged diff. Success updates all names in the same syscall, advances the
@@ -538,16 +530,16 @@ requiring a new revision fails if the counter is exhausted.
 Successful publication, cancellation, goal expiry, close or owner exit
 releases the preserved input.
 
-Call 68 requires a linked writable RamFS file and an empty file-grant slot.
+Call 66 requires a linked writable RamFS file and an empty file-grant slot.
 The direct agent receives read access and permission to stage a rename.
 Ordinary direct children receive read access only. Delegating a file to a
-helper requires a delegable grant. Call 69 verifies that the caller is the
+helper requires a delegable grant. Call 67 verifies that the caller is the
 goal's live agent and that its open descriptor carries this goal's rename
 permission. It uses the same staging limit, basename checks and publication
 rules as call 64. By default the owner can review it directly or delegate
-one review through call 79. Only the owner can commit it.
+one review through call 76. Only the owner can commit it.
 
-Call 71 accepts the owner's open goal handle in any goal state. It releases
+Call 69 accepts the owner's open goal handle in any goal state. It releases
 the references held by the pending batch and invalidates its review token.
 The owner can discard a proposal even when its review returned no token.
 The public file and RamFS revision stay intact. The goal retains its lifecycle
@@ -558,24 +550,23 @@ running goal can stage a replacement under the same rules.
 
 Bit 5 of the creation flags requires an `echo` supervisor review for the
 goal's lifetime. It can be combined with file scopes, budgets and timeouts.
-For a pending diff on such a goal, an owner review returns the names, a zero
-token and status 5 when the buffer and format fit the complete diff.
+An owner review that copies the pending diff returns the names, a zero
+token and verdict 5.
 Direct inspection preserves an existing approval and its deadline.
-Call 67 requires the approval that the kernel recorded for the batch
+Call 65 requires the approval that the kernel recorded for the batch
 when it queued a passing supervisor receipt.
 
-Call 79 requires a successfully completed goal with a pending diff and
+Call 76 requires a successfully completed goal with a pending diff and
 an available reporting slot. It binds that specific batch to a fresh
 `echo` launch and queues an empty `ReviewRename` request (kind 10).
 The reviewer starts with an empty RamFS handle table and runs outside the
 goal's membership and byte budgets. Reading the request through call 25
 leaves the grant available. Call 24 cannot issue this assignment.
 
-Call 80 copies a single rename in call 65's format. Call 83 copies the
-whole diff in call 82's format. Each call requires a buffer for the
-complete diff before RamFS checks the revision, sources, destinations
-and goal postconditions.
-The reviewer gets the verdict in `a2`. The kernel queues a `RenameReviewed`
+Call 79 copies the whole diff in call 78's format. The buffer must fit
+the complete diff before RamFS checks the revision, sources, destinations
+and goal postconditions. In `a2`, a passing review returns 1 and a blocked
+review returns 2–4. The kernel queues a `RenameReviewed`
 reply for the owner under the reviewer's launch handle. Call 27 returns
 task 5 as the sender and five little-endian RV64 words in the payload.
 
@@ -587,13 +578,13 @@ task 5 as the sender and five little-endian RV64 words in the payload.
 | 3 | Owner's commit token on success, zero on a blocked review |
 | 4 | Absolute guest deadline in nanoseconds on success, or the reason the review was blocked (2–4 above) |
 
-If the destination is too small or invalid, the format cannot fit the diff,
-or the reply mailbox is full, calls 80 and 83 return -1 and the reviewer can
-retry. Delivering either verdict consumes the grant. A blocked review clears
+If the destination is too small or invalid, or the reply mailbox is full,
+call 79 returns -1 and the reviewer can retry. Delivering either verdict
+consumes the grant. A blocked review clears
 any earlier token. Removing the pending batch or ending the reviewer launch
 invalidates unused authority. A later goal or batch needs a fresh grant.
 Only the owner's receipt carries the token. Publication requires the
-owner's explicit call 67 and its final RamFS checks.
+owner's explicit call 65 and its final RamFS checks.
 
 ## Goal membership and delegated authority
 
@@ -619,7 +610,7 @@ the available balance. Bits 2, 3 and 4 select the request format.
 | All clear | `DelegateWithFile` (tag 4) | Two little-endian RV64 words for the helper selector and its reply allowance, followed by 0–64 literal argument bytes |
 | Bit 2 only | `PlanIntent` (tag 5) | One intent byte. Intent 1 for `hello` pins `find-greeting@1`. Other legacy intents retain their original delivery behavior. |
 | Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. The pairs `[1, 1]` and `[1, 2]` select the corresponding `find-greeting` revisions for `hello`. |
-| Bit 4 only | `StageRename` (tag 7) | 1–64 bytes for the proposed basename. `hello` presents the name and its startup file descriptor to call 69. |
+| Bit 4 only | `StageRename` (tag 7) | 1–64 bytes for the proposed basename. `hello` presents the name and its startup file descriptor to call 67. |
 
 Unknown flag bits, multiple format bits set, an unreadable buffer or the wrong
 length fail before admission. For tag 6 the kernel also verifies that the
@@ -647,7 +638,7 @@ closes any handle it still holds.
 Call 58 withdraws the goal's retained file and closes all descriptors
 derived from that grant, including copies already held by helpers. If the
 batch contains a rename staged through the grant, the call also discards
-the batch and invalidates its review token. Selectors 0 and 1 of call 81
+the batch and invalidates its review token. Selectors 0 and 1 of call 77
 include these discard rows. The discard flag in `a1` describes that same
 revocation. The goal retains its preserved input.
 Only the owning shell can call it. Each read and revocation runs
@@ -771,14 +762,14 @@ The goal takes precedence when the remaining amounts are equal. A successful
 copy charges the goal once and, for a helper, spends the same number of bytes
 from its helper allowance. Denials preserve both balances and the cursor.
 
-Call 73 supplies the history for `goal audit --reads`. It retains the last
+Call 70 supplies the history for `goal audit --reads`. It retains the last
 four read decisions, including scope denials. Budget decisions use the call
 59 encoding. For a scope denial the six words are the caller's child launch
 handle, requested capacity, zero, zero, flag 4, and zero. This records the
 request without disclosing the file's length. Calls 55 and 59 independently
 retain the last four attempts that reached the budget check.
 
-Call 70 lets the owner read the staging decisions from calls 64 and 69.
+Call 68 lets the owner read the staging decisions from calls 64 and 67.
 The kernel records each attempt after authenticating the goal owner or
 its live agent. Each 88-byte row starts with three little-endian RV64 words
 for the caller, decision and copied basename length. Caller zero identifies
@@ -810,14 +801,14 @@ shell path open ends before a staging call. Revocation, cancellation, goal
 expiry and publication preserve earlier decisions. Closing the goal releases
 its history.
 
-Calls 50, 51, 55, 57, 59, 63, 70 and 73 each copy up to four retained entries, oldest
+Calls 50, 51, 55, 57, 59, 63, 68 and 70 each copy up to four retained entries, oldest
 first. A short buffer or an invalid destination range returns -1 before copying
 any bytes. Zero capacity succeeds for an empty audit. Reads preserve the entries
 and the overwritten count, which saturates at the largest RV64 unsigned value.
 
 ### Publication audit
 
-Call 81 reads an indexed publication row. Each view includes commit
+Call 77 reads an indexed publication row. Each view includes commit
 decisions made with a matching review token and explicit discards.
 The selector in `a4` controls which other discards appear.
 

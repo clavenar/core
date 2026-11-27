@@ -28,7 +28,7 @@ pub type EncodedReplyRecord = [[u8; 8]; 4];
 pub type EncodedReadRecord = [[u8; 8]; 5];
 /// Call 59 appends the scope of the effective read allowance.
 pub type EncodedReadRecordWithLimit = [[u8; 8]; 6];
-/// Call 73 uses the call 59 layout for budget decisions and flag 4 for an out-of-scope read.
+/// Call 70 uses the call 59 layout for budget decisions and flag 4 for an out-of-scope read.
 pub type EncodedReadDecision = EncodedReadRecordWithLimit;
 
 #[derive(Clone, Copy)]

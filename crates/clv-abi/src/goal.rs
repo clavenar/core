@@ -57,7 +57,7 @@ pub struct TimedReviewToken {
 }
 
 /// Failures encountered while reviewing or publishing a rename.
-/// The discriminants are the blocked review statuses in a3 of call 66.
+/// The discriminants are the blocked verdict codes for owner and delegated reviews.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum PublicationError {
@@ -78,39 +78,6 @@ impl PublicationError {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum RenameReview {
-    Preview,
-    Ready(ReviewToken),
-    Blocked(PublicationError),
-    SupervisorRequired,
-}
-
-impl RenameReview {
-    /// Call 66 returns the token in a2 and the review status in a3.
-    pub const fn registers(self) -> (usize, usize) {
-        match self {
-            Self::Preview => (0, 0),
-            Self::Ready(token) => (token.get(), 1),
-            Self::Blocked(reason) => (0, reason as usize),
-            Self::SupervisorRequired => (0, 5),
-        }
-    }
-
-    pub const fn from_registers(token: usize, status: usize) -> Option<Self> {
-        Some(match (ReviewToken::new(token), status) {
-            (None, 0) => Self::Preview,
-            (Some(token), 1) => Self::Ready(token),
-            (None, 5) => Self::SupervisorRequired,
-            (None, status) => match PublicationError::from_register(status) {
-                Some(reason) => Self::Blocked(reason),
-                None => return None,
-            },
-            _ => return None,
-        })
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TimedRenameReview {
     Preview,
     Ready(TimedReviewToken),
@@ -119,32 +86,29 @@ pub enum TimedRenameReview {
 }
 
 impl TimedRenameReview {
-    /// Call 72 returns the deadline in a3 with a valid token. Call 66 returns status 1.
-    pub const fn review_registers(self, with_deadline: bool) -> (usize, usize) {
+    /// The owner receives an approval token and deadline, or a zero token and verdict.
+    pub const fn registers(self) -> (usize, usize) {
         match self {
-            Self::Ready(review) if with_deadline => {
-                (review.token.get(), review.deadline_ns as usize)
-            }
-            Self::Ready(review) => RenameReview::Ready(review.token).registers(),
-            Self::Preview => RenameReview::Preview.registers(),
-            Self::Blocked(reason) => RenameReview::Blocked(reason).registers(),
-            Self::SupervisorRequired => RenameReview::SupervisorRequired.registers(),
+            Self::Preview => (0, 0),
+            Self::Ready(review) => (review.token.get(), review.deadline_ns as usize),
+            Self::Blocked(reason) => (0, reason as usize),
+            Self::SupervisorRequired => (0, 5),
         }
     }
 
     pub const fn from_registers(token: usize, detail: usize) -> Option<Self> {
-        match ReviewToken::new(token) {
-            Some(token) if detail != 0 => Some(Self::Ready(TimedReviewToken {
+        match (ReviewToken::new(token), detail) {
+            (Some(token), deadline) if deadline != 0 => Some(Self::Ready(TimedReviewToken {
                 token,
-                deadline_ns: detail as u64,
+                deadline_ns: deadline as u64,
             })),
-            Some(_) => None,
-            None => match RenameReview::from_registers(0, detail) {
-                Some(RenameReview::Preview) => Some(Self::Preview),
-                Some(RenameReview::Blocked(reason)) => Some(Self::Blocked(reason)),
-                Some(RenameReview::SupervisorRequired) => Some(Self::SupervisorRequired),
-                _ => None,
+            (None, 0) => Some(Self::Preview),
+            (None, 5) => Some(Self::SupervisorRequired),
+            (None, verdict) => match PublicationError::from_register(verdict) {
+                Some(reason) => Some(Self::Blocked(reason)),
+                None => None,
             },
+            _ => None,
         }
     }
 }
@@ -161,7 +125,7 @@ pub struct RenameReviewReceipt {
 
 impl RenameReviewReceipt {
     pub fn encode(&self) -> EncodedRenameReviewReceipt {
-        let (token, detail) = self.review.review_registers(true);
+        let (token, detail) = self.review.registers();
         [
             self.reviewer as u64,
             self.goal as u64,
@@ -223,14 +187,6 @@ impl CommitResult {
 pub enum DiscardResult {
     Discarded = 0,
     Empty = 1,
-}
-
-pub enum GoalDiff<'a> {
-    Empty,
-    Rename {
-        source: &'a [u8],
-        new_name: &'a [u8],
-    },
 }
 
 #[derive(Clone, Copy)]
