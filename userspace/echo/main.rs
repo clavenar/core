@@ -2,7 +2,7 @@
 #![no_main]
 
 use clv::{LaunchRequest, pipe};
-use clv_abi::audit::ReadDenialEvent;
+use clv_abi::goal::MAX_READ_DENIAL_THRESHOLD;
 use clv_abi::{MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, PIPE_CAPACITY, ReplyKind, RequestKind};
 use core::panic::PanicInfo;
 
@@ -25,14 +25,10 @@ extern "C" fn _start(_task: usize, _file: usize, grant_kind: usize, io: usize) -
             ..
         }) => clv::exit(usize::from(clv::goal::observe_publication().is_none())),
         Some(LaunchRequest::Received {
-            kind: RequestKind::ReadScopeDenied,
+            kind: RequestKind::WatchReadDenials,
             bytes,
             ..
-        }) => {
-            let sent = ReadDenialEvent::decode(bytes).is_some()
-                && clv::send_reply(ReplyKind::ReadDenialAlert, bytes);
-            clv::exit(usize::from(!sent));
-        }
+        }) => clv::exit(usize::from(watch_read_denials(bytes).is_none())),
         Some(LaunchRequest::Received {
             kind: RequestKind::ResumeAgent,
             ..
@@ -59,6 +55,22 @@ extern "C" fn _start(_task: usize, _file: usize, grant_kind: usize, io: usize) -
     };
     let sent = clv::send_reply(ReplyKind::Echo, reply);
     clv::exit(usize::from(!sent));
+}
+
+fn watch_read_denials(bytes: &[u8]) -> Option<()> {
+    let &[threshold] = bytes else {
+        return None;
+    };
+    if !(1..=MAX_READ_DENIAL_THRESHOLD).contains(&usize::from(threshold)) {
+        return None;
+    }
+    loop {
+        let snapshot = clv::goal::wait_read_denial_snapshot()?;
+        if snapshot.denials >= u32::from(threshold) {
+            let event = snapshot.first.encode();
+            return clv::send_reply(ReplyKind::ReadDenialAlert, event.as_flattened()).then_some(());
+        }
+    }
 }
 
 fn echo_stdio(handle: usize) -> Option<()> {

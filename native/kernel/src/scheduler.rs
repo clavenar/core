@@ -31,7 +31,7 @@ enum TaskState {
     Suspended,
     WaitingForChild(usize),
     WaitingForEvent,
-    /// A monitor starts at its entry point when its requested goal event is ready.
+    /// A monitor waits for a goal event or a newer read-denial snapshot.
     WaitingForGoal(usize),
     WaitingForMessage(usize),
     WaitingForPipeData(usize),
@@ -489,7 +489,9 @@ impl Scheduler {
         if let Some(completion) = launch.completion.take() {
             return WaitResult::Ready(completion);
         }
-        if state.can_finish(handle) && self.block_current(frame, TaskState::WaitingForChild(handle))
+        if state.can_finish(handle)
+            && self.can_wait_for_monitor(handle)
+            && self.block_current(frame, TaskState::WaitingForChild(handle))
         {
             WaitResult::Blocked
         } else {
@@ -519,7 +521,9 @@ impl Scheduler {
         }
         let can_finish = self.tasks.iter().any(|task| {
             task.launch.as_ref().is_some_and(|launch| {
-                launch.parent == LaunchParent::Shell && task.state.can_finish(launch.handle)
+                launch.parent == LaunchParent::Shell
+                    && task.state.can_finish(launch.handle)
+                    && self.can_wait_for_monitor(launch.handle)
             })
         });
         if can_finish && self.block_current(frame, TaskState::WaitingForEvent) {
@@ -597,6 +601,7 @@ impl Scheduler {
             Some((handle, state)) if state.waits_for_pipe(handle) => ReceiveResult::Error,
             Some((handle, state))
                 if state.can_finish(handle)
+                    && self.can_wait_for_monitor(handle)
                     && self.block_current(frame, TaskState::WaitingForMessage(handle)) =>
             {
                 ReceiveResult::Blocked

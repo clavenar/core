@@ -1,9 +1,10 @@
 use clv_abi::audit::{
     AUDIT_CAPACITY, DelegationRecord, DelegationRecordWithCaller, DelegationRecordWithTool,
     EncodedPublicationObservation, EncodedPublicationRecord, EncodedReadDecision,
-    EncodedReadRecordWithLimit, EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord,
-    PublicationAuditView, PublicationObservation, PublicationReviewer, ReadAuditView, ReadRecord,
-    ReadRecordWithLimit, ReplyRecord,
+    EncodedReadDenialSnapshot, EncodedReadRecordWithLimit, EncodedRecordWithTool,
+    EncodedRenameRecord, EncodedReplyRecord, PublicationAuditView, PublicationObservation,
+    PublicationReviewer, ReadAuditView, ReadDenialSnapshot, ReadRecord, ReadRecordWithLimit,
+    ReplyRecord,
 };
 pub use clv_abi::budget::ReplyBudget;
 pub use clv_abi::goal::{
@@ -13,7 +14,8 @@ pub use clv_abi::goal::{
     RenameOptions, RenameReviewReceipt, ReviewToken, TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::goal::{
-    DISARM_READ_WATCH, GoalCreateRequest, TAKE_READ_WATCH_SUPPRESSED, decode_rename_batch,
+    DISARM_READ_WATCH, GoalCreateRequest, TAKE_READ_WATCH_SUPPRESSED, WAIT_READ_WATCH_UPDATE,
+    decode_rename_batch,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -543,9 +545,26 @@ pub fn launch_publication_monitor(goal: usize) -> Option<usize> {
     launch_monitor(goal, GoalMonitorKind::Publication)
 }
 
-/// Arms the monitor for the first out-of-scope file read by a goal member.
+/// Arms the monitor for out-of-scope reads by goal members.
 pub fn launch_read_denial_watch(goal: usize) -> Option<usize> {
     launch_monitor(goal, GoalMonitorKind::ReadDenial)
+}
+
+pub fn launch_read_denial_watch_after(goal: usize, threshold: usize) -> Option<usize> {
+    if threshold == 1 {
+        return launch_read_denial_watch(goal);
+    }
+    syscall_result(
+        ecall(
+            SYS_GOAL_MONITOR,
+            goal,
+            GoalMonitorKind::ReadDenial as usize,
+            0,
+            threshold,
+            0,
+        )
+        .0,
+    )
 }
 
 fn launch_monitor(goal: usize, kind: GoalMonitorKind) -> Option<usize> {
@@ -564,6 +583,18 @@ pub fn take_read_denial_suppressed(handle: usize) -> Option<usize> {
         0,
         TAKE_READ_WATCH_SUPPRESSED,
     ))
+}
+
+/// Waits for an authenticated count newer than the monitor's last sample.
+pub fn wait_read_denial_snapshot() -> Option<ReadDenialSnapshot> {
+    let mut bytes = [0; size_of::<EncodedReadDenialSnapshot>()];
+    let length = syscall(
+        SYS_GOAL_MONITOR,
+        bytes.as_mut_ptr().expose_provenance(),
+        bytes.len(),
+        WAIT_READ_WATCH_UPDATE,
+    );
+    ReadDenialSnapshot::decode(bytes.get(..length)?)
 }
 
 /// Takes one snapshot and queues the same kernel-generated record for the parent.

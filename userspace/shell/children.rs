@@ -1,6 +1,6 @@
 use clv::{ChildReply, ChildStatus, agent, pipe, print};
 use clv_abi::bridge::BridgeFailure;
-use clv_abi::goal::GoalMonitorKind;
+use clv_abi::goal::{GoalMonitorKind, MAX_READ_DENIAL_THRESHOLD};
 use clv_abi::{
     ChildEvent, CompletionKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, OPEN_READ, PIPE_CAPACITY,
     PROGRAM_HELLO, PROGRAMS, Program, ReplyKind, RequestKind,
@@ -11,7 +11,7 @@ use super::{
     files::OpenHandle,
     goal::{GoalCommand, GoalOptions},
     help::Entry,
-    hex, print_handle, print_line, split_literal, split_word,
+    hex, number, print_handle, print_line, split_literal, split_word,
 };
 
 pub(super) struct Children {
@@ -125,16 +125,33 @@ impl Children {
         let monitor = match split_word(arguments) {
             (b"--collect", b"") => return self.collect_goal_monitor(),
             (b"--disarm", b"") => return self.disarm_read_denial_watch(),
-            (b"--on-finish", b"echo") => Some(GoalMonitorKind::Finish),
-            (b"--on-publication", b"echo") => Some(GoalMonitorKind::Publication),
-            (b"--on-read-denial", b"echo") => Some(GoalMonitorKind::ReadDenial),
+            (b"--on-finish", b"echo") => Some((GoalMonitorKind::Finish, 0)),
+            (b"--on-publication", b"echo") => Some((GoalMonitorKind::Publication, 0)),
+            (b"--on-read-denial", arguments) => {
+                let (b"echo", options) = split_word(arguments) else {
+                    return Entry::GoalObserve.usage();
+                };
+                let threshold = match split_word(options) {
+                    (b"", b"") => 1,
+                    (b"--after-denials", digits) => {
+                        let Some(threshold) = number(digits)
+                            .filter(|value| (1..=MAX_READ_DENIAL_THRESHOLD).contains(value))
+                        else {
+                            return print(b"--after-denials must be between 1 and 16\r\n");
+                        };
+                        threshold
+                    }
+                    _ => return Entry::GoalObserve.usage(),
+                };
+                Some((GoalMonitorKind::ReadDenial, threshold))
+            }
             (b"echo", b"") => None,
             _ => return Entry::GoalObserve.usage(),
         };
         let Some(goal) = goal else {
             return print(b"no current goal\r\n");
         };
-        if let Some(monitor) = monitor {
+        if let Some((monitor, threshold)) = monitor {
             let (launch, reply_kind) = match monitor {
                 GoalMonitorKind::Finish => (
                     clv::goal::launch_finish_monitor(goal),
@@ -145,7 +162,7 @@ impl Children {
                     ReplyKind::PublicationObserved,
                 ),
                 GoalMonitorKind::ReadDenial => (
-                    clv::goal::launch_read_denial_watch(goal),
+                    clv::goal::launch_read_denial_watch_after(goal, threshold),
                     ReplyKind::ReadDenialAlert,
                 ),
             };

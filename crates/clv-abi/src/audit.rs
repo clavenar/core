@@ -393,6 +393,35 @@ impl ReadDenialEvent {
     }
 }
 
+pub type EncodedReadDenialSnapshot = [[u8; 8]; 4];
+
+pub struct ReadDenialSnapshot {
+    pub first: ReadDenialEvent,
+    pub denials: u32,
+}
+
+impl ReadDenialSnapshot {
+    pub fn encode(self) -> EncodedReadDenialSnapshot {
+        let mut record = [[0; 8]; 4];
+        let [first @ .., denials] = &mut record;
+        *first = self.first.encode();
+        *denials = u64::from(self.denials).to_le_bytes();
+        record
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let (words, []) = bytes.as_chunks::<8>() else {
+            return None;
+        };
+        let words: &EncodedReadDenialSnapshot = words.try_into().ok()?;
+        let [first @ .., denials] = words;
+        Some(Self {
+            first: ReadDenialEvent::decode(first.as_flattened())?,
+            denials: u64::from_le_bytes(*denials).try_into().ok()?,
+        })
+    }
+}
+
 fn budget_flags(remaining: Option<usize>, allowed: bool) -> usize {
     usize::from(remaining.is_none()) | (usize::from(!allowed) << 1)
 }

@@ -2,11 +2,13 @@ use clv_abi::agent::{
     AgentLaunch, NO_DEFINITION, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
     RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED, decode_rename_pair,
 };
-use clv_abi::audit::{DelegationDenial, PublicationAuditView, ReadAuditView};
+use clv_abi::audit::{
+    DelegationDenial, EncodedReadDenialSnapshot, PublicationAuditView, ReadAuditView,
+};
 use clv_abi::bridge::{BridgeFailure, MAX_FRAME_BYTES, POLL, SUBMIT, SUBMIT_TOOL};
 use clv_abi::goal::{
     DISARM_READ_WATCH, EncodedGoalCreate, FileRecipient, GoalCreateRequest, GoalMonitorKind,
-    RENAME_DIFF_HEADER_BYTES, ReviewToken, TAKE_READ_WATCH_SUPPRESSED,
+    RENAME_DIFF_HEADER_BYTES, ReviewToken, TAKE_READ_WATCH_SUPPRESSED, WAIT_READ_WATCH_UPDATE,
 };
 use clv_abi::tool::{FILE_TOOL_MCP, FILE_TOOL_STDIO, ToolId};
 use clv_abi::{
@@ -164,9 +166,20 @@ pub(crate) fn dispatch(
         .unwrap_or(SYSCALL_ERROR),
         SYS_GOAL_MONITOR => match a2 {
             0 => GoalMonitorKind::from_register(a1)
-                .and_then(|kind| scheduler.launch_goal_monitor(a0, kind)),
+                .and_then(|kind| scheduler.launch_goal_monitor(a0, kind, a3)),
             DISARM_READ_WATCH if a1 == 0 => scheduler.disarm_read_denial_watch(a0, fs),
             TAKE_READ_WATCH_SUPPRESSED if a1 == 0 => scheduler.take_read_denial_suppressed(a0),
+            WAIT_READ_WATCH_UPDATE
+                if a1 >= size_of::<EncodedReadDenialSnapshot>() && stack.contains(a0, a1) =>
+            {
+                match scheduler
+                    .wait_read_denial_snapshot(frame, |bytes| stack.copy_to_user(bytes, a0, a1))
+                {
+                    WaitResult::Blocked => return Outcome::Wait,
+                    WaitResult::Ready(length) => Some(length),
+                    WaitResult::Unavailable => None,
+                }
+            }
             _ => None,
         }
         .unwrap_or(SYSCALL_ERROR),

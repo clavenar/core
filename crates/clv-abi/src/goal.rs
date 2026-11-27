@@ -630,9 +630,12 @@ impl GoalMonitorKind {
     }
 }
 
-/// Call 71's `a2` selects disarm or count collection for a read-denial monitor.
+pub const MAX_READ_DENIAL_THRESHOLD: usize = 16;
+
+/// Call 71 operations for a read-denial monitor.
 pub const DISARM_READ_WATCH: usize = 1;
 pub const TAKE_READ_WATCH_SUPPRESSED: usize = 2;
+pub const WAIT_READ_WATCH_UPDATE: usize = 3;
 
 /// Call 35's four status words followed by call 43's four reply-budget words.
 pub type EncodedGoalObservation = [[u8; 8]; 8];

@@ -47,8 +47,8 @@ impl MessageKind {
                 | RequestKind::ResumeAgent
                 | RequestKind::ReviewRename,
             ) => length == 0,
-            Self::Request(RequestKind::ReadScopeDenied)
-            | Self::Reply(ReplyKind::ReadDenialAlert) => {
+            Self::Request(RequestKind::WatchReadDenials) => length == 1,
+            Self::Reply(ReplyKind::ReadDenialAlert) => {
                 length == size_of::<EncodedReadDenialEvent>()
             }
             Self::Reply(ReplyKind::GoalObservation) => {

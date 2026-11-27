@@ -941,7 +941,7 @@ the same check. The boot files belong to `/`. The shell can combine
 
 At a fresh `clsh>` prompt, arm the `echo` monitor before starting the goal's
 children. The two helpers and the agent will each try to read the granted
-file outside the goal's directory.
+file outside the goal's directory. Set the alert threshold to three denials.
 
 ```text
 mkdir /work
@@ -949,15 +949,17 @@ mkdir /private
 write /private/input.txt private
 goal create --children 3 --allow-helper grep --read-under /work
 goal grant-file --delegate-to grep /private/input.txt
-goal observe --on-read-denial echo
+goal observe --on-read-denial echo --after-denials 3
 goal observe --collect
 agent run --suspended hello
 agent delegate --with-file --reply-bytes 18 grep -F private
 wait grep
 recv grep
+goal observe --collect
 agent delegate --with-file --reply-bytes 18 grep -F private
 wait grep
 recv grep
+goal observe --collect
 agent resume
 wait hello
 recv hello
@@ -967,19 +969,22 @@ goal observe --collect
 goal close
 ```
 
-The first collection prints `pending`. All three reads fail and the audit
-shows `read_bytes=0`. Collection after the reads prints one `read-denial alert`
-with the goal handle, the first `grep` launch handle, `requested=128`, and
-`denied=outside-read-scope suppressed=2`. Match the launch and request size
-to the first audit entry. The next collection prints `no goal monitor to collect`.
+Collection prints `pending` immediately before the first denial and after
+each of the two helper denials. All three reads fail and the audit shows
+`read_bytes=0`. Collection after the third denial prints one
+`read-denial alert` with the goal handle, the first `grep` launch handle,
+`requested=128`, and `denied=outside-read-scope suppressed=2`. Match the
+launch and request size to the first audit entry. The next collection
+prints `no goal monitor to collect`.
 
-To disarm, repeat from a fresh boot and enter `goal observe --disarm` after
-the first collection. The subsequent reads still produce their audit
-records and the final collection finds no monitor. Disarm frees the slot
-for another watch. Goal cancellation, expiry and closure also revoke a
-watch that has yet to send an alert. An alert already queued remains
-collectable after closure. Each watch counts further scope denials up to
-collection.
+The threshold accepts 1 through 16 and defaults to 1. To disarm the watch,
+repeat from a fresh boot and enter `goal observe --disarm` after the
+second helper denial, before resuming `hello`. The third denial appears in
+the audit and collection prints `no goal monitor to collect`. Disarm frees
+the slot for another watch. Goal cancellation, expiry and closure also
+revoke a watch that has yet to send an alert. An alert already queued
+remains collectable after closure. Each watch counts further scope denials
+up to collection.
 
 ### Share a RamFS read budget
 

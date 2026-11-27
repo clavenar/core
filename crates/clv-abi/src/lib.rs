@@ -137,8 +137,8 @@ pub enum RequestKind {
     FileToolMcp = 13,
     /// Empty assignment to report the disposition of the bound rename transaction.
     ObservePublication = 14,
-    /// The first read-scope denial that woke the bound monitor.
-    ReadScopeDenied = 15,
+    /// The denial threshold for the bound read-scope watch.
+    WatchReadDenials = 15,
 }
 
 impl RequestKind {
@@ -158,7 +158,7 @@ impl RequestKind {
             value if value == Self::FileToolStdio as usize => Some(Self::FileToolStdio),
             value if value == Self::FileToolMcp as usize => Some(Self::FileToolMcp),
             value if value == Self::ObservePublication as usize => Some(Self::ObservePublication),
-            value if value == Self::ReadScopeDenied as usize => Some(Self::ReadScopeDenied),
+            value if value == Self::WatchReadDenials as usize => Some(Self::WatchReadDenials),
             _ => None,
         }
     }
