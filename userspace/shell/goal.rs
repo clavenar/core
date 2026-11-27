@@ -193,23 +193,22 @@ fn stage_rename(goal: Option<usize>, arguments: &[u8]) {
 }
 
 fn show_diff(goal: &mut CurrentGoal, reviewer: Option<&mut Children>) {
-    let mut buffer = [0; clv_abi::goal::RENAME_DIFF_MAX_BYTES];
+    let mut buffer = [0; clv_abi::goal::RENAME_BATCH_DIFF_MAX_BYTES];
     if !goal.require_rename_review {
         goal.review = None;
     }
-    let result = if reviewer.is_some() {
-        goal::diff(goal.handle, &mut buffer).map(|diff| (diff, TimedRenameReview::Preview))
-    } else {
-        goal::review_with_deadline(goal.handle, &mut buffer)
-    };
-    let Some((diff, mut review)) = result else {
+    let Some((changes, mut review)) =
+        goal::rename_diff(goal.handle, reviewer.is_none(), &mut buffer)
+    else {
         return print(b"cannot read goal diff\r\n");
     };
-    let goal::GoalDiff::Rename { source, new_name } = diff else {
+    if changes[0].is_none() {
         goal.review = None;
         return print(b"no staged changes\r\n");
-    };
-    print_line(&[b"rename ", source, b" -> ", new_name]);
+    }
+    for change in changes.into_iter().flatten() {
+        print_line(&[b"rename ", change.source, b" -> ", change.new_name]);
+    }
     if let Some(children) = reviewer {
         let Some(receipt) = children.review_rename(goal.handle) else {
             return print(b"cannot review rename via echo\r\n");
@@ -343,6 +342,7 @@ fn create_goal(options: &GoalOptions<'_>) -> Option<usize> {
         read_limits: options.read_limits,
         allowed_tool: options.allowed_tool,
         require_rename_review: options.require_rename_review,
+        rename_limit: options.rename_limit.unwrap_or(1),
     };
     // Keep all three descriptors open until the kernel has resolved the goal's policies.
     let read_directory = open_policy_handle(options.read_under)?;

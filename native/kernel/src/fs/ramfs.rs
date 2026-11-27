@@ -2,7 +2,7 @@ mod handles;
 mod rename;
 
 pub(crate) use handles::{FileGrant, FileGrantMode, GrantArgument, TaskFs};
-pub(crate) use rename::{RenamePolicy, StagedRename};
+pub(crate) use rename::{RenamePolicy, StagedRename, StagedRenames};
 
 const WRITABLE_FILE_COUNT: usize = 4;
 const DIRECTORY_COUNT: usize = 4;

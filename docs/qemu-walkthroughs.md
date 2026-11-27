@@ -13,6 +13,7 @@ goal handles live for one boot. [Build and boot the kernel](../README.md#build-a
   - [Review a staged rename through echo](#review-a-staged-rename-through-echo)
   - [Require a supervisor review before commit](#require-a-supervisor-review-before-commit)
   - [Trace a rename commit to its reviewer](#trace-a-rename-commit-to-its-reviewer)
+  - [Publish two renames in one commit](#publish-two-renames-in-one-commit)
 - [Helper accounting and revocation](#helper-accounting-and-revocation)
 
 ## Boot and shell
@@ -1150,7 +1151,8 @@ the reply audit, and all 36 reply bytes are available after it exits.
 
 ### Stage a private file rename
 
-The goal owner can propose one rename while a goal is ready or running.
+The goal owner can propose a rename while a goal is ready or running.
+Goals have one staging slot by default.
 Choose a writable RamFS file and an unused basename in its current directory.
 At a fresh `clsh>` prompt, try a path containing `..` and then a valid basename.
 
@@ -1575,7 +1577,7 @@ history available until the owner closes the goal.
 ### Inspect rename publication decisions
 
 `goal audit --publication` shows the current goal's last four publication
-decisions, oldest first. These include commits, explicit discards and renames
+rows, oldest first. These include commits, explicit discards and renames
 discarded by cancellation, file grant revocation or goal expiry. Each row gives
 the absolute source path and destination basename captured at staging. `base`
 is the RamFS revision at staging. `revision` is the public revision when the
@@ -1656,6 +1658,48 @@ For a conflict, start again on a fresh boot and insert
 To check token expiry, repeat from a fresh boot and wait at least 61 seconds
 between the review and commit. The audit shows `outcome=review-expired`
 with the original reviewer.
+
+### Publish two renames in one commit
+
+At a fresh `clsh>` prompt, use `--rename-limit 2` to give the goal two
+staging slots. The shell stages the first rename and grants `hello`
+permission to stage the second. Both changes use the same RamFS base.
+
+```text
+mkdir /work
+write /work/draft-a.txt alpha
+write /work/draft-b.txt beta
+goal create --rename-limit 2 --rename-under /work --require-rename-review echo
+goal stage-rename /work/draft-a.txt final-a.txt
+goal grant-file --stage-rename /work/draft-b.txt
+agent run hello --stage-rename final-b.txt
+wait hello
+goal diff --via echo
+ls /work
+goal commit
+cat /work/final-a.txt
+cat /work/final-b.txt
+goal audit --publication
+goal close
+```
+
+The diff shows both renames and a single reviewer receipt. Before commit
+`ls /work` lists the two draft names. Commit publishes the two final names
+together. The reads print `alpha` and `beta`. Both audit rows show
+`outcome=published` with the same base revision, new revision and reviewer.
+
+For a conflict, start on a fresh boot and run `write /work/draft-b.txt revised`
+just before `goal commit`. The commit reports `commit conflict` and both
+audit rows report `outcome=conflict`. Before closing the goal, read the original
+paths. `draft-a.txt` contains `alpha` and `draft-b.txt` contains `revised`.
+Run `ls /work` to confirm the directory still lists the two draft names.
+
+Both sources must be distinct. Each destination must be free in its parent
+directory and distinct from any other staged destination there. Discard,
+cancellation and goal expiry remove the entire pending batch. Revoking a
+file grant also removes the batch if it contains a rename staged under
+that grant. With `--preserve-file`, the batch must rename the selected file
+with its original contents.
 
 ## Helper accounting and revocation
 

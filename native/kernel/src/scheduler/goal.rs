@@ -9,7 +9,7 @@ use self::audit::{AuditHistory, PublicationHistory};
 use self::budget::ReplyReservation;
 use self::reads::GoalReads;
 pub(crate) use self::reads::ReadAudit;
-use self::rename::PendingRename;
+use self::rename::PendingRenames;
 use clv_abi::agent::{AgentStatus, ControlResult, EncodedDefinitionPin, ResumeReceipt};
 use clv_abi::audit::{
     EncodedRecordWithTool, EncodedRenameRecord, EncodedReplyRecord, PublicationOutcome, ReplyRecord,
@@ -88,7 +88,8 @@ pub(super) struct Goal {
     file: Option<FileGrant>,
     rename_policy: RenamePolicy,
     require_rename_review: bool,
-    rename: Option<PendingRename>,
+    rename_limit: usize,
+    rename: Option<PendingRenames>,
     delegation_audit: AuditHistory<EncodedRecordWithTool>,
     reply_audit: AuditHistory<EncodedReplyRecord>,
     rename_audit: AuditHistory<EncodedRenameRecord>,
@@ -261,6 +262,7 @@ impl Scheduler {
             read_limits,
             allowed_tool,
             require_rename_review,
+            rename_limit,
         } = policy;
         if self.current != SHELL_TASK_INDEX
             || self.goal.is_some()
@@ -295,6 +297,7 @@ impl Scheduler {
             file: None,
             rename_policy,
             require_rename_review,
+            rename_limit,
             rename: None,
             delegation_audit: AuditHistory::default(),
             reply_audit: AuditHistory::default(),

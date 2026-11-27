@@ -16,6 +16,9 @@ pub enum RenameDenial {
     GoalInactive = 6,
     InvalidBuffer = 7,
     OutsideRenameScope = 8,
+    BaseChanged = 9,
+    SourceAlreadyStaged = 10,
+    DestinationAlreadyStaged = 11,
 }
 
 impl RenameDenial {
@@ -29,6 +32,9 @@ impl RenameDenial {
             6 => Self::GoalInactive,
             7 => Self::InvalidBuffer,
             8 => Self::OutsideRenameScope,
+            9 => Self::BaseChanged,
+            10 => Self::SourceAlreadyStaged,
+            11 => Self::DestinationAlreadyStaged,
             _ => return None,
         })
     }

@@ -203,6 +203,9 @@ fn print_rename(entry: RenameRecord<'_>) {
         Err(RenameDenial::GoalInactive) => b" denied=goal-inactive",
         Err(RenameDenial::InvalidBuffer) => b" denied=invalid-buffer",
         Err(RenameDenial::OutsideRenameScope) => b" denied=outside-rename-scope",
+        Err(RenameDenial::BaseChanged) => b" denied=base-changed",
+        Err(RenameDenial::SourceAlreadyStaged) => b" denied=source-already-staged",
+        Err(RenameDenial::DestinationAlreadyStaged) => b" denied=destination-already-staged",
     };
     let mut line = ConsoleLine::new();
     line.write(b"name=");

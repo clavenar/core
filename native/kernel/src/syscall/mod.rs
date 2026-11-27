@@ -4,7 +4,8 @@ use clv_abi::agent::{
 };
 use clv_abi::audit::DelegationDenial;
 use clv_abi::goal::{
-    CreateOptions, CreatePolicy, FileOptions, FileRecipient, ReadLimits, RenameOptions, ReviewToken,
+    CreateOptions, CreatePolicy, FileOptions, FileRecipient, RENAME_DIFF_HEADER_BYTES, ReadLimits,
+    RenameOptions, ReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -27,20 +28,24 @@ use clv_abi::{
     SYS_GOAL_PUBLICATION_DECISIONS, SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
     SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
     SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
-    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_GRANTED, SYS_GOAL_REVIEW_WITH_DEADLINE,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT,
-    SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE,
-    SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN,
-    SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
-    SYS_SPAWN_WITH_FILE_ARG, SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
-    SYS_UNLINK, SYS_WAIT, SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
+    SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_BATCH_GRANTED,
+    SYS_GOAL_REVIEW_GRANTED, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS, SYS_MESSAGE_RECV,
+    SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ,
+    SYS_PIPE_WRITE, SYS_PROBE, SYS_READ, SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV,
+    SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR, SYS_SPAWN, SYS_SPAWN_AT,
+    SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE, SYS_SPAWN_WITH_FILE_ARG,
+    SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED, SYS_UNLINK, SYS_WAIT,
+    SYS_WRITE, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
 };
 
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::console::write_task;
 use crate::drivers::uart;
-use crate::fs::ramfs::{FileGrantMode, GrantArgument, RamFs, TaskFs, WRITABLE_FILE_CAPACITY};
+use crate::fs::ramfs::{
+    FileGrantMode, GrantArgument, RamFs, StagedRename, StagedRenames, TaskFs,
+    WRITABLE_FILE_CAPACITY,
+};
 use crate::ipc::pipe::PipeResult;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::usercopy::UserStack;
@@ -147,6 +152,7 @@ pub(crate) fn dispatch(
                     read_limits: ReadLimits::default(),
                     allowed_tool: None,
                     require_rename_review: false,
+                    rename_limit: 1,
                 },
                 FileOptions::default(),
                 None,
@@ -224,10 +230,18 @@ pub(crate) fn dispatch(
             0,
         )
         .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_REVIEW_GRANTED => scheduler
-            .review_granted_rename(fs, |names| stack.copy_to_user(names, a0, a1))
-            .map_or(SYSCALL_ERROR, |(count, source_len, verdict)| {
-                frame.registers[REG_A1] = source_len;
+        SYS_GOAL_REVIEW_GRANTED | SYS_GOAL_REVIEW_BATCH_GRANTED => scheduler
+            .review_granted_rename(fs, |changes| {
+                copy_rename_diff(
+                    stack,
+                    a0,
+                    a1,
+                    Some(changes),
+                    number == SYS_GOAL_REVIEW_BATCH_GRANTED,
+                )
+            })
+            .map_or(SYSCALL_ERROR, |(count, detail, verdict)| {
+                frame.registers[REG_A1] = detail;
                 frame.registers[REG_A2] = verdict.map_or_else(|reason| reason as usize, |()| 1);
                 count
             }),
@@ -240,18 +254,28 @@ pub(crate) fn dispatch(
         SYS_AGENT_STAGE_RENAME => scheduler
             .stage_agent_rename(fs, a0, a2, |name| stack.copy_from_user(a1, name))
             .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_DIFF | SYS_GOAL_REVIEW | SYS_GOAL_REVIEW_WITH_DEADLINE => scheduler
-            .read_goal_diff(a0, number != SYS_GOAL_DIFF, fs, |names| {
-                stack.copy_to_user(names, a1, a2)
-            })
-            .map_or(SYSCALL_ERROR, |(count, source_len, review)| {
-                frame.registers[REG_A1] = source_len;
-                if number != SYS_GOAL_DIFF {
-                    (frame.registers[REG_A2], frame.registers[REG_A3]) =
-                        review.review_registers(number == SYS_GOAL_REVIEW_WITH_DEADLINE);
-                }
-                count
-            }),
+        SYS_GOAL_DIFF | SYS_GOAL_REVIEW | SYS_GOAL_REVIEW_WITH_DEADLINE | SYS_GOAL_RENAME_DIFF
+            if number != SYS_GOAL_RENAME_DIFF || a3 <= 1 =>
+        {
+            let batch = number == SYS_GOAL_RENAME_DIFF;
+            let review = if batch {
+                a3 == 1
+            } else {
+                number != SYS_GOAL_DIFF
+            };
+            scheduler
+                .read_goal_diff(a0, review, fs, |changes| {
+                    copy_rename_diff(stack, a1, a2, changes, batch)
+                })
+                .map_or(SYSCALL_ERROR, |(count, detail, review)| {
+                    frame.registers[REG_A1] = detail;
+                    if number != SYS_GOAL_DIFF {
+                        (frame.registers[REG_A2], frame.registers[REG_A3]) =
+                            review.review_registers(number != SYS_GOAL_REVIEW);
+                    }
+                    count
+                })
+        }
         SYS_GOAL_COMMIT => ReviewToken::new(a1)
             .and_then(|token| scheduler.commit_goal(a0, token, fs))
             .map_or(SYSCALL_ERROR, |result| result as usize),
@@ -606,6 +630,49 @@ pub(crate) fn dispatch(
     // ECALL is a 32-bit instruction, including on cores with compressed code.
     frame.sepc += 4;
     Outcome::Resume
+}
+
+fn copy_rename_diff(
+    stack: UserStack,
+    destination: usize,
+    capacity: usize,
+    changes: Option<&StagedRenames>,
+    batch: bool,
+) -> Option<(usize, usize)> {
+    if !batch {
+        let (names, source_len) = match changes {
+            Some(changes) => changes.single()?.diff(),
+            None => (&[][..], 0),
+        };
+        return stack
+            .copy_to_user(names, destination, capacity)
+            .then_some((names.len(), source_len));
+    }
+
+    let entries = || {
+        changes
+            .into_iter()
+            .flat_map(StagedRenames::iter)
+            .map(StagedRename::diff)
+    };
+    let length: usize = entries()
+        .map(|(names, _)| RENAME_DIFF_HEADER_BYTES + names.len())
+        .sum();
+    if length > capacity || !stack.contains(destination, capacity) {
+        return None;
+    }
+    // The entire destination has been checked before the first write.
+    let mut address = destination;
+    for (names, source_len) in entries() {
+        let [source_lo, source_hi] = (source_len as u16).to_le_bytes();
+        let [name_lo, name_hi] = ((names.len() - source_len) as u16).to_le_bytes();
+        let header = [source_lo, source_hi, name_lo, name_hi];
+        stack.copy_to_user(&header, address, header.len());
+        address += header.len();
+        stack.copy_to_user(names, address, names.len());
+        address += names.len();
+    }
+    Some((length, changes.map_or(0, StagedRenames::len)))
 }
 
 fn write_audit_result(frame: &mut TrapFrame, snapshot: Option<(usize, usize)>) -> usize {

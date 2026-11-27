@@ -102,6 +102,8 @@ pub const SYS_GOAL_LAUNCH_FINISH_MONITOR: usize = 88;
 pub const SYS_GOAL_LAUNCH_RENAME_REVIEWER: usize = 89;
 pub const SYS_GOAL_REVIEW_GRANTED: usize = 90;
 pub const SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER: usize = 91;
+pub const SYS_GOAL_RENAME_DIFF: usize = 92;
+pub const SYS_GOAL_REVIEW_BATCH_GRANTED: usize = 93;
 
 /// No RamFS handle has this value. Handle 0 is valid.
 pub const NO_RAMFS_HANDLE: usize = usize::MAX;

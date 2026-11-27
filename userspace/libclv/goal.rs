@@ -4,11 +4,12 @@ use clv_abi::audit::{
     EncodedReplyRecord, PublicationReviewer, ReadRecord, ReadRecordWithLimit, ReplyRecord,
 };
 pub use clv_abi::budget::ReplyBudget;
+use clv_abi::goal::decode_rename_batch;
 pub use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CommitResult, CreateOptions, CreatePolicy,
     DiscardResult, EncodedGoalObservation, FileOptions, FileRecipient, GoalDeadline, GoalDiff,
-    GoalObservation, GoalStatus, PublicationError, ReadLimits, RenameOptions, RenameReview,
-    RenameReviewReceipt, ReviewToken, TimedRenameReview, TimedReviewToken,
+    GoalObservation, GoalStatus, PublicationError, ReadLimits, RenameBatchDiff, RenameOptions,
+    RenameReview, RenameReviewReceipt, ReviewToken, TimedRenameReview, TimedReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
@@ -24,9 +25,9 @@ use clv_abi::{
     SYS_GOAL_PUBLICATION_DECISIONS, SYS_GOAL_PUBLICATION_DECISIONS_WITH_EXPIRY,
     SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
     SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
-    SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_GRANTED, SYS_GOAL_REVIEW_WITH_DEADLINE,
-    SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS,
+    SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_BATCH_GRANTED,
+    SYS_GOAL_REVIEW_GRANTED, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
+    SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
 };
 
 use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
@@ -148,6 +149,7 @@ pub fn create_with_timeout(
             read_limits: limits,
             allowed_tool,
             require_rename_review: false,
+            rename_limit: 1,
         },
         files,
         timeout_ms,
@@ -293,6 +295,26 @@ pub fn review_with_deadline(
     Some((diff, TimedRenameReview::from_registers(token, detail)?))
 }
 
+/// Copies the full staged diff. A requested review can approve the whole batch.
+pub fn rename_diff(
+    goal: usize,
+    review: bool,
+    buffer: &mut [u8],
+) -> Option<(RenameBatchDiff<'_>, TimedRenameReview)> {
+    let (length, entries, token, status) = ecall(
+        SYS_GOAL_RENAME_DIFF,
+        goal,
+        buffer.as_mut_ptr().expose_provenance(),
+        buffer.len(),
+        usize::from(review),
+        0,
+    );
+    Some((
+        decode_rename_batch(buffer.get(..length)?, entries)?,
+        TimedRenameReview::from_registers(token, status)?,
+    ))
+}
+
 /// Gives one echo launch authority to review this completed goal's pending rename.
 pub fn launch_rename_reviewer(goal: usize) -> Option<usize> {
     syscall_result(syscall(SYS_GOAL_LAUNCH_RENAME_REVIEWER, goal, 0, 0))
@@ -309,12 +331,33 @@ pub fn review_granted(buffer: &mut [u8]) -> Option<(GoalDiff<'_>, Result<(), Pub
         0,
     );
     let diff = decode_diff(buffer.get(..count)?, source_len)?;
-    let verdict = if status == 1 {
-        Ok(())
+    Some((diff, granted_review_verdict(status)?))
+}
+
+/// Delivers the whole batch and its verdict to the bound reviewer.
+pub fn review_batch_granted(
+    buffer: &mut [u8],
+) -> Option<(RenameBatchDiff<'_>, Result<(), PublicationError>)> {
+    let (length, entries, status, _) = ecall(
+        SYS_GOAL_REVIEW_BATCH_GRANTED,
+        buffer.as_mut_ptr().expose_provenance(),
+        buffer.len(),
+        0,
+        0,
+        0,
+    );
+    Some((
+        decode_rename_batch(buffer.get(..length)?, entries)?,
+        granted_review_verdict(status)?,
+    ))
+}
+
+fn granted_review_verdict(status: usize) -> Option<Result<(), PublicationError>> {
+    if status == 1 {
+        Some(Ok(()))
     } else {
-        Err(PublicationError::from_register(status)?)
-    };
-    Some((diff, verdict))
+        PublicationError::from_register(status).map(Err)
+    }
 }
 
 fn read_diff(

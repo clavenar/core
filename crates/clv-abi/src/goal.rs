@@ -1,12 +1,17 @@
 use crate::budget::ReplyBudget;
 use crate::tool::ToolId;
-use crate::{CompletionKind, NO_CHILD_HANDLE, Program};
+use crate::{CompletionKind, NO_CHILD_HANDLE, PATH_MAX_BYTES, Program};
 
 /// Maximum number of successful member launches over the lifetime of a goal.
 pub const MAX_CHILDREN: usize = 3;
 
 /// Maximum combined byte length of a canonical source path and a destination basename.
 pub const RENAME_DIFF_MAX_BYTES: usize = 512;
+pub const MAX_GOAL_RENAMES: usize = 2;
+/// Two little-endian u16 lengths precede the names of each staged rename.
+pub const RENAME_DIFF_HEADER_BYTES: usize = 4;
+pub const RENAME_BATCH_DIFF_MAX_BYTES: usize =
+    MAX_GOAL_RENAMES * (RENAME_DIFF_HEADER_BYTES + RENAME_DIFF_MAX_BYTES);
 
 /// Goal lifetime, independent of member completion and the lifetime of a review token.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -228,6 +233,36 @@ pub enum GoalDiff<'a> {
     },
 }
 
+#[derive(Clone, Copy)]
+pub struct RenameDiff<'a> {
+    pub source: &'a [u8],
+    pub new_name: &'a [u8],
+}
+
+pub type RenameBatchDiff<'a> = [Option<RenameDiff<'a>>; MAX_GOAL_RENAMES];
+
+pub fn decode_rename_batch(mut bytes: &[u8], count: usize) -> Option<RenameBatchDiff<'_>> {
+    let mut changes = [None; MAX_GOAL_RENAMES];
+    for change in changes.get_mut(..count)? {
+        let (&[source_lo, source_hi, name_lo, name_hi], names) =
+            bytes.split_first_chunk::<RENAME_DIFF_HEADER_BYTES>()?;
+        let source_len = u16::from_le_bytes([source_lo, source_hi]) as usize;
+        let name_len = u16::from_le_bytes([name_lo, name_hi]) as usize;
+        let total = source_len + name_len;
+        if !(1..=PATH_MAX_BYTES).contains(&name_len) || total > RENAME_DIFF_MAX_BYTES {
+            return None;
+        }
+        let (entry, remaining) = names.split_at_checked(total)?;
+        let (source, new_name) = entry.split_at(source_len);
+        if !source.starts_with(b"/") {
+            return None;
+        }
+        *change = Some(RenameDiff { source, new_name });
+        bytes = remaining;
+    }
+    bytes.is_empty().then_some(changes)
+}
+
 /// Cumulative RamFS byte limits for the whole goal and for its delegated helpers together.
 #[derive(Clone, Copy, Default)]
 pub struct ReadLimits {
@@ -399,10 +434,12 @@ pub struct CreatePolicy {
     pub allowed_tool: Option<ToolId>,
     /// Only the bound echo supervisor can approve publication of a rename.
     pub require_rename_review: bool,
+    pub rename_limit: usize,
 }
 
 impl CreatePolicy {
     const REQUIRE_RENAME_REVIEW: usize = 1 << 5;
+    const ALLOW_TWO_RENAMES: usize = 1 << 6;
 
     pub fn registers(&self) -> Option<[usize; 6]> {
         let mut words = self
@@ -411,12 +448,22 @@ impl CreatePolicy {
         if self.require_rename_review {
             words[1] |= Self::REQUIRE_RENAME_REVIEW;
         }
+        match self.rename_limit {
+            1 => {}
+            MAX_GOAL_RENAMES => words[1] |= Self::ALLOW_TWO_RENAMES,
+            _ => return None,
+        }
         Some(words)
     }
 
     pub fn from_registers(mut words: [usize; 6]) -> Option<Self> {
         let require_rename_review = words[1] & Self::REQUIRE_RENAME_REVIEW != 0;
-        words[1] &= !Self::REQUIRE_RENAME_REVIEW;
+        let rename_limit = if words[1] & Self::ALLOW_TWO_RENAMES != 0 {
+            MAX_GOAL_RENAMES
+        } else {
+            1
+        };
+        words[1] &= !(Self::REQUIRE_RENAME_REVIEW | Self::ALLOW_TWO_RENAMES);
         let (options, read_limits, allowed_tool) =
             CreateOptions::from_registers_with_allowed_tool(words)?;
         Some(Self {
@@ -424,6 +471,7 @@ impl CreatePolicy {
             read_limits,
             allowed_tool,
             require_rename_review,
+            rename_limit,
         })
     }
 }

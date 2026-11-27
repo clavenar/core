@@ -1,7 +1,7 @@
 use crate::command::GoalFlag;
 use crate::{number, split_literal, split_word};
 use clv_abi::Program;
-use clv_abi::goal::{MAX_CHILDREN, ReadLimits};
+use clv_abi::goal::{MAX_CHILDREN, MAX_GOAL_RENAMES, ReadLimits};
 use clv_abi::tool::{FileTool, ToolId};
 
 pub(crate) enum GoalCommand {
@@ -22,6 +22,7 @@ pub(crate) struct GoalOptions<'a> {
     pub allowed_tool: Option<ToolId>,
     pub preserve_file: Option<&'a [u8]>,
     pub rename_under: Option<&'a [u8]>,
+    pub rename_limit: Option<usize>,
     pub require_rename_review: bool,
     pub suspended: bool,
     pub with_file: bool,
@@ -72,6 +73,9 @@ impl<'a> GoalOptions<'a> {
                 GoalFlag::RenameUnder if matches!(command, GoalCommand::Create) => {
                     parse_path(rest, &mut options.rename_under)?
                 }
+                GoalFlag::RenameLimit if matches!(command, GoalCommand::Create) => {
+                    parse_count(rest, &mut options.rename_limit)?
+                }
                 GoalFlag::RequireRenameReview
                     if matches!(command, GoalCommand::Create) && !options.require_rename_review =>
                 {
@@ -100,6 +104,9 @@ impl<'a> GoalOptions<'a> {
             || options
                 .children
                 .is_some_and(|n| !(1..=MAX_CHILDREN).contains(&n))
+            || options
+                .rename_limit
+                .is_some_and(|n| !(1..=MAX_GOAL_RENAMES).contains(&n))
         {
             return None;
         }

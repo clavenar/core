@@ -2,7 +2,8 @@
 
 The RV64 prototype boots on QEMU, runs isolated programs and enforces
 goal-scoped file access and byte budgets. A pinned mock planner can delegate
-a native tool call. The filesystem can stage and publish one reviewed rename.
+a native tool call. The filesystem can stage up to two renames and publish
+them together after review.
 [Run these examples in QEMU](docs/qemu-walkthroughs.md)
 
 Section 23 of the architecture document defines the implementation phases

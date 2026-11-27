@@ -8,7 +8,7 @@ use core::num::NonZeroUsize;
 
 use super::{Goal, Scheduler};
 use crate::arch::monotonic_nanos;
-use crate::fs::ramfs::{RamFs, RenamePolicy, StagedRename, TaskFs};
+use crate::fs::ramfs::{RamFs, RenamePolicy, StagedRenames, TaskFs};
 use crate::scheduler::LaunchGrant;
 
 const REVIEW_LIFETIME_NS: u64 = 60 * 1_000_000_000;
@@ -24,21 +24,21 @@ struct RenameApproval {
     reviewer: PublicationReviewer,
 }
 
-pub(super) struct PendingRename {
-    change: StagedRename,
+pub(super) struct PendingRenames {
+    changes: StagedRenames,
     approval: Option<RenameApproval>,
     reviewer: Option<usize>,
     from_file_grant: bool,
 }
 
-impl PendingRename {
+impl PendingRenames {
     fn check_review(
         &self,
         fs: &RamFs,
         policy: &RenamePolicy,
         next_handle: &mut usize,
     ) -> Result<TimedReviewToken, PublicationError> {
-        self.change.check(fs, policy)?;
+        self.changes.check(fs, policy)?;
         let now_ns = monotonic_nanos();
         if let Some(review) = self
             .approval
@@ -98,7 +98,11 @@ impl Goal {
         if !self.is_active() {
             return Err(RenameDenial::GoalInactive);
         }
-        if self.rename.is_some() {
+        if self
+            .rename
+            .as_ref()
+            .is_some_and(|pending| pending.changes.len() == self.rename_limit)
+        {
             return Err(RenameDenial::AlreadyStaged);
         }
         let from_file_grant = matches!(caller, LaunchParent::Agent(_));
@@ -109,8 +113,13 @@ impl Goal {
             from_file_grant.then_some(self.handle),
             &self.rename_policy,
         )?;
-        self.rename = Some(PendingRename {
-            change,
+        if let Some(pending) = &mut self.rename {
+            pending.changes.append(fs, change)?;
+            pending.from_file_grant |= from_file_grant;
+            return Ok(());
+        }
+        self.rename = Some(PendingRenames {
+            changes: StagedRenames::new(change),
             approval: None,
             reviewer: None,
             from_file_grant,
@@ -127,10 +136,11 @@ impl Goal {
             return DiscardResult::Empty;
         };
         if let Some(outcome) = outcome {
-            self.publication_audit
-                .record(fs, &rename.change, outcome, None);
+            for change in rename.changes.iter() {
+                self.publication_audit.record(fs, change, outcome, None);
+            }
         }
-        rename.change.discard(fs);
+        rename.changes.discard(fs);
         DiscardResult::Discarded
     }
 
@@ -214,19 +224,15 @@ impl Scheduler {
         handle: usize,
         review: bool,
         fs: &RamFs,
-        deliver: impl FnOnce(&[u8]) -> bool,
+        deliver: impl FnOnce(Option<&StagedRenames>) -> Option<(usize, usize)>,
     ) -> Option<(usize, usize, TimedRenameReview)> {
         let goal = self.shell_goal(handle)?;
         let can_review = review && matches!(goal.status(), GoalStatus::Completed { .. });
         let goal = self.goal.as_mut()?;
+        let (count, detail) = deliver(goal.rename.as_ref().map(|pending| &pending.changes))?;
         let Some(pending) = &mut goal.rename else {
-            return deliver(&[]).then_some((0, 0, TimedRenameReview::Preview));
+            return Some((count, detail, TimedRenameReview::Preview));
         };
-        let (names, source_len) = pending.change.diff();
-        let count = names.len();
-        if !deliver(names) {
-            return None;
-        }
         let result = if review && goal.require_rename_review {
             // Inspection preserves the supervisor approval and its original deadline.
             TimedRenameReview::SupervisorRequired
@@ -240,13 +246,13 @@ impl Scheduler {
         } else {
             TimedRenameReview::Preview
         };
-        Some((count, source_len, result))
+        Some((count, detail, result))
     }
 
     pub(crate) fn review_granted_rename(
         &mut self,
         fs: &RamFs,
-        deliver: impl FnOnce(&[u8]) -> bool,
+        deliver: impl FnOnce(&StagedRenames) -> Option<(usize, usize)>,
     ) -> Option<(usize, usize, Result<(), PublicationError>)> {
         let launch = self.tasks[self.current].launch.as_ref()?;
         if launch.grant != Some(LaunchGrant::ReviewRename) || launch.reply.is_some() {
@@ -259,11 +265,7 @@ impl Scheduler {
             .rename
             .as_ref()
             .filter(|pending| pending.reviewer == Some(reviewer.get()))?;
-        let (names, source_len) = pending.change.diff();
-        let count = names.len();
-        if !deliver(names) {
-            return None;
-        }
+        let (count, detail) = deliver(&pending.changes)?;
 
         // Keep the current token and next handle intact if the receipt cannot be queued.
         let mut next_handle = self.next_handle;
@@ -271,7 +273,7 @@ impl Scheduler {
         let receipt = RenameReviewReceipt {
             reviewer: reviewer.get(),
             goal: goal.handle,
-            base_revision: pending.change.base_revision(),
+            base_revision: pending.changes.base_revision(),
             review: review_with_goal_deadline(checked, goal.deadline),
         }
         .encode();
@@ -288,7 +290,7 @@ impl Scheduler {
         pending.reviewer = None;
         self.next_handle = next_handle;
         self.tasks[self.current].launch.as_mut()?.grant = None;
-        Some((count, source_len, checked.map(|_| ())))
+        Some((count, detail, checked.map(|_| ())))
     }
 
     pub(crate) fn discard_goal_rename(
@@ -321,7 +323,7 @@ impl Scheduler {
                     || matches!(approval.reviewer, PublicationReviewer::Supervisor(_)))
         })?;
         let result = if review_is_live(approval.review, monotonic_nanos()) {
-            match pending.change.publish(fs, &goal.rename_policy) {
+            match pending.changes.publish(fs, &goal.rename_policy) {
                 Ok(()) => Some(CommitResult::Committed),
                 Err(PublicationError::Conflict) => Some(CommitResult::Conflict),
                 Err(PublicationError::PostconditionFailed) => {
@@ -333,8 +335,10 @@ impl Scheduler {
             Some(CommitResult::ReviewExpired)
         };
         let outcome = result.map_or(PublicationOutcome::Unavailable, PublicationOutcome::Commit);
-        goal.publication_audit
-            .record(fs, &pending.change, outcome, Some(approval.reviewer));
+        for change in pending.changes.iter() {
+            goal.publication_audit
+                .record(fs, change, outcome, Some(approval.reviewer));
+        }
         if result == Some(CommitResult::Committed) {
             goal.release_transaction(fs, None);
         }

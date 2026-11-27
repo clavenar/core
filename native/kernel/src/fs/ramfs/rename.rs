@@ -1,7 +1,7 @@
 use clv_abi::audit::{
     EncodedPublicationRecord, PublicationOutcome, PublicationRecord, RenameDenial,
 };
-use clv_abi::goal::{PublicationError, RENAME_DIFF_MAX_BYTES, RenameOptions};
+use clv_abi::goal::{MAX_GOAL_RENAMES, PublicationError, RENAME_DIFF_MAX_BYTES, RenameOptions};
 
 use super::{
     CWD_PATH_CAPACITY, DirectoryId, NAME_LIMIT, Name, Node, RamFs, Revision, TaskFs,
@@ -59,9 +59,8 @@ impl PreservedFile {
         Some(snapshot)
     }
 
-    fn matches(&self, file_index: usize, file: &WritableFile) -> bool {
-        self.file_index == file_index
-            && self.contents[..self.length] == file.contents[..file.length]
+    fn matches(&self, file: &WritableFile) -> bool {
+        self.contents[..self.length] == file.contents[..file.length]
     }
 }
 
@@ -107,11 +106,7 @@ impl StagedRename {
         fs.release(Node::WritableFile(self.file_index));
     }
 
-    fn checked_target(
-        &self,
-        fs: &RamFs,
-        policy: &RenamePolicy,
-    ) -> Result<(Name, Revision), PublicationError> {
+    fn checked_target(&self, fs: &RamFs) -> Result<Name, PublicationError> {
         let (names, split) = self.diff();
         let (path, new_name) = names.split_at(split);
         let old_name = path
@@ -124,24 +119,116 @@ impl StagedRename {
         {
             return Err(PublicationError::Conflict);
         }
-        let file = fs.writable[self.file_index]
-            .as_ref()
-            .ok_or(PublicationError::Unavailable)?;
-        if !policy.directory.contains(fs, file.parent)
-            || policy
-                .preserved_file
-                .as_ref()
-                .is_some_and(|input| !input.matches(self.file_index, file))
+        Name::new(new_name).ok_or(PublicationError::Unavailable)
+    }
+
+    fn destination(&self) -> &[u8] {
+        let (names, source_len) = self.diff();
+        &names[source_len..]
+    }
+}
+
+/// A nonempty set of renames against one RamFS revision.
+pub(crate) struct StagedRenames {
+    first: StagedRename,
+    second: Option<StagedRename>,
+}
+
+struct PreparedRenames {
+    names: [Option<(usize, Name)>; MAX_GOAL_RENAMES],
+    revision: Revision,
+}
+
+impl StagedRenames {
+    pub(crate) fn new(first: StagedRename) -> Self {
+        Self {
+            first,
+            second: None,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        1 + usize::from(self.second.is_some())
+    }
+
+    pub(crate) fn single(&self) -> Option<&StagedRename> {
+        self.second.is_none().then_some(&self.first)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &StagedRename> {
+        core::iter::once(&self.first).chain(self.second.as_ref())
+    }
+
+    pub(crate) fn base_revision(&self) -> u64 {
+        self.first.base_revision()
+    }
+
+    pub(crate) fn append(
+        &mut self,
+        fs: &mut RamFs,
+        rename: StagedRename,
+    ) -> Result<(), RenameDenial> {
+        if let Err(reason) = self.check_append(&rename) {
+            rename.discard(fs);
+            return Err(reason);
+        }
+        self.second = Some(rename);
+        Ok(())
+    }
+
+    fn check_append(&self, rename: &StagedRename) -> Result<(), RenameDenial> {
+        if self.second.is_some() {
+            return Err(RenameDenial::AlreadyStaged);
+        }
+        if self.first.base != rename.base {
+            return Err(RenameDenial::BaseChanged);
+        }
+        if self.first.file_index == rename.file_index {
+            return Err(RenameDenial::SourceAlreadyStaged);
+        }
+        if self.first.parent == rename.parent && self.first.destination() == rename.destination() {
+            return Err(RenameDenial::DestinationAlreadyStaged);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn discard(self, fs: &mut RamFs) {
+        self.first.discard(fs);
+        if let Some(second) = self.second {
+            second.discard(fs);
+        }
+    }
+
+    fn prepare(
+        &self,
+        fs: &RamFs,
+        policy: &RenamePolicy,
+    ) -> Result<PreparedRenames, PublicationError> {
+        let mut names = [const { None }; MAX_GOAL_RENAMES];
+        for (slot, rename) in names.iter_mut().zip(self.iter()) {
+            *slot = Some((rename.file_index, rename.checked_target(fs)?));
+        }
+        if self
+            .iter()
+            .any(|rename| !policy.directory.contains(fs, rename.parent))
         {
             return Err(PublicationError::PostconditionFailed);
         }
-        let name = Name::new(new_name).ok_or(PublicationError::Unavailable)?;
+        if let Some(input) = &policy.preserved_file {
+            let includes_input = self
+                .iter()
+                .any(|rename| rename.file_index == input.file_index);
+            let file = fs.writable[input.file_index].as_ref();
+            if !includes_input || !file.is_some_and(|file| input.matches(file)) {
+                return Err(PublicationError::PostconditionFailed);
+            }
+        }
         let revision = fs.revision.next().ok_or(PublicationError::Unavailable)?;
-        Ok((name, revision))
+        Ok(PreparedRenames { names, revision })
     }
 
     pub(crate) fn check(&self, fs: &RamFs, policy: &RenamePolicy) -> Result<(), PublicationError> {
-        self.checked_target(fs, policy).map(|_| ())
+        self.prepare(fs, policy).map(|_| ())
     }
 
     pub(crate) fn publish(
@@ -149,12 +236,16 @@ impl StagedRename {
         fs: &mut RamFs,
         policy: &RenamePolicy,
     ) -> Result<(), PublicationError> {
-        let (name, revision) = self.checked_target(fs, policy)?;
-        let file = fs.writable[self.file_index]
-            .as_mut()
-            .ok_or(PublicationError::Unavailable)?;
-        file.name = name;
-        fs.revision = revision;
+        let prepared = self.prepare(fs, policy)?;
+        // The kernel runs this syscall without scheduling another task. Every
+        // source is linked and every destination has been validated above.
+        for (index, name) in prepared.names.into_iter().flatten() {
+            fs.writable[index]
+                .as_mut()
+                .expect("validated rename source")
+                .name = name;
+        }
+        fs.revision = prepared.revision;
         Ok(())
     }
 }
