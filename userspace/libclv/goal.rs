@@ -168,6 +168,7 @@ pub fn grant_file(goal: usize, fd: usize) -> bool {
 }
 
 /// Gives the direct agent permission to stage a rename of this writable RamFS file.
+/// On a two-rename goal, a second call adds another file in grant order.
 pub fn grant_file_for_rename(goal: usize, fd: usize) -> bool {
     syscall(SYS_GOAL_GRANT_FILE_FOR_RENAME, goal, fd, 0) == 0
 }

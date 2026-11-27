@@ -1663,18 +1663,19 @@ with the original reviewer.
 
 At a fresh `clsh>` prompt, use `--rename-limit 2` to give the goal two
 staging slots and repeat `--preserve-file` to capture both inputs at
-creation. The shell stages the first rename and grants `hello` permission to
-stage the second. Both changes use the same RamFS base.
+creation. Grant each file in the order of its proposed name. `hello` stages
+both changes against the same RamFS base.
 
 ```text
 mkdir /work
 write /work/draft-a.txt alpha
 write /work/draft-b.txt beta
 goal create --rename-limit 2 --rename-under /work --require-rename-review echo --preserve-file /work/draft-a.txt --preserve-file /work/draft-b.txt
-goal stage-rename /work/draft-a.txt final-a.txt
+goal grant-file --stage-rename /work/draft-a.txt
 goal grant-file --stage-rename /work/draft-b.txt
-agent run hello --stage-rename final-b.txt
+agent run hello --stage-rename final-a.txt --stage-rename final-b.txt
 wait hello
+goal audit --renames
 goal diff --via echo
 ls /work
 goal commit
@@ -1684,6 +1685,7 @@ goal audit --publication
 goal close
 ```
 
+Both staging rows show the same `caller=agent caller_child=` handle.
 The diff shows both renames and a single reviewer receipt. Before commit
 `ls /work` lists the two draft names. Commit publishes the two final names
 together. The reads print `alpha` and `beta`. Both audit rows show
@@ -1692,8 +1694,8 @@ together. The reads print `alpha` and `beta`. Both audit rows show
 To check a failed postcondition, run the sequence again on a fresh boot with
 one of these changes.
 
-- Replace the file grant and agent launch with `agent run hello` to stage only
-  the first rename.
+- Launch `agent run hello --stage-rename final-a.txt` to stage only the
+  first rename.
 - Run `write /work/draft-b.txt revised` after `goal create` and before either
   rename is staged.
 
@@ -1706,6 +1708,10 @@ just before `goal commit`. The commit reports `commit conflict` and both
 audit rows report `outcome=conflict`. Before closing the goal, read the original
 paths. `draft-a.txt` contains `alpha` and `draft-b.txt` contains `revised`.
 Run `ls /work` to confirm the directory still lists the two draft names.
+
+To revoke both grants, run `goal revoke-file` after the supervisor review
+and before `goal commit`. The diff becomes empty, both draft names remain
+visible, and the publication audit shows two `discarded-by-revoke` rows.
 
 Both sources must be distinct. Each destination must be free in its parent
 directory and distinct from any other staged destination there. Discard,

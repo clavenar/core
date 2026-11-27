@@ -69,7 +69,7 @@ entries! {
     },
     GrantFile {
         "goal grant-file [mode] <path>" => "Grant a read-only file. Choose at most one mode",
-        "  --stage-rename" => "Allow the agent to stage renames",
+        "  --stage-rename" => "Grant staging access (repeat for a two-rename goal)",
         "  --delegable" => "Allow any helper to receive it",
         "  --delegate-to <program> [--argument <literal>]" =>
             "Choose the helper and optionally its argument",
@@ -103,7 +103,7 @@ entries! {
     AgentRun {
         "agent run [--suspended] [--reply-bytes N] <program> [request]" =>
             "Start an agent. Requests below apply to hello",
-        "  --stage-rename <new-name>" => "Stage a rename of the granted file",
+        "  --stage-rename <new-name>" => "Stage in grant order (repeat for two files)",
         "  --mock find-greeting[@REV]" => "Run revision 1 (default) or 2",
         "  --delegate --with-file --reply-bytes N grep -F <pattern>" =>
             "Ask grep to search the file",

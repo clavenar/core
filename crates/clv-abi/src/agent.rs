@@ -1,6 +1,6 @@
 use crate::goal::GoalStatus;
 use crate::tool::ToolId;
-use crate::{MESSAGE_MAX_BYTES, Program, RequestKind};
+use crate::{MESSAGE_MAX_BYTES, PATH_MAX_BYTES, Program, RequestKind};
 
 const SUSPENDED: usize = 6;
 pub const RUN_SUSPENDED: usize = 1;
@@ -11,11 +11,44 @@ pub const RUN_PLAN_INTENT: usize = 4;
 pub const RUN_PLAN_DEFINITION: usize = 8;
 /// Selects a destination basename for the agent to propose on its granted file.
 pub const RUN_STAGE_RENAME: usize = 16;
+/// Selects two destination basenames in rename grant order.
+pub const RUN_STAGE_RENAME_PAIR: usize = 32;
 /// A zero agent handle on a delegation call selects the calling task's live agent.
 pub const CURRENT_AGENT: usize = 0;
 
 pub const DELEGATION_HEADER_BYTES: usize = 16;
 pub const DELEGATION_REQUEST_MAX_BYTES: usize = DELEGATION_HEADER_BYTES + MESSAGE_MAX_BYTES;
+/// The largest launch request carries a length byte and two basenames.
+pub const LAUNCH_REQUEST_MAX_BYTES: usize = 1 + 2 * PATH_MAX_BYTES;
+
+pub fn encode_rename_pair<'a>(
+    names: [&[u8]; 2],
+    buffer: &'a mut [u8; LAUNCH_REQUEST_MAX_BYTES],
+) -> Option<&'a [u8]> {
+    if names
+        .iter()
+        .any(|name| !(1..=PATH_MAX_BYTES).contains(&name.len()))
+    {
+        return None;
+    }
+    let [first, second] = names;
+    let split = 1 + first.len();
+    let end = split + second.len();
+    buffer[0] = first.len() as u8;
+    buffer[1..split].copy_from_slice(first);
+    buffer[split..end].copy_from_slice(second);
+    Some(&buffer[..end])
+}
+
+pub fn decode_rename_pair(bytes: &[u8]) -> Option<[&[u8]; 2]> {
+    let (&length, names) = bytes.split_first()?;
+    let (first, second) = names.split_at_checked(usize::from(length))?;
+    let names = [first, second];
+    names
+        .iter()
+        .all(|name| (1..=PATH_MAX_BYTES).contains(&name.len()))
+        .then_some(names)
+}
 
 /// One-byte intent delivered to a user-space planner.
 #[derive(Clone, Copy, PartialEq, Eq)]

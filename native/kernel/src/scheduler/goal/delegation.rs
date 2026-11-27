@@ -154,8 +154,7 @@ impl Goal {
                 .iter()
                 .find(|task| task.has_launch(parent))
                 .ok_or(DelegationDenial::AgentFinished)?;
-            let grant = self
-                .file
+            let grant = self.file_grants[0]
                 .as_ref()
                 .ok_or(DelegationDenial::NoDelegableFile)?;
             grant.delegate(fs, &task.fs, launch.program, argument)?

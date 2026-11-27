@@ -1,8 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 76 calls numbered from 0 through 75.
-Kernel 0.0.54 adds a second preserved-file descriptor in version 2 of the
-goal creation request.
+Kernel 0.0.55 supports two rename grants in one agent launch.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -375,7 +374,7 @@ The kernel checks the clock on user trap entry. At or after the deadline,
 it processes expiry before dispatching a syscall or resuming a task on a
 timer interrupt. A syscall admitted before the deadline runs to completion.
 Expiry stops all live goal members, closes their descriptors, releases unused
-reply reservations and drops the goal's file grant, preserved input and
+reply reservations and drops the goal's file grants, preserved files and
 staged rename. The owner can still read status and audit records, collect
 child results and close the goal. A child that already exited or faulted
 keeps its result. A previously published rename stays visible. Call 35
@@ -528,9 +527,11 @@ requiring a new revision fails if the counter is exhausted.
 Successful publication, cancellation, goal expiry, close or owner exit
 releases the preserved files.
 
-Call 63 requires a linked writable RamFS file and an empty file-grant slot.
-The direct agent receives read access and permission to stage a rename.
-Ordinary direct children receive read access only. Delegating a file to a
+Call 63 retains a linked writable RamFS file while the goal is ready. A
+goal with two rename slots can use call 63 twice for distinct files. Both
+grants must come from call 63 to form a pair. The agent's issued handles
+carry read access and permission to stage a rename. Ordinary direct
+children receive read access to the first file. Delegating a file to a
 helper requires a delegable grant. Call 64 verifies that the caller is the
 goal's live agent and that its open descriptor carries this goal's rename
 permission. It uses the same staging limit, basename checks and publication
@@ -541,7 +542,7 @@ Call 66 accepts the owner's open goal handle in any goal state. It releases
 the references held by the pending batch and invalidates its review token.
 The owner can discard a proposal even when its review returned no token.
 The public file and RamFS revision stay intact. The goal retains its lifecycle
-state, file grant, preserved files, budgets and audit history. A ready or
+state, file grants, preserved files, budgets and audit history. A ready or
 running goal can stage a replacement under the same rules.
 
 ### Delegating a rename review
@@ -597,11 +598,11 @@ goal, a second agent, insufficient available bytes, or exhausted handles.
 A failed launch preserves goal membership, grants, reservations and launch handles.
 
 The kernel binds the child to the goal before its first instruction.
-The agent run calls also create and bind the agent in that operation. Direct
-children inherit any file granted to the goal. Call 56 queues a typed
-request before the agent starts. Bit 0 starts it suspended. Bit 1 selects
-the explicit agent reply allowance in `a3`. Otherwise the agent inherits
-the available balance. Bits 2, 3 and 4 select the request format.
+The agent run calls also create and bind the agent in that operation.
+Call 56 queues a typed request before the agent starts. Bit 0 starts it
+suspended. Bit 1 selects the explicit agent reply allowance in `a3`.
+Otherwise the agent inherits the available balance. Bits 2–5 select the
+request format.
 
 | Format flags | Request kind | Payload |
 | --- | --- | --- |
@@ -609,6 +610,7 @@ the available balance. Bits 2, 3 and 4 select the request format.
 | Bit 2 only | `PlanIntent` (tag 5) | One intent byte. Intent 1 for `hello` pins `find-greeting@1`. Other legacy intents retain their original delivery behavior. |
 | Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. The pairs `[1, 1]` and `[1, 2]` select the corresponding `find-greeting` revisions for `hello`. |
 | Bit 4 only | `StageRename` (tag 7) | 1–64 bytes for the proposed basename. `hello` presents the name and its startup file descriptor to call 64. |
+| Bit 5 only | `StageRenamePair` (tag 11) | One byte with the first basename's length, followed by both basenames in grant order. Each basename is 1–64 bytes. The request length determines the second length. |
 
 Unknown flag bits, multiple format bits set, an unreadable buffer or the wrong
 length fail before admission. For tag 6 the kernel also verifies that the
@@ -617,25 +619,34 @@ reserving bytes or launching the child. The kernel supplies the digest
 from its boot image. The agent interprets the workflow and the kernel
 checks the live grant when the agent requests delegation.
 
+Tag 11 requires two rename grants and two basenames of valid lengths.
+The kernel supplies both task-local handles before scheduling the agent.
+Register `a1` holds the first handle,
+`a2` holds grant kind 3 and `a3` holds the second handle. `hello` uses
+call 64 once per name and fails if either stage is rejected. The staging
+audit records both attempts under the agent's launch handle. Review and
+commit require successful goal completion.
+
 Call 59 returns lifecycle state and the original agent's definition pin in
 one snapshot. The first two bytes hold the intent and revision. The next
 32 hold the binary SHA-256 in digest order. An unpinned launch returns
 34 zero bytes. Only the shell that owns the agent can inspect it. A stale
 handle, a short buffer or an invalid destination returns -1 before copying.
 
-Calls 46, 48, 52 and 58 accept one regular file while the goal is ready. The kernel
-retains the file independently of the shell's descriptor, cursor and pathname. Closing
-or cancelling a ready goal, or stopping its owner, releases this reference.
-On a successful direct launch the child receives a fresh read-only handle
-at offset zero in `a1`, file kind 2 in `a2` and 0 in `a3`. Direct siblings
-get independent cursors on the same retained file, even after pathname reuse.
-The kernel releases the goal's reference when all places have been used or the
-goal finishes. Each child can close its own handle. Exit, fault or cancellation
-closes any handle it still holds.
+Calls 46, 48, 52 and 58 accept one regular file while the goal is ready.
+The kernel retains each granted file independently of the shell's
+descriptor, cursor and pathname. Closing or cancelling a ready goal, or
+stopping its owner, releases these references. A direct launch uses the
+first granted file with a fresh handle at offset zero in `a1`, file kind 2
+in `a2` and 0 in `a3`. An agent with a tag 11 request receives both files.
+Direct siblings get independent cursors, even after pathname reuse.
+The kernel releases the goal's grant references when all places have
+been used or the goal finishes. Exit, fault or cancellation closes any
+handles the child still holds.
 
-Call 57 withdraws the goal's retained file and closes all descriptors
-derived from that grant, including copies already held by helpers. If the
-batch contains a rename staged through the grant, the call also discards
+Call 57 withdraws all file grants for the goal and closes every descriptor
+derived from them, including copies already held by helpers. If the
+batch contains a rename staged through one of these grants, the call discards
 the batch and invalidates its review token. Selectors 0 and 1 of call 73
 include these discard rows. The discard flag in `a1` describes that same
 revocation. The goal retains its preserved files.

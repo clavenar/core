@@ -4,8 +4,9 @@ pub use clv_abi::agent::{
     ResumeReceipt,
 };
 use clv_abi::agent::{
-    DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT,
-    RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_SUSPENDED,
+    DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES,
+    RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR,
+    RUN_SUSPENDED, encode_rename_pair,
 };
 use clv_abi::{
     MESSAGE_MAX_BYTES, PATH_MAX_BYTES, Program, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
@@ -75,6 +76,7 @@ pub enum RunRequest<'a> {
     Plan(PlanIntent),
     Definition(DefinitionId),
     StageRename(&'a [u8]),
+    StageRenamePair([&'a [u8]; 2]),
 }
 
 /// Launches an agent with an optional typed request in its mailbox.
@@ -88,13 +90,13 @@ pub fn launch(
     let Some(request) = request else {
         return run_with_options(goal, program, suspended, reply_bytes);
     };
-    let mut buffer = [0; DELEGATION_REQUEST_MAX_BYTES];
+    let mut buffer = [0; LAUNCH_REQUEST_MAX_BYTES];
     let mut flags = if suspended { RUN_SUSPENDED } else { 0 };
     if reply_bytes.is_some() {
         flags |= RUN_REPLY_LIMIT;
     }
     let bytes = match request {
-        RunRequest::DelegateWithFile(request) => request.encode(&mut buffer)?,
+        RunRequest::DelegateWithFile(request) => request.encode(buffer.first_chunk_mut()?)?,
         RunRequest::Plan(intent) => {
             flags |= RUN_PLAN_INTENT;
             buffer[0] = intent as u8;
@@ -110,6 +112,10 @@ pub fn launch(
             let bytes = buffer[..PATH_MAX_BYTES].get_mut(..name.len())?;
             bytes.copy_from_slice(name);
             bytes
+        }
+        RunRequest::StageRenamePair(names) => {
+            flags |= RUN_STAGE_RENAME_PAIR;
+            encode_rename_pair(names, &mut buffer)?
         }
     };
     let (agent, child, ..) = ecall6(

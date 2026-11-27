@@ -92,16 +92,43 @@ pub(crate) struct FileGrant {
 }
 
 impl FileGrant {
-    pub(crate) fn open_for_child(&self, fs: &mut RamFs, is_agent: bool) -> Option<TaskFs> {
-        let access = Access::GoalFile {
-            goal: self.goal,
-            mode: if is_agent {
-                self.mode
-            } else {
-                FileGrantMode::Read
-            },
-        };
-        TaskFs::from_grant(fs, self.node, access)
+    pub(crate) fn is_for_rename(&self) -> bool {
+        self.mode == FileGrantMode::StageRename
+    }
+
+    pub(crate) fn same_file(&self, other: &Self) -> bool {
+        self.node == other.node
+    }
+
+    pub(crate) fn open_for_child(
+        &self,
+        fs: &mut RamFs,
+        is_agent: bool,
+        second: Option<&Self>,
+    ) -> Option<TaskFs> {
+        // Check the entire ID range before installing any handles or taking references.
+        fs.next_handle_id
+            .checked_add(1 + usize::from(second.is_some()))?;
+        let mut child = TaskFs::empty();
+        for (slot, grant) in child
+            .slots
+            .iter_mut()
+            .zip(core::iter::once(self).chain(second))
+        {
+            let access = Access::GoalFile {
+                goal: grant.goal,
+                mode: if is_agent {
+                    grant.mode
+                } else {
+                    FileGrantMode::Read
+                },
+            };
+            *slot = Some(
+                Handle::allocate(fs, access, |_| Some(grant.node))
+                    .expect("file grant handle IDs were checked"),
+            );
+        }
+        Some(child)
     }
 
     pub(crate) fn delegate(
@@ -136,7 +163,7 @@ impl FileGrant {
         {
             return Err(DelegationDenial::ArgumentNotAllowed);
         }
-        self.open_for_child(fs, false)
+        self.open_for_child(fs, false, None)
             .ok_or(DelegationDenial::FileHandlesExhausted)
     }
 
@@ -226,10 +253,13 @@ impl TaskFs {
         Some(child)
     }
 
-    /// A newly created child's only handle, if granted, is in slot zero.
-    pub(crate) fn startup_grant(&self) -> Option<(usize, GrantKind)> {
-        let handle = self.slots[0].as_ref()?;
-        Some((handle.id, handle.node.grant_kind()))
+    /// Startup handles follow grant order. Only a rename pair fills both leading slots.
+    pub(crate) fn startup_grant(&self) -> Option<(usize, GrantKind, Option<usize>)> {
+        let first = self.slots[0].as_ref()?;
+        match &self.slots[1] {
+            Some(second) => Some((first.id, GrantKind::RenamePair, Some(second.id))),
+            None => Some((first.id, first.node.grant_kind(), None)),
+        }
     }
 
     pub(crate) fn open(&mut self, fs: &mut RamFs, path: &[u8], writable: bool) -> Option<usize> {

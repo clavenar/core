@@ -1,6 +1,9 @@
 pub(crate) mod pipe;
 
-use clv_abi::agent::{DELEGATION_HEADER_BYTES, DELEGATION_REQUEST_MAX_BYTES, EncodedResumeReceipt};
+use clv_abi::agent::{
+    DELEGATION_HEADER_BYTES, DELEGATION_REQUEST_MAX_BYTES, EncodedResumeReceipt,
+    LAUNCH_REQUEST_MAX_BYTES,
+};
 use clv_abi::goal::{EncodedGoalObservation, EncodedRenameReviewReceipt};
 use clv_abi::{
     FILE_REPLY_ERROR, FILE_REPLY_OK, MESSAGE_MAX_BYTES, PATH_MAX_BYTES, ReplyKind, RequestKind,
@@ -32,6 +35,9 @@ impl MessageKind {
             Self::Request(RequestKind::PlanIntent) => length == 1,
             Self::Request(RequestKind::PlanDefinition) => length == 2,
             Self::Request(RequestKind::StageRename) => (1..=PATH_MAX_BYTES).contains(&length),
+            Self::Request(RequestKind::StageRenamePair) => {
+                (3..=LAUNCH_REQUEST_MAX_BYTES).contains(&length)
+            }
             Self::Request(
                 RequestKind::ObserveGoal | RequestKind::ResumeAgent | RequestKind::ReviewRename,
             ) => length == 0,
@@ -64,7 +70,7 @@ pub(crate) struct Message {
     pub(crate) kind: MessageKind,
     pub(crate) sender: usize,
     // Also accommodates the legacy status prefix on a full-sized file reply.
-    bytes: [u8; DELEGATION_REQUEST_MAX_BYTES],
+    bytes: [u8; LAUNCH_REQUEST_MAX_BYTES],
     wire_length: usize,
 }
 
@@ -79,7 +85,7 @@ impl Message {
             return None;
         }
         let prefix = kind.legacy_prefix();
-        let mut bytes = [0; DELEGATION_REQUEST_MAX_BYTES];
+        let mut bytes = [0; LAUNCH_REQUEST_MAX_BYTES];
         let wire_length = prefix.len() + length;
         bytes[..prefix.len()].copy_from_slice(prefix);
         if !copy(&mut bytes[prefix.len()..wire_length]) {

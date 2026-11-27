@@ -363,10 +363,14 @@ impl Scheduler {
             LaunchScope::Goal {
                 handle: goal,
                 reply_bytes,
-            } => self
-                .goal
-                .as_mut()?
-                .start(goal, launch.handle, agent, reply_bytes, fs)?,
+            } => self.goal.as_mut()?.start(
+                goal,
+                launch.handle,
+                agent,
+                reply_bytes,
+                request.as_ref(),
+                fs,
+            )?,
             LaunchScope::Directory(fd) => {
                 self.tasks[self.current]
                     .fs
@@ -404,9 +408,9 @@ impl Scheduler {
             self.initial_status,
         );
         let startup_grant = task_fs.startup_grant();
-        if let Some((fd, kind)) = startup_grant {
-            let writer = if pipe.is_some() { handle } else { 0 };
-            frame.set_startup_args(fd, kind as usize, writer);
+        if let Some((fd, kind, second)) = startup_grant {
+            let extra = second.unwrap_or(if pipe.is_some() { handle } else { 0 });
+            frame.set_startup_args(fd, kind as usize, extra);
         }
         // SAFETY: This slot is stopped and its private stack frame is mapped
         // writable in the shared supervisor identity map.
@@ -415,7 +419,7 @@ impl Scheduler {
         task.fs = task_fs;
         task.timer_fired = false;
         // Older children use an in-band status byte to answer a file read.
-        let legacy_file_reply = matches!(startup_grant, Some((_, GrantKind::File)))
+        let legacy_file_reply = matches!(startup_grant, Some((_, GrantKind::File, _)))
             || request
                 .as_ref()
                 .is_some_and(|message| message.kind == MessageKind::Request(RequestKind::ReadFile));

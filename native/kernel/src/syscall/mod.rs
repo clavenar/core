@@ -1,6 +1,6 @@
 use clv_abi::agent::{
     AgentLaunch, NO_DEFINITION, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
-    RUN_STAGE_RENAME, RUN_SUSPENDED,
+    RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED, decode_rename_pair,
 };
 use clv_abi::audit::{DelegationDenial, PublicationAuditView, ReadAuditView};
 use clv_abi::goal::{
@@ -308,6 +308,7 @@ pub(crate) fn dispatch(
                 RUN_PLAN_INTENT => Some(RequestKind::PlanIntent),
                 RUN_PLAN_DEFINITION => Some(RequestKind::PlanDefinition),
                 RUN_STAGE_RENAME => Some(RequestKind::StageRename),
+                RUN_STAGE_RENAME_PAIR => Some(RequestKind::StageRenamePair),
                 _ => None,
             };
             let launch = kind
@@ -320,6 +321,9 @@ pub(crate) fn dispatch(
                     )
                 })
                 .and_then(|request| {
+                    if request.kind == MessageKind::Request(RequestKind::StageRenamePair) {
+                        decode_rename_pair(request.bytes(false))?;
+                    }
                     scheduler.run_agent(
                         fs,
                         a0,

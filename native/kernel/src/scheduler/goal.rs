@@ -15,7 +15,7 @@ use clv_abi::audit::{
 use clv_abi::budget::ReplyBudget;
 use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CreateOptions, CreatePolicy, DiscardResult,
-    FileOptions, GoalDeadline, GoalObservation, GoalStatus, MAX_CHILDREN,
+    FileOptions, GoalDeadline, GoalObservation, GoalStatus, MAX_CHILDREN, MAX_GOAL_RENAMES,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{LaunchParent, Program, ReplyKind, RequestKind, TaskCompletion};
@@ -77,7 +77,7 @@ pub(super) struct Goal {
     reads: GoalReads,
     members: [Option<Member>; MAX_CHILDREN],
     cancelled_before_launch: bool,
-    file: Option<FileGrant>,
+    file_grants: [Option<FileGrant>; MAX_GOAL_RENAMES],
     rename_policy: RenamePolicy,
     require_rename_review: bool,
     rename_limit: usize,
@@ -140,6 +140,7 @@ impl Goal {
         child: usize,
         agent: Option<AgentBinding>,
         reply_bytes: Option<usize>,
+        request: Option<&Message>,
         fs: &mut RamFs,
     ) -> Option<TaskFs> {
         if self.handle != handle || !self.is_active() {
@@ -154,9 +155,16 @@ impl Goal {
         }
         let slot = self.free_slot()?;
         let replies = ReplyReservation::new(self.budget().available, reply_bytes)?;
-        let child_fs = match &self.file {
-            Some(file) => file.open_for_child(fs, agent.is_some())?,
-            None => TaskFs::empty(),
+        let rename_pair = request.is_some_and(|message| {
+            message.kind == MessageKind::Request(RequestKind::StageRenamePair)
+        });
+        let child_fs = match (rename_pair, &self.file_grants) {
+            (true, [Some(first), Some(second)]) if agent.is_some() => {
+                first.open_for_child(fs, true, Some(second))?
+            }
+            (true, _) => return None,
+            (false, [Some(file), _]) => file.open_for_child(fs, agent.is_some(), None)?,
+            (false, [None, _]) => TaskFs::empty(),
         };
         let role = agent.map_or(MemberRole::Child, MemberRole::Agent);
         self.admit(slot, child, role, replies, fs);
@@ -185,12 +193,12 @@ impl Goal {
         });
         if slot + 1 == self.options.child_limit {
             // Launch slots are never reused. Issued handles keep their own file references.
-            self.release_file(fs);
+            self.release_files(fs);
         }
     }
 
-    fn release_file(&mut self, fs: &mut RamFs) {
-        if let Some(file) = self.file.take() {
+    fn release_files(&mut self, fs: &mut RamFs) {
+        for file in self.file_grants.iter_mut().filter_map(Option::take) {
             file.release(fs);
         }
     }
@@ -236,7 +244,7 @@ impl Goal {
             parent.replies.refund(bytes);
         }
         if !self.members().any(|member| member.completion.is_none()) {
-            self.release_file(fs);
+            self.release_files(fs);
         }
     }
 }
@@ -287,7 +295,7 @@ impl Scheduler {
             reads: GoalReads::new(read_limits, read_directory),
             members: [const { None }; MAX_CHILDREN],
             cancelled_before_launch: false,
-            file: None,
+            file_grants: [const { None }; MAX_GOAL_RENAMES],
             rename_policy,
             require_rename_review,
             rename_limit,
@@ -406,23 +414,37 @@ impl Scheduler {
             return None;
         }
         let goal = self.goal.as_mut()?;
-        if goal.file.is_some() {
+        let slot = match &goal.file_grants {
+            [None, None] => 0,
+            [Some(first), None]
+                if goal.rename_limit == MAX_GOAL_RENAMES
+                    && first.is_for_rename()
+                    && mode == FileGrantMode::StageRename =>
+            {
+                1
+            }
+            _ => return None,
+        };
+        let grant = self.tasks[self.current]
+            .fs
+            .retain_file(fs, handle, fd, mode, argument)?;
+        if goal.file_grants[0]
+            .as_ref()
+            .is_some_and(|first| first.same_file(&grant))
+        {
+            grant.release(fs);
             return None;
         }
-        goal.file = Some(
-            self.tasks[self.current]
-                .fs
-                .retain_file(fs, handle, fd, mode, argument)?,
-        );
+        goal.file_grants[slot] = Some(grant);
         Some(())
     }
 
     pub(crate) fn revoke_goal_file(&mut self, handle: usize, fs: &mut RamFs) -> Option<bool> {
         self.shell_goal(handle)?;
         let goal = self.goal.as_mut()?;
-        goal.release_file(fs);
+        goal.release_files(fs);
         let rename_discarded = goal.discard_granted_rename(fs);
-        // A full goal has already released its pin. Its issued handles still carry its ID.
+        // A full goal has released its pins. Issued handles still carry the goal ID.
         for task in &mut self.tasks {
             task.fs.revoke_goal_file(fs, handle);
         }
@@ -601,8 +623,8 @@ impl Scheduler {
             }
         };
         let goal = self.goal.as_mut()?;
-        // Stopping the members closed their issued descriptors. A ready goal can still hold its pin.
-        goal.release_file(fs);
+        // Stopping the members closed their descriptors. A ready goal can still hold its pins.
+        goal.release_files(fs);
         let discarded = goal.release_transaction(fs, Some(outcome));
         self.wake_goal_monitor();
         Some(CancelOutcome {
@@ -624,7 +646,7 @@ impl Scheduler {
             if self.tasks[GOAL_MONITOR_TASK_INDEX].state == TaskState::WaitingForGoal(goal.handle) {
                 self.stop_task(GOAL_MONITOR_TASK_INDEX, fs, TaskCompletion::Cancelled);
             }
-            goal.release_file(fs);
+            goal.release_files(fs);
             goal.release_transaction(fs, None);
         }
     }

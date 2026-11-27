@@ -386,10 +386,19 @@ fn agent_run_args(
             }
             GoalFlag::Mock => agent::RunRequest::Definition(mock_definition(args)?),
             GoalFlag::StageRename => {
-                let (name, b"") = split_literal(args)? else {
-                    return None;
-                };
-                agent::RunRequest::StageRename(name)
+                let (first, rest) = split_literal(args)?;
+                if rest.is_empty() {
+                    agent::RunRequest::StageRename(first)
+                } else {
+                    let (flag, args) = split_word(rest);
+                    if !matches!(GoalFlag::parse(flag), GoalFlag::StageRename) {
+                        return None;
+                    }
+                    let (second, b"") = split_literal(args)? else {
+                        return None;
+                    };
+                    agent::RunRequest::StageRenamePair([first, second])
+                }
             }
             _ => return None,
         })

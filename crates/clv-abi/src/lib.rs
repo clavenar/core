@@ -107,6 +107,7 @@ pub enum RequestKind {
     ResumeAgent = 9,
     /// Empty assignment to review the rename bound to this launch.
     ReviewRename = 10,
+    StageRenamePair = 11,
 }
 
 impl RequestKind {
@@ -122,6 +123,7 @@ impl RequestKind {
             value if value == Self::ObserveGoal as usize => Some(Self::ObserveGoal),
             value if value == Self::ResumeAgent as usize => Some(Self::ResumeAgent),
             value if value == Self::ReviewRename as usize => Some(Self::ReviewRename),
+            value if value == Self::StageRenamePair as usize => Some(Self::StageRenamePair),
             _ => None,
         }
     }
@@ -167,11 +169,13 @@ impl ReplyKind {
 /// A child receives its RamFS grant handle in `a1` and its kind in `a2`.
 /// A launch without a grant sets `a2` to 0.
 /// A file grant with a pipe also supplies the write endpoint in `a3`.
+/// A rename pair supplies its second file handle in `a3`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum GrantKind {
     Directory = 1,
     File = 2,
+    RenamePair = 3,
 }
 
 pub const PATH_MAX_BYTES: usize = 64;

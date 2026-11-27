@@ -2,7 +2,7 @@
 #![no_main]
 
 use clv::{ChildReply, ChildStatus, LaunchRequest, agent, fs, pipe};
-use clv_abi::agent::DELEGATION_REQUEST_MAX_BYTES;
+use clv_abi::agent::{LAUNCH_REQUEST_MAX_BYTES, decode_rename_pair};
 use clv_abi::{
     GrantKind, MESSAGE_MAX_BYTES, PROBE_VALUE, ReplyKind, RequestKind, SYS_EXIT, SYS_PROBE,
     SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
@@ -21,8 +21,8 @@ global_asm!(
     print_granted_hello = sym print_granted_hello,
 );
 
-extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, writer: usize) -> usize {
-    let mut buffer = [0; DELEGATION_REQUEST_MAX_BYTES];
+extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, extra: usize) -> usize {
+    let mut buffer = [0; LAUNCH_REQUEST_MAX_BYTES];
     match clv::receive_request(&mut buffer) {
         // Submit every rename request so the kernel can attribute a missing grant.
         Some(LaunchRequest::Received {
@@ -30,6 +30,21 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, writer: us
             bytes,
             ..
         }) => usize::from(!agent::stage_rename(handle, bytes)),
+        Some(LaunchRequest::Received {
+            kind: RequestKind::StageRenamePair,
+            bytes,
+            ..
+        }) => {
+            if grant_kind != GrantKind::RenamePair as usize {
+                return 1;
+            }
+            let Some([first, second]) = decode_rename_pair(bytes) else {
+                return 1;
+            };
+            let staged_first = agent::stage_rename(handle, first);
+            let staged_second = agent::stage_rename(extra, second);
+            usize::from(!(staged_first && staged_second))
+        }
         Some(LaunchRequest::Received {
             kind: RequestKind::DelegateWithFile,
             bytes,
@@ -40,9 +55,9 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, writer: us
             bytes,
             ..
         }) => supervise_helper(launch_planned_helper(kind, bytes)),
-        _ if grant_kind == GrantKind::File as usize && writer != 0 => {
-            let status = copy_file(handle, |bytes| pipe::write(writer, bytes));
-            pipe::close(writer);
+        _ if grant_kind == GrantKind::File as usize && extra != 0 => {
+            let status = copy_file(handle, |bytes| pipe::write(extra, bytes));
+            pipe::close(extra);
             status
         }
         _ if grant_kind == GrantKind::File as usize => reply_with_file(Some(handle)),
