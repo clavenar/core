@@ -1064,7 +1064,7 @@ completion or cancellation, until the owner closes the goal. [Definition source]
 ```text
 goal create --children 2 --allow-helper grep --read-bytes 18 --reply-bytes 36
 goal grant-file --delegate-to grep --argument Hello /hello.txt
-agent run hello --mock find-greeting@4
+agent run hello --mock find-greeting@5
 goal status
 goal budget
 agent run --suspended hello --mock find-greeting@1
@@ -1077,7 +1077,7 @@ goal audit
 goal close
 ```
 
-Revision 4 prints `cannot start agent`. The goal remains `Ready` with
+Revision 5 prints `cannot start agent`. The goal remains `Ready` with
 `available=36 reserved=0 spent=0`. Revision 1 starts in the same goal.
 Both status snapshots show `definition=find-greeting@1 sha256=` followed
 by the same 64 hex digits. Compare those digits on the build host with
@@ -1160,6 +1160,42 @@ and grant `/long.txt`. The result exceeds the pinned 18-byte helper
 reservation. The helper's reply audit reports
 `denied=insufficient-reply-bytes`, the shell prints
 `cannot read requested file` and the final balance reports `spent=0`.
+
+### Invoke a registered file tool over MCP
+
+`find-greeting@4` starts `grep` as a local MCP stdio server for the same
+registered tool, `text.search@1`. The guest `hello` client sends
+`initialize`, `notifications/initialized`, `tools/list` and `tools/call`
+using protocol revision `2025-11-25`. The server exposes one tool named
+`text.search`. It accepts a `pattern` string, checks the decoded bytes
+against the approved literal and searches the granted descriptor once.
+Each UTF-8 JSON-RPC frame is capped at 576 bytes including the newline.
+[Revision 4 definition](../userspace/hello/definitions/find-greeting-v4.toml) · [MCP stdio transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+
+```text
+goal create --children 2 --allow-tool text.search@1 --read-bytes 18 --reply-bytes 1042
+goal grant-file --delegate-to grep --argument Hello /hello.txt
+agent run hello --mock find-greeting@4
+wait hello
+recv hello
+agent status
+goal audit
+goal audit --reads
+goal audit --replies
+goal budget
+goal close
+```
+
+The shell prints `Hello from RamFS`. The delegation audit records
+`tool=text.search@1`, and the read audit reports `read_bytes=18`.
+The three encoded stdout responses consume 444 bytes of the helper's
+1,024-byte reservation. The agent spends 18 bytes forwarding the
+decoded result, leaving `available=580 reserved=0 spent=462`.
+
+Repeat with `--read-bytes 17` to see a tool error. The audit reports
+`denied=insufficient-read-bytes` and `read_bytes=0`. The shell prints
+`cannot read requested file`. The encoded error response still counts
+toward the reply budget.
 
 ### Require an exact tool revision for a goal
 

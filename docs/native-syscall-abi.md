@@ -1,7 +1,7 @@
 # Native syscall ABI
 
 The RV64 prototype implements 76 calls numbered from 0 through 75.
-Kernel 0.0.57 adds a stdio mode to registered file-tool launches.
+Kernel 0.0.58 adds an MCP stdio mode to registered file-tool launches.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -238,7 +238,7 @@ that handle in `a3`. The parent writes the child's stdin and reads its
 stdout. The child reads stdin and writes stdout. Each peer can close its
 endpoint of either stream independently.
 
-Call 60 in stdio mode attaches the same two pipes to a registered helper.
+Call 60 in mode 1 or 2 attaches the same two pipes to a registered helper.
 The calling agent or shell owns the parent endpoints. The helper receives
 its file handle in `a1`, file kind 2 in `a2` and the pipe handle in `a3`.
 
@@ -325,7 +325,7 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 | 57 `goal_revoke_file` | `a0` goal handle | `a0` is 0 for an owned goal, including a repeat call, or -1 for an invalid handle or caller. On success, `a1` is 1 if this call discarded a batch that used the grant, 0 otherwise. |
 | 58 `goal_grant_file_to_with_arg` | `a0` goal handle, `a1` shell file handle, `a2` helper selector, `a3` literal address, `a4` literal length (0–64 bytes) | 0 when the file and its argument restriction are attached, -1 on rejection |
 | 59 `agent_status_with_definition` | `a0` agent handle, `a1` shell stack destination, `a2` capacity in bytes | Same status registers as call 39, plus a 34-byte definition record in the buffer |
-| 60 `agent_invoke_file_tool` | `a0` agent handle or zero for self, `a1` versioned tool ID, `a2` reply reservation, `a3` literal address, `a4` literal length (0–64), `a5` mode (0 mailbox or 1 stdio) | Fresh helper handle on admission, or -1 on rejection |
+| 60 `agent_invoke_file_tool` | `a0` agent handle or zero for self, `a1` versioned tool ID, `a2` reply reservation, `a3` literal address, `a4` literal length (0–64), `a5` mode (0 mailbox, 1 raw stdio, 2 MCP stdio) | Fresh helper handle on admission, or -1 on rejection |
 | 61 `goal_stage_rename` | `a0` goal handle, `a1` owner's file handle, `a2` new basename address, `a3` length (1–64 bytes) | 0 when staged, or -1 on rejection |
 | 62 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, 2 on a failed file postcondition, 3 for an expired matching token, or -1 for an invalid caller, goal, token, or unavailable revision |
 | 63 `goal_grant_file_for_rename` | `a0` goal handle, `a1` owner's file handle | 0 when the ready goal receives the grant, or -1 on rejection |
@@ -627,7 +627,7 @@ request format.
 | --- | --- | --- |
 | All clear | `DelegateWithFile` (tag 4) | Two little-endian RV64 words for the helper selector and its reply allowance, followed by 0–64 literal argument bytes |
 | Bit 2 only | `PlanIntent` (tag 5) | One intent byte. Intent 1 for `hello` pins `find-greeting@1`. Other legacy intents retain their original delivery behavior. |
-| Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. The pairs `[1, 1]`, `[1, 2]` and `[1, 3]` select the corresponding `find-greeting` revisions for `hello`. |
+| Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. Intent 1 with revision 1–4 selects the corresponding `find-greeting` definition for `hello`. |
 | Bit 4 only | `StageRename` (tag 7) | 1–64 bytes for the proposed basename. `hello` presents the name and its startup file descriptor to call 64. |
 | Bit 5 only | `StageRenamePair` (tag 11) | One byte with the first basename's length, followed by both basenames in grant order. Each basename is 1–64 bytes. The request length determines the second length. |
 
@@ -699,12 +699,19 @@ An unknown revision fails before any helper launch or budget reservation.
 
 Mode 0 delivers an `Argument` request (tag 3). Mode 1 delivers the same
 approved literal as `FileToolStdio` (tag 12) and installs both pipes.
-An unrecognized mode is an invalid request. In stdio mode, `grep` reads
-stdin through EOF and checks it against the launch literal before it reads
-the granted file. It writes matching bytes to stdout. It reports failures
-in its exit status and can include an empty typed error reply. `hello`
-forwards output after collecting the helper's exit status. A failed
-helper's partial output remains private to its parent.
+In mode 1, `grep` reads stdin through EOF and checks it against the launch
+literal before reading the granted file. It writes matching bytes to stdout.
+It reports failures in its exit status and can include an empty typed error
+reply. `hello` forwards output after collecting the helper's exit status.
+A failed helper's partial output remains private to its parent.
+
+Mode 2 delivers the approved literal as `FileToolMcp` (tag 13) and installs
+both pipes. `grep` serves the local MCP session in user space. It exposes
+`text.search` for the registered `text.search@1` and compares the decoded
+pattern with the launch literal before reading from the granted descriptor.
+Each stdout byte, including JSON syntax and newline delimiters, consumes
+the helper's reply allowance through call 30. Call 60 rejects unrecognized
+modes. [Run the MCP session in QEMU](qemu-walkthroughs.md#invoke-a-registered-file-tool-over-mcp)
 
 Calls 47, 49, 54 and 60 check the goal's delegation rule before checking
 the program slot or reserving resources. A program rule requires the helper
@@ -717,7 +724,8 @@ the goal's reserved total. Call 47 starts the helper with zero in `a1`, `a2`
 and `a3`. Calls 49, 54 and 60 check the selected helper against the recipient on the
 agent's open delegable handle before allocating a read-only handle with an
 independent cursor.
-The new file handle arrives in `a1`, file kind 2 in `a2` and zero in `a3`.
+The new file handle arrives in `a1` and file kind 2 in `a2`. Register `a3`
+carries the pipe handle for call 60 in mode 1 or 2 and zero otherwise.
 The kernel commits the file grant, reply reservation and launch together.
 The caller receives the helper handle and owns its reply and wait result.
 The shell receives events for the launches it issues, including helpers it
@@ -727,8 +735,9 @@ result, shell event or open pipe reader. This lets the parent collect the
 result even when another caller tries to launch the same program.
 
 Calls 53, 54 and 60 copy up to 64 literal argument bytes into the launch mailbox
-before the child can run. The child reads the argument with call 25. An empty
-argument has tag 3. Invalid arguments fail before admission or reservation.
+before the child can run. The child reads the argument with call 25. The
+selected delivery mode determines the tag even for an empty argument.
+Invalid arguments fail before admission or reservation.
 
 ## Audit records
 

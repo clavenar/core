@@ -105,7 +105,7 @@ entries! {
         "agent run [--suspended] [--reply-bytes N] <program> [request]" =>
             "Start an agent. Requests below apply to hello",
         "  --stage-rename <new-name>" => "Stage in grant order (repeat for two files)",
-        "  --mock find-greeting[@REV]" => "Run revision 1 (default), 2 or 3 (stdio)",
+        "  --mock find-greeting[@REV]" => "Run revision 1 (default), 2, 3 (stdio) or 4 (MCP)",
         "  --delegate --with-file --reply-bytes N grep -F <pattern>" =>
             "Ask grep to search the file",
     },

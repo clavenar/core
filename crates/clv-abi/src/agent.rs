@@ -104,6 +104,11 @@ pub const FIND_GREETING_V3: DefinitionId = DefinitionId {
     revision: 3,
 };
 
+pub const FIND_GREETING_V4: DefinitionId = DefinitionId {
+    intent: PlanIntent::FindGreeting,
+    revision: 4,
+};
+
 impl DefinitionId {
     pub const fn encode(self) -> [u8; 2] {
         [self.intent as u8, self.revision]

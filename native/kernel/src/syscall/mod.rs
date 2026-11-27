@@ -6,7 +6,7 @@ use clv_abi::audit::{DelegationDenial, PublicationAuditView, ReadAuditView};
 use clv_abi::goal::{
     EncodedGoalCreate, FileRecipient, GoalCreateRequest, RENAME_DIFF_HEADER_BYTES, ReviewToken,
 };
-use clv_abi::tool::{FILE_TOOL_STDIO, ToolId};
+use clv_abi::tool::{FILE_TOOL_MCP, FILE_TOOL_STDIO, ToolId};
 use clv_abi::{
     ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE,
     PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, PipeStream, Program, ReplyKind, RequestKind,
@@ -357,6 +357,7 @@ pub(crate) fn dispatch(
                     match frame.registers[REG_A5] {
                         0 => Some(RequestKind::Argument),
                         FILE_TOOL_STDIO => Some(RequestKind::FileToolStdio),
+                        FILE_TOOL_MCP => Some(RequestKind::FileToolMcp),
                         _ => None,
                     }
                 } else {

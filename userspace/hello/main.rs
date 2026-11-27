@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+mod mcp_client;
+
 use clv::{ChildReply, ChildStatus, LaunchRequest, agent, fs, pipe};
 use clv_abi::agent::{LAUNCH_REQUEST_MAX_BYTES, decode_rename_pair};
 use clv_abi::{
@@ -120,6 +122,15 @@ fn run_plan(kind: RequestKind, bytes: &[u8]) -> usize {
                 return delegation_failed();
             };
             supervise_stdio_tool(&request)
+        }
+        Some(agent::FIND_GREETING_V4) => {
+            let Some(request) = agent::FileToolInvocation::decode(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/find-greeting-v4.action"
+            ))) else {
+                return delegation_failed();
+            };
+            mcp_client::run(&request)
         }
         _ => delegation_failed(),
     }

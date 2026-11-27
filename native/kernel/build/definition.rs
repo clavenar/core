@@ -1,7 +1,7 @@
 use clv_abi::Program;
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, DefinitionId, DefinitionPin, FIND_GREETING_V1, FIND_GREETING_V2,
-    FIND_GREETING_V3, FileDelegation, FileToolInvocation,
+    FIND_GREETING_V3, FIND_GREETING_V4, FileDelegation, FileToolInvocation,
 };
 use clv_abi::tool::FileTool;
 use serde::Deserialize;
@@ -26,6 +26,8 @@ struct Delegation {
     reply_bytes: usize,
     #[serde(default)]
     stdio: bool,
+    #[serde(default)]
+    mcp: bool,
 }
 
 pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
@@ -40,8 +42,8 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
 
     let step = definition.delegate_with_file;
     assert_eq!(
-        step.stdio,
-        id == FIND_GREETING_V3,
+        (step.stdio, step.mcp),
+        (id == FIND_GREETING_V3, id == FIND_GREETING_V4),
         "wrong transport for {stem}"
     );
     let argument = step.argument.as_bytes();
@@ -54,14 +56,16 @@ pub(super) fn build(directory: &Path, output: &Path, id: DefinitionId) {
             reply_bytes,
         }
         .encode(&mut buffer),
-        (FIND_GREETING_V2 | FIND_GREETING_V3, None, Some(name)) => FileToolInvocation {
-            tool: FileTool::named(name.as_bytes())
-                .expect("unknown file tool revision")
-                .id,
-            argument,
-            reply_bytes,
+        (FIND_GREETING_V2 | FIND_GREETING_V3 | FIND_GREETING_V4, None, Some(name)) => {
+            FileToolInvocation {
+                tool: FileTool::named(name.as_bytes())
+                    .expect("unknown file tool revision")
+                    .id,
+                argument,
+                reply_bytes,
+            }
+            .encode(&mut buffer)
         }
-        .encode(&mut buffer),
         _ => panic!("invalid delegation target for {stem}"),
     }
     .expect("definition argument exceeds the IPC limit");

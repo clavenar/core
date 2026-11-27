@@ -2,7 +2,9 @@
 mod definition;
 
 use clv_abi::USER_IMAGE_MAX_BYTES;
-use clv_abi::agent::{FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, SHA256_BYTES};
+use clv_abi::agent::{
+    FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, FIND_GREETING_V4, SHA256_BYTES,
+};
 use clv_abi::tool::FILE_TOOLS;
 use sha2::{Digest, Sha256};
 use std::env;
@@ -15,7 +17,12 @@ fn main() {
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
     let output = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let userspace = root.join("userspace");
-    for id in [FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3] {
+    for id in [
+        FIND_GREETING_V1,
+        FIND_GREETING_V2,
+        FIND_GREETING_V3,
+        FIND_GREETING_V4,
+    ] {
         definition::build(&userspace.join("hello/definitions"), &output, id);
     }
     build_library("clv_abi", &root.join("crates/clv-abi/src"), &output, &[]);

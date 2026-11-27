@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+mod mcp_server;
+
 use clv::{LaunchRequest, fs, pipe};
 use clv_abi::tool::TEXT_SEARCH_V1;
 use clv_abi::{GrantKind, MESSAGE_MAX_BYTES, NO_CHILD_HANDLE, ReplyKind, RequestKind};
@@ -17,6 +19,13 @@ extern "C" fn _start(_task: usize, file: usize, grant: usize, io: usize) -> ! {
     };
     if grant != GrantKind::File as usize {
         fail(ReplyKind::ReadFailed);
+    }
+    if kind == RequestKind::FileToolMcp && io != NO_CHILD_HANDLE {
+        clv::exit(if mcp_server::serve(io, file, bytes).is_some() {
+            0
+        } else {
+            2
+        });
     }
     let stdout = match kind {
         RequestKind::Argument => None,

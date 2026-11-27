@@ -131,6 +131,8 @@ pub enum RequestKind {
     StageRenamePair = 11,
     /// The approved literal for a registered tool launched with stdio pipes.
     FileToolStdio = 12,
+    /// The approved literal for a registered tool launched as a local MCP server.
+    FileToolMcp = 13,
 }
 
 impl RequestKind {
@@ -148,6 +150,7 @@ impl RequestKind {
             value if value == Self::ReviewRename as usize => Some(Self::ReviewRename),
             value if value == Self::StageRenamePair as usize => Some(Self::StageRenamePair),
             value if value == Self::FileToolStdio as usize => Some(Self::FileToolStdio),
+            value if value == Self::FileToolMcp as usize => Some(Self::FileToolMcp),
             _ => None,
         }
     }

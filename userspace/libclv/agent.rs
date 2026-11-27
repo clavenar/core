@@ -1,14 +1,14 @@
 pub use clv_abi::agent::{
     AgentLaunch, AgentStatus, CURRENT_AGENT, ControlResult, DefinitionId, DefinitionPin,
-    FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, FileDelegation, FileToolInvocation,
-    PlanIntent, ResumeReceipt,
+    FIND_GREETING_V1, FIND_GREETING_V2, FIND_GREETING_V3, FIND_GREETING_V4, FileDelegation,
+    FileToolInvocation, PlanIntent, ResumeReceipt,
 };
 use clv_abi::agent::{
     DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES,
     RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR,
     RUN_SUSPENDED, encode_rename_pair,
 };
-use clv_abi::tool::FILE_TOOL_STDIO;
+use clv_abi::tool::{FILE_TOOL_MCP, FILE_TOOL_STDIO};
 use clv_abi::{
     MESSAGE_MAX_BYTES, PATH_MAX_BYTES, Program, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
     SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_LAUNCH_SUPERVISOR,
@@ -194,6 +194,18 @@ pub fn invoke_file_tool_stdio(agent: usize, request: &FileToolInvocation<'_>) ->
         request.reply_bytes,
         request.argument,
         FILE_TOOL_STDIO,
+    )
+}
+
+/// Starts the registered file tool as a local MCP server on its stdio pipes.
+pub fn invoke_file_tool_mcp(agent: usize, request: &FileToolInvocation<'_>) -> Option<usize> {
+    delegate_literal(
+        SYS_AGENT_INVOKE_FILE_TOOL,
+        agent,
+        request.tool.0.try_into().ok()?,
+        request.reply_bytes,
+        request.argument,
+        FILE_TOOL_MCP,
     )
 }
 

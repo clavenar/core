@@ -68,10 +68,12 @@ impl Scheduler {
             .encode(),
         );
         let (launch, child_fs, argument) = admission.ok()?;
-        let pipes = if argument
-            .as_ref()
-            .is_some_and(|message| message.kind == MessageKind::Request(RequestKind::FileToolStdio))
-        {
+        let pipes = if argument.as_ref().is_some_and(|message| {
+            matches!(
+                message.kind,
+                MessageKind::Request(RequestKind::FileToolStdio | RequestKind::FileToolMcp)
+            )
+        }) {
             LaunchPipes::stdio()
         } else {
             LaunchPipes::default()
