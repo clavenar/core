@@ -17,7 +17,7 @@ pub(crate) enum ReadAudit {
 
 struct ReadScope {
     directory: DirectoryId,
-    // Calls 57 and 61 retain budget decisions even when scope denials fill this history.
+    // Calls 55 and 59 retain budget decisions even when scope denials fill this history.
     audit: AuditHistory<EncodedReadDecision>,
 }
 

@@ -4,27 +4,24 @@ use clv_abi::agent::{
 };
 use clv_abi::audit::{DelegationDenial, PublicationAuditView};
 use clv_abi::goal::{
-    CreateOptions, CreatePolicy, FileOptions, FileRecipient, RENAME_DIFF_HEADER_BYTES, ReadLimits,
-    RenameOptions, ReviewToken,
+    EncodedGoalCreate, FileRecipient, GoalCreateRequest, RENAME_DIFF_HEADER_BYTES, ReviewToken,
 };
 use clv_abi::tool::ToolId;
 use clv_abi::{
-    ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, NO_RAMFS_HANDLE, OPEN_READ,
-    OPEN_WRITE_TRUNCATE, PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, Program, ReplyKind,
-    RequestKind, SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE,
-    SYS_AGENT_DELEGATE_WITH_FILE_ARG, SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_LAUNCH_SUPERVISOR,
-    SYS_AGENT_RESUME, SYS_AGENT_RESUME_GRANTED, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
+    ChildEvent, NO_CHILD_HANDLE, NO_DIRECTORY_GRANT, OPEN_READ, OPEN_WRITE_TRUNCATE,
+    PATH_MAX_BYTES, PROBE_VALUE, PROGRAM_HELLO, Program, ReplyKind, RequestKind,
+    SYS_AGENT_DELEGATE, SYS_AGENT_DELEGATE_WITH_FILE, SYS_AGENT_DELEGATE_WITH_FILE_ARG,
+    SYS_AGENT_INVOKE_FILE_TOOL, SYS_AGENT_LAUNCH_SUPERVISOR, SYS_AGENT_RESUME,
+    SYS_AGENT_RESUME_GRANTED, SYS_AGENT_RUN, SYS_AGENT_RUN_SUSPENDED,
     SYS_AGENT_RUN_WITH_REPLY_BUDGET, SYS_AGENT_RUN_WITH_REQUEST, SYS_AGENT_STAGE_RENAME,
     SYS_AGENT_STATUS, SYS_AGENT_STATUS_WITH_DEFINITION, SYS_AGENT_SUSPEND, SYS_CHDIR, SYS_CLOSE,
     SYS_EVENT_WAIT, SYS_EXIT, SYS_GETCWD, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
     SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
-    SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE, SYS_GOAL_CREATE_WITH_OPTIONS,
-    SYS_GOAL_CREATE_WITH_READ_SCOPE, SYS_GOAL_CREATE_WITH_RENAME_SCOPE,
-    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_CREATE_WITH_TIMEOUT, SYS_GOAL_DIFF,
-    SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
-    SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
-    SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER,
-    SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_CREATE, SYS_GOAL_DIFF, SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO,
+    SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER,
+    SYS_GOAL_LAUNCH_RENAME_REVIEWER, SYS_GOAL_OBSERVE,
+    SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
     SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
     SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_BATCH_GRANTED,
     SYS_GOAL_REVIEW_GRANTED, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
@@ -139,63 +136,11 @@ pub(crate) fn dispatch(
         SYS_SPAWN_WITH_FILE_PIPE => scheduler
             .spawn(fs, a0, LaunchScope::FileWithPipe(a1), None)
             .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_CREATE | SYS_GOAL_CREATE_WITH_REPLY_BUDGET => scheduler
-            .create_goal(
-                CreatePolicy {
-                    options: CreateOptions {
-                        child_limit: 1,
-                        reply_limit: (number == SYS_GOAL_CREATE_WITH_REPLY_BUDGET).then_some(a0),
-                        allowed_helper: None,
-                    },
-                    read_limits: ReadLimits::default(),
-                    allowed_tool: None,
-                    require_rename_review: false,
-                    rename_limit: 1,
-                },
-                FileOptions::default(),
-                None,
-                fs,
-            )
+        SYS_GOAL_CREATE => read_goal_create_request(stack, a0, a1)
+            .and_then(|request| {
+                scheduler.create_goal(request.policy, request.files, request.timeout_ms, fs)
+            })
             .unwrap_or(SYSCALL_ERROR),
-        SYS_GOAL_CREATE_WITH_OPTIONS
-        | SYS_GOAL_CREATE_PRESERVING_FILE
-        | SYS_GOAL_CREATE_WITH_RENAME_SCOPE
-        | SYS_GOAL_CREATE_WITH_READ_SCOPE
-        | SYS_GOAL_CREATE_WITH_TIMEOUT => {
-            let a4 = frame.registers[REG_A4];
-            let words = if number == SYS_GOAL_CREATE_WITH_OPTIONS {
-                Some([a0, a1, a2, a3, a4, frame.registers[REG_A5]])
-            } else {
-                read_create_options(stack, a1, a2)
-            };
-            let optional_handle = |fd| (fd != NO_RAMFS_HANDLE).then_some(fd);
-            let (read_directory, rename_directory, preserve_file) = match number {
-                SYS_GOAL_CREATE_WITH_TIMEOUT => (
-                    optional_handle(a0),
-                    optional_handle(a4),
-                    optional_handle(a3),
-                ),
-                SYS_GOAL_CREATE_WITH_READ_SCOPE => {
-                    (Some(a0), optional_handle(a4), optional_handle(a3))
-                }
-                SYS_GOAL_CREATE_WITH_RENAME_SCOPE => (None, Some(a0), optional_handle(a3)),
-                SYS_GOAL_CREATE_PRESERVING_FILE => (None, None, Some(a0)),
-                _ => (None, None, None),
-            };
-            let files = FileOptions {
-                read_directory,
-                rename: RenameOptions {
-                    directory: rename_directory,
-                    preserve_file,
-                },
-            };
-            let timeout_ms =
-                (number == SYS_GOAL_CREATE_WITH_TIMEOUT).then_some(frame.registers[REG_A5]);
-            words
-                .and_then(CreatePolicy::from_registers)
-                .and_then(|policy| scheduler.create_goal(policy, files, timeout_ms, fs))
-                .unwrap_or(SYSCALL_ERROR)
-        }
         SYS_GOAL_RUN | SYS_GOAL_RUN_WITH_REPLY_BUDGET => {
             let scope = LaunchScope::Goal {
                 handle: a0,
@@ -702,13 +647,17 @@ fn copy_request(
     )
 }
 
-fn read_create_options(stack: UserStack, address: usize, length: usize) -> Option<[usize; 6]> {
-    let mut words = [[0; size_of::<usize>()]; 6];
+fn read_goal_create_request(
+    stack: UserStack,
+    address: usize,
+    length: usize,
+) -> Option<GoalCreateRequest> {
+    let mut words: EncodedGoalCreate = [[0; 8]; _];
     let bytes = words.as_flattened_mut();
     if length != bytes.len() || !stack.copy_from_user(address, bytes) {
         return None;
     }
-    Some(words.map(usize::from_le_bytes))
+    GoalCreateRequest::decode(&words)
 }
 
 fn open_file(

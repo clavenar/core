@@ -1,6 +1,6 @@
 use crate::budget::ReplyBudget;
 use crate::tool::ToolId;
-use crate::{CompletionKind, NO_CHILD_HANDLE, PATH_MAX_BYTES, Program};
+use crate::{CompletionKind, NO_CHILD_HANDLE, NO_RAMFS_HANDLE, PATH_MAX_BYTES, Program};
 
 /// Maximum number of successful member launches over the lifetime of a goal.
 pub const MAX_CHILDREN: usize = 3;
@@ -57,7 +57,7 @@ pub struct TimedReviewToken {
 }
 
 /// Failures encountered while reviewing or publishing a rename.
-/// The discriminants are the blocked review statuses in a3 of call 68.
+/// The discriminants are the blocked review statuses in a3 of call 66.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum PublicationError {
@@ -86,7 +86,7 @@ pub enum RenameReview {
 }
 
 impl RenameReview {
-    /// Call 68 returns the token in a2 and the review status in a3.
+    /// Call 66 returns the token in a2 and the review status in a3.
     pub const fn registers(self) -> (usize, usize) {
         match self {
             Self::Preview => (0, 0),
@@ -119,7 +119,7 @@ pub enum TimedRenameReview {
 }
 
 impl TimedRenameReview {
-    /// Call 75 returns the deadline in a3 with a valid token. Call 68 returns status 1.
+    /// Call 72 returns the deadline in a3 with a valid token. Call 66 returns status 1.
     pub const fn review_registers(self, with_deadline: bool) -> (usize, usize) {
         match self {
             Self::Ready(review) if with_deadline => {
@@ -299,7 +299,7 @@ impl CreateOptions {
     const HELPER_READ_LIMIT: usize = 8;
     const ALLOWED_TOOL: usize = 16;
 
-    /// Call 48 takes the child limit, option flags, reply limit and helper selector in a0–a3.
+    /// The first four policy words hold the child limit, flags, reply limit and selector.
     pub fn registers(self) -> (usize, usize, usize, usize) {
         let mut flags = 0;
         if self.reply_limit.is_some() {
@@ -337,7 +337,7 @@ impl CreateOptions {
         })
     }
 
-    /// Bit 2 enables a shared RamFS read limit in a4, including a zero-byte limit.
+    /// Bit 2 enables the shared RamFS read limit, including a zero-byte limit.
     pub fn registers_with_read_limit(
         self,
         limit: Option<usize>,
@@ -362,7 +362,7 @@ impl CreateOptions {
         Some((options, (flags & Self::READ_LIMIT != 0).then_some(limit)))
     }
 
-    /// Bit 3 enables a helper read limit in a5, independently of the goal limit in a4.
+    /// Bit 3 enables a helper read limit independently of the goal limit.
     pub fn registers_with_read_limits(self, limits: ReadLimits) -> [usize; 6] {
         let (children, mut flags, replies, helper, reads) =
             self.registers_with_read_limit(limits.goal);
@@ -393,7 +393,7 @@ impl CreateOptions {
         Some((options, ReadLimits { goal, helpers }))
     }
 
-    /// Bit 4 uses a3 for an exact tool ID. Bit 1 uses the same word for a program.
+    /// Bit 4 uses the selector word for an exact tool ID. Bit 1 uses it for a program.
     pub fn registers_with_allowed_tool(
         self,
         limits: ReadLimits,
@@ -427,7 +427,7 @@ impl CreateOptions {
     }
 }
 
-/// Policy encoded in the six words shared by goal creation calls 48, 70, 77, 78 and 82.
+/// Policy encoded in the six words following the goal creation request's version.
 pub struct CreatePolicy {
     pub options: CreateOptions,
     pub read_limits: ReadLimits,
@@ -472,6 +472,76 @@ impl CreatePolicy {
             allowed_tool,
             require_rename_review,
             rename_limit,
+        })
+    }
+}
+
+/// Version, six policy words, three optional RamFS handles and timeout in milliseconds.
+pub type EncodedGoalCreate = [[u8; 8]; 11];
+
+pub struct GoalCreateRequest {
+    pub policy: CreatePolicy,
+    pub files: FileOptions,
+    pub timeout_ms: Option<usize>,
+}
+
+impl GoalCreateRequest {
+    const VERSION: u64 = 1;
+
+    pub fn encode(&self) -> Option<EncodedGoalCreate> {
+        let handles = [
+            self.files.read_directory,
+            self.files.rename.directory,
+            self.files.rename.preserve_file,
+        ];
+        if handles.contains(&Some(NO_RAMFS_HANDLE)) || self.timeout_ms == Some(0) {
+            return None;
+        }
+        let [read_directory, rename_directory, preserved_file] =
+            handles.map(|handle| handle.unwrap_or(NO_RAMFS_HANDLE) as u64);
+        let [children, flags, replies, selector, reads, helper_reads] =
+            self.policy.registers()?.map(|word| word as u64);
+        Some(
+            [
+                Self::VERSION,
+                children,
+                flags,
+                replies,
+                selector,
+                reads,
+                helper_reads,
+                read_directory,
+                rename_directory,
+                preserved_file,
+                self.timeout_ms.unwrap_or(0) as u64,
+            ]
+            .map(u64::to_le_bytes),
+        )
+    }
+
+    pub fn decode(encoded: &EncodedGoalCreate) -> Option<Self> {
+        let [
+            version,
+            policy @ ..,
+            read_directory,
+            rename_directory,
+            preserved_file,
+            timeout_ms,
+        ] = encoded.map(u64::from_le_bytes);
+        if version != Self::VERSION {
+            return None;
+        }
+        let handle = |word: u64| (word != NO_RAMFS_HANDLE as u64).then_some(word as usize);
+        Some(Self {
+            policy: CreatePolicy::from_registers(policy.map(|word| word as usize))?,
+            files: FileOptions {
+                read_directory: handle(read_directory),
+                rename: RenameOptions {
+                    directory: handle(rename_directory),
+                    preserve_file: handle(preserved_file),
+                },
+            },
+            timeout_ms: (timeout_ms != 0).then_some(timeout_ms as usize),
         })
     }
 }
@@ -560,7 +630,7 @@ impl GoalStatus {
     }
 }
 
-/// Call 35's four status words followed by call 44's four reply-budget words.
+/// Call 35's four status words followed by call 43's four reply-budget words.
 pub type EncodedGoalObservation = [[u8; 8]; 8];
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -5,38 +5,36 @@ use clv_abi::audit::{
     ReplyRecord,
 };
 pub use clv_abi::budget::ReplyBudget;
-use clv_abi::goal::decode_rename_batch;
 pub use clv_abi::goal::{
     CancelOutcome, CancelResult, CloseResult, CommitResult, CreateOptions, CreatePolicy,
     DiscardResult, EncodedGoalObservation, FileOptions, FileRecipient, GoalDeadline, GoalDiff,
     GoalObservation, GoalStatus, PublicationError, ReadLimits, RenameBatchDiff, RenameOptions,
     RenameReview, RenameReviewReceipt, ReviewToken, TimedRenameReview, TimedReviewToken,
 };
+use clv_abi::goal::{GoalCreateRequest, decode_rename_batch};
 use clv_abi::tool::ToolId;
 use clv_abi::{
-    MESSAGE_MAX_BYTES, NO_RAMFS_HANDLE, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
+    MESSAGE_MAX_BYTES, Program, SYS_GOAL_AUDIT, SYS_GOAL_AUDIT_WITH_CALLER,
     SYS_GOAL_AUDIT_WITH_TOOL, SYS_GOAL_BUDGET, SYS_GOAL_CANCEL, SYS_GOAL_CLOSE, SYS_GOAL_COMMIT,
-    SYS_GOAL_CREATE, SYS_GOAL_CREATE_PRESERVING_FILE, SYS_GOAL_CREATE_WITH_OPTIONS,
-    SYS_GOAL_CREATE_WITH_READ_SCOPE, SYS_GOAL_CREATE_WITH_RENAME_SCOPE,
-    SYS_GOAL_CREATE_WITH_REPLY_BUDGET, SYS_GOAL_CREATE_WITH_TIMEOUT, SYS_GOAL_DIFF,
-    SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE, SYS_GOAL_GRANT_FILE,
-    SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO, SYS_GOAL_GRANT_FILE_TO_WITH_ARG,
-    SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER, SYS_GOAL_LAUNCH_RENAME_REVIEWER,
-    SYS_GOAL_OBSERVE, SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
+    SYS_GOAL_CREATE, SYS_GOAL_DIFF, SYS_GOAL_DISCARD, SYS_GOAL_GRANT_DELEGABLE_FILE,
+    SYS_GOAL_GRANT_FILE, SYS_GOAL_GRANT_FILE_FOR_RENAME, SYS_GOAL_GRANT_FILE_TO,
+    SYS_GOAL_GRANT_FILE_TO_WITH_ARG, SYS_GOAL_LAUNCH_FINISH_MONITOR, SYS_GOAL_LAUNCH_OBSERVER,
+    SYS_GOAL_LAUNCH_RENAME_REVIEWER, SYS_GOAL_OBSERVE,
+    SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT,
     SYS_GOAL_READ_AUDIT_WITH_LIMIT, SYS_GOAL_READ_DECISIONS, SYS_GOAL_RENAME_AUDIT,
     SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW, SYS_GOAL_REVIEW_BATCH_GRANTED,
     SYS_GOAL_REVIEW_GRANTED, SYS_GOAL_REVIEW_WITH_DEADLINE, SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN,
     SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME, SYS_GOAL_STATUS,
 };
 
-use super::{ecall, ecall6, syscall, syscall_result, with_stack_bytes};
+use super::{ecall, syscall, syscall_result, with_stack_bytes};
 
 pub fn create() -> Option<usize> {
-    syscall_result(syscall(SYS_GOAL_CREATE, 0, 0, 0))
+    create_with_options(1, None)
 }
 
 pub fn create_with_reply_budget(bytes: usize) -> Option<usize> {
-    syscall_result(syscall(SYS_GOAL_CREATE_WITH_REPLY_BUDGET, bytes, 0, 0))
+    create_with_options(1, Some(bytes))
 }
 
 /// Creates a goal with room for the given number of launches and a shared reply budget.
@@ -75,16 +73,6 @@ pub fn create_with_allowed_tool(
     limits: ReadLimits,
     allowed_tool: Option<ToolId>,
 ) -> Option<usize> {
-    if options.child_limit == 1
-        && options.allowed_helper.is_none()
-        && allowed_tool.is_none()
-        && limits.goal.is_none()
-        && limits.helpers.is_none()
-    {
-        return options
-            .reply_limit
-            .map_or_else(create, create_with_reply_budget);
-    }
     create_with_rename_options(options, limits, allowed_tool, RenameOptions::default())
 }
 
@@ -161,50 +149,19 @@ pub fn create_with_policy(
     files: FileOptions,
     timeout_ms: Option<usize>,
 ) -> Option<usize> {
-    let words = policy.registers()?;
-    let rename = files.rename;
-    if files.read_directory == Some(NO_RAMFS_HANDLE)
-        || rename.directory == Some(NO_RAMFS_HANDLE)
-        || rename.preserve_file == Some(NO_RAMFS_HANDLE)
-    {
-        return None;
-    }
-    let (call, descriptor) = match (
+    let request = GoalCreateRequest {
+        policy,
+        files,
         timeout_ms,
-        files.read_directory,
-        rename.directory,
-        rename.preserve_file,
-    ) {
-        (Some(_), dir, _, _) => (SYS_GOAL_CREATE_WITH_TIMEOUT, dir.unwrap_or(NO_RAMFS_HANDLE)),
-        (None, Some(dir), _, _) => (SYS_GOAL_CREATE_WITH_READ_SCOPE, dir),
-        (None, None, Some(dir), _) => (SYS_GOAL_CREATE_WITH_RENAME_SCOPE, dir),
-        (None, None, None, Some(file)) => (SYS_GOAL_CREATE_PRESERVING_FILE, file),
-        (None, None, None, None) => {
-            let [children, flags, replies, helper, reads, helper_reads] = words;
-            let (handle, ..) = ecall6(
-                SYS_GOAL_CREATE_WITH_OPTIONS,
-                children,
-                flags,
-                replies,
-                helper,
-                reads,
-                helper_reads,
-            );
-            return syscall_result(handle);
-        }
-    };
-    let encoded = words.map(usize::to_le_bytes);
-    let bytes = encoded.as_flattened();
-    let (handle, ..) = ecall6(
-        call,
-        descriptor,
+    }
+    .encode()?;
+    let bytes = request.as_flattened();
+    syscall_result(syscall(
+        SYS_GOAL_CREATE,
         bytes.as_ptr().expose_provenance(),
         bytes.len(),
-        rename.preserve_file.unwrap_or(NO_RAMFS_HANDLE),
-        rename.directory.unwrap_or(NO_RAMFS_HANDLE),
-        timeout_ms.unwrap_or(0),
-    );
-    syscall_result(handle)
+        0,
+    ))
 }
 
 /// Attaches one file from the caller's handle table to a ready goal.

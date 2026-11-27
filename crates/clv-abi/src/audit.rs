@@ -15,9 +15,9 @@ use crate::{LaunchParent, NO_CHILD_HANDLE};
 pub const AUDIT_CAPACITY: usize = 4;
 /// Agent, program, reply bytes, file flag, denial code and child handle, in RV64 words.
 pub type EncodedRecord = [[u8; 8]; 6];
-/// Call 59 appends the calling agent's child launch handle. Zero identifies the shell.
+/// Call 57 appends the calling agent's child launch handle. Zero identifies the shell.
 pub type EncodedRecordWithCaller = [[u8; 8]; 7];
-/// Call 65 appends a tool state, raw versioned ID and the measured ELF SHA-256.
+/// Call 63 appends a tool state, raw versioned ID and the measured ELF SHA-256.
 pub type EncodedRecordWithTool = [[u8; 8]; 13];
 /// Program selector in every audit view when the requested tool revision is unknown.
 pub const UNRESOLVED_TOOL_PROGRAM: usize = usize::MAX;
@@ -26,9 +26,9 @@ pub const UNRESOLVED_TOOL_PROGRAM: usize = usize::MAX;
 pub type EncodedReplyRecord = [[u8; 8]; 4];
 /// Child, requested capacity, file bytes available for this call, prior allowance, flags.
 pub type EncodedReadRecord = [[u8; 8]; 5];
-/// Call 61 appends the scope of the effective read allowance.
+/// Call 59 appends the scope of the effective read allowance.
 pub type EncodedReadRecordWithLimit = [[u8; 8]; 6];
-/// Call 79 uses the call 61 layout for budget decisions and flag 4 for an out-of-scope read.
+/// Call 73 uses the call 59 layout for budget decisions and flag 4 for an out-of-scope read.
 pub type EncodedReadDecision = EncodedReadRecordWithLimit;
 
 #[derive(Clone, Copy)]
