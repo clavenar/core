@@ -233,11 +233,12 @@ impl Scheduler {
         self.host_bridge = port.map(HostBridge::new);
     }
 
-    pub(crate) fn start_netd(&mut self, mac: [u8; 6], seed: u64) {
+    pub(crate) fn start_netd(&mut self, mac: [u8; 6], seed: u64, unix_time_offset: i64) {
         let [a, b, c, d, e, f] = mac;
         let mac = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]) as usize;
         let task = &mut self.tasks[NETD_TASK_INDEX];
-        task.frame.set_startup_args(mac, seed as usize, 0);
+        task.frame
+            .set_startup_args(mac, seed as usize, unix_time_offset as usize);
         task.state = TaskState::Runnable;
     }
 

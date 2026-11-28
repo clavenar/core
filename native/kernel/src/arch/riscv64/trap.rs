@@ -85,6 +85,7 @@ pub(crate) unsafe fn start(
     tasks: [(AddressSpace, usize); TASK_COUNT],
     nic: Option<Nic>,
     net_seed: u64,
+    unix_time_offset: i64,
     after_paging: impl FnOnce(&mut Scheduler, &mut RamFs),
 ) -> ! {
     // SAFETY: No user task has run, and only this hart accesses the state.
@@ -94,7 +95,7 @@ pub(crate) unsafe fn start(
         .scheduler
         .insert(Scheduler::new(tasks, supervisor_status()));
     if let Some(nic) = &state.nic {
-        scheduler.start_netd(nic.mac(), net_seed);
+        scheduler.start_netd(nic.mac(), net_seed, unix_time_offset);
     }
     let space = scheduler.address_space();
     uart::write(b"boot frame=");

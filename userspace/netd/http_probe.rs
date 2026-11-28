@@ -73,11 +73,15 @@ impl<'a> Probe<'a> {
     pub(super) fn poll(
         &mut self,
         now: Instant,
+        unix_nanos: Option<u64>,
         iface: &mut Interface,
         sockets: &mut SocketSet<'_>,
     ) {
         if matches!(self.phase, Phase::Done) {
             return;
+        }
+        if matches!(self.phase, Phase::Pending) {
+            report_unix_time(b"netd HTTP probe unix_ns_start=", unix_nanos);
         }
 
         let socket = sockets.get_mut::<tcp::Socket>(self.handle);
@@ -85,6 +89,7 @@ impl<'a> Probe<'a> {
             Ok(false) => {}
             Ok(true) => {
                 self.phase = Phase::Done;
+                report_unix_time(b"netd HTTP probe unix_ns_done=", unix_nanos);
                 clv::print(b"netd HTTP probe received Hello from native HTTP\r\n");
             }
             Err(failure) => {
@@ -164,6 +169,23 @@ impl<'a> Probe<'a> {
         }
         Ok(false)
     }
+}
+
+fn report_unix_time(label: &[u8], unix_nanos: Option<u64>) {
+    let mut hex = *b"0x0000000000000000\r\n";
+    let timestamp: &[u8] = if let Some(value) = unix_nanos {
+        for (index, digit) in hex[2..18].iter_mut().rev().enumerate() {
+            *digit = b"0123456789abcdef"[((value >> (index * 4)) & 0xf) as usize];
+        }
+        &hex
+    } else {
+        b"unavailable\r\n"
+    };
+    let mut line = [0; 64];
+    let end = label.len() + timestamp.len();
+    line[..label.len()].copy_from_slice(label);
+    line[label.len()..end].copy_from_slice(timestamp);
+    let _ = clv::write_console(&line[..end]);
 }
 
 fn response_body(bytes: &[u8]) -> Result<Option<Range<usize>>, Failure> {

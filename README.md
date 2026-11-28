@@ -59,6 +59,9 @@ private QEMU link. [Run the HTTP probe](docs/qemu-walkthroughs.md#fetch-an-http-
 With modern VirtIO RNG attached, the kernel reads a seed for `netd` at boot.
 [Verify TCP seeding with VirtIO RNG](docs/qemu-walkthroughs.md#seed-tcp-with-virtio-rng)
 
+`netd` gets its Unix clock reference from the QEMU `virt` RTC at boot.
+[Check the guest Unix clock](docs/qemu-walkthroughs.md#check-the-guest-unix-clock)
+
 ## Run the QEMU host broker
 
 After building the kernel, use Python 3.10 or later with its standard

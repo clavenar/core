@@ -13,11 +13,12 @@ mod scheduler;
 mod syscall;
 
 use arch::riscv64::{idle, trap};
+use clv_abi::net::NO_UNIX_TIME_OFFSET;
 use console::write_hex;
 use core::panic::PanicInfo;
-use drivers::uart;
 use drivers::virtio::console::{Console, Port, ProbeError};
 use drivers::virtio::{block, net, rng};
+use drivers::{rtc, uart};
 use fs::ramfs::{RamFs, SavedFiles};
 use memory::frame::FrameAllocator;
 use memory::sv39;
@@ -40,10 +41,13 @@ extern "C" fn kernel_main() -> ! {
     let journal = probe_block();
     // SAFETY: QEMU virt supplies the MMIO windows, and paging is still disabled.
     let nic = unsafe { net::Nic::attach() };
-    let net_seed = nic
-        .as_ref()
-        .and_then(|_| probe_net_seed())
-        .unwrap_or_default();
+    let (net_seed, unix_time_offset) = if nic.is_some() {
+        let seed = probe_net_seed().unwrap_or_default();
+        // SAFETY: QEMU virt provides the RTC, and paging is still disabled.
+        (seed, unsafe { rtc::monotonic_offset() })
+    } else {
+        (0, NO_UNIX_TIME_OFFSET)
+    };
     // SAFETY: The transport windows are still accessible before paging.
     let bridge = unsafe { Console::discover() };
     // SAFETY: The single boot hart claims the frame pool here once.
@@ -84,7 +88,7 @@ extern "C" fn kernel_main() -> ! {
         scheduler.attach_host_bridge(bridge.and_then(probe_bridge));
     };
     // SAFETY: The boot hart installed the trap vector and built every task's address space.
-    unsafe { trap::start(tasks, nic, net_seed, after_paging) }
+    unsafe { trap::start(tasks, nic, net_seed, unix_time_offset, after_paging) }
 }
 
 fn probe_net_seed() -> Option<u64> {

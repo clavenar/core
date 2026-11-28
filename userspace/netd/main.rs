@@ -34,7 +34,7 @@ const PROBE_REPLY: &[u8; 8] = b"CLVNET02";
 // SAFETY: The kernel enters this unique symbol with an aligned user stack.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
-extern "C" fn _start(_task: usize, packed_mac: usize, seed: u64) -> ! {
+extern "C" fn _start(_task: usize, packed_mac: usize, seed: u64, _unix_time_offset: i64) -> ! {
     let [a, b, c, d, e, f, _, _] = (packed_mac as u64).to_le_bytes();
     let mac = [a, b, c, d, e, f];
     let request = probe_frame(mac, PROBE_PEER, PROBE_REQUEST);
@@ -108,7 +108,12 @@ extern "C" fn _start(_task: usize, packed_mac: usize, seed: u64) -> ! {
         }
         queue_tcp_echo(sockets.get_mut::<tcp::Socket>(tcp_handle), &mut buffer);
         #[cfg(feature = "http-probe")]
-        probe.poll(timestamp, &mut interface, &mut sockets);
+        probe.poll(
+            timestamp,
+            net::unix_nanos(now, _unix_time_offset),
+            &mut interface,
+            &mut sockets,
+        );
         interface.poll_egress(timestamp, &mut EthernetDevice(None), &mut sockets);
 
         let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);

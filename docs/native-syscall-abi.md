@@ -313,6 +313,10 @@ When a modern VirtIO-net device initializes successfully, that slot starts
 order. Since kernel 0.0.89 it also passes the 64-bit smoltcp seed in
 `a2`, assembled in little-endian order from VirtIO RNG bytes. Zero is the
 prototype fallback when the entropy device is absent or the read fails.
+Since 0.0.90, `a3` holds the signed nanosecond offset from the guest
+monotonic clock to Unix time. The bit pattern `0x8000000000000000` marks
+an unavailable offset. `netd` adds the offset to a monotonic timestamp
+with checked arithmetic to obtain Unix nanoseconds.
 The kernel retains the MMIO and DMA mappings in supervisor memory.
 
 | Operation in `a0` | Stack buffer in `a1` | Size in `a2` | Deadline in `a3` | Result in `a0` | Result in `a1` |
