@@ -1,12 +1,12 @@
 # Native syscall ABI
 
-The RV64 prototype implements 78 calls numbered from 0 through 77.
-Kernel 0.0.87 adds an optional receive deadline for the dedicated `netd`
-boot service.
+The RV64 prototype implements the 78 calls defined by `clv-abi` 0.0.14,
+numbered from 0 through 77.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
 
+- [Console and timer calls](#console-and-timer-calls)
 - [RamFS](#ramfs)
 - [Process lifecycle and launch messages](#process-lifecycle-and-launch-messages)
 - [Typed requests and replies](#typed-requests-and-replies)
@@ -15,7 +15,7 @@ The caller places the call number in `a7`, passes up to six arguments in
 - [Goal and agent calls](#goal-and-agent-calls)
   - [Goal creation](#goal-creation)
   - [Goal deadlines](#goal-deadlines)
-  - [Host plan requests](#host-plan-requests)
+  - [Host bridge requests](#host-bridge-requests)
   - [Read-only goal observers](#read-only-goal-observers)
   - [Background goal monitors](#background-goal-monitors)
   - [Delegating one agent resume](#delegating-one-agent-resume)
@@ -271,7 +271,7 @@ A nonempty read can sleep while it is empty and the writer is open. Both
 wake when the peer makes progress or closes its endpoint. If the peer is
 already blocked on pipe I/O for this launch, a second operation that would
 block returns -1 so its caller can service the other stream. Each transfer
-validates the full user buffer before moving bytes. Zero-length I/O on an
+validates the full user buffer before moving bytes. Zero-length I/O on a
 connected endpoint returns 0 immediately. An invalid handle, caller, buffer
 or stream selection returns -1. An unavailable stream also returns -1.
 
@@ -346,7 +346,7 @@ and the boot offset. Only `netd` can call it.
 
 | Call | Arguments | Result in `a0` |
 | --- | --- | --- |
-| 33 `goal_create` | `a0` request address in the owner's stack, `a1` request size (88 bytes for version 1, 96 bytes for version 2) | Fresh goal handle, or -1 on rejection |
+| 33 `goal_create` | `a0` request address in the owner's stack, `a1` request size in bytes (88 for version 1, 96 for version 2, 104 for version 3). [Request layout](#goal-creation) | Fresh goal handle, or -1 on rejection |
 | 34 `goal_run` | `a0` goal handle, `a1` program selector | Fresh child launch handle, or -1 on failure |
 | 35 `goal_status` | `a0` goal handle | State tag, member in `a1`, detail in `a2`, and goal deadline in `a3` (0 for unlimited, absolute guest nanoseconds while armed, all ones for expired) |
 | 36 `goal_close` | `a0` goal handle | 0 on release, 1 while running |
@@ -375,7 +375,7 @@ and the boot offset. Only `netd` can call it.
 | 59 `agent_status_with_definition` | `a0` agent handle, `a1` shell stack destination, `a2` capacity in bytes | Same status registers as call 39, plus a 34-byte definition record in the buffer |
 | 60 `agent_invoke_file_tool` | `a0` agent handle or zero for self, `a1` versioned tool ID, `a2` reply reservation, `a3` literal address, `a4` literal length (0–64), `a5` mode (0 mailbox, 1 raw stdio, 2 MCP stdio) | Fresh helper handle on admission, or -1 on rejection |
 | 61 `goal_stage_rename` | `a0` goal handle, `a1` owner's file handle, `a2` new basename address, `a3` length (1–64 bytes) | 0 when staged, or -1 on rejection |
-| 62 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, 2 on a failed file postcondition, 3 for an expired matching token, or -1 for an invalid caller, goal, token, or unavailable revision |
+| 62 `goal_commit` | `a0` goal handle, `a1` review token | 0 on publication, 1 on conflict, 2 on a failed postcondition, 3 on review expiry, 9 on storage failure before submission, 10 for an unknown storage outcome, or -1 on rejection. `a2` and `a3` carry the [durable receipt](#rename-review-and-publication) when available. |
 | 63 `goal_grant_file_for_rename` | `a0` goal handle, `a1` owner's file handle | 0 when the ready goal receives the grant, or -1 on rejection |
 | 64 `agent_stage_rename` | `a0` granted file handle, `a1` new basename address, `a2` length (1–64 bytes) | 0 when the calling agent stages the rename, or -1 on rejection |
 | 65 `goal_rename_audit` | `a0` goal handle, `a1` owner's stack destination, `a2` capacity in bytes | Retained staging decision count (0–4), with overwritten count in `a1`, or -1 on failure |

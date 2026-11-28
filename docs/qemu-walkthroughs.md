@@ -1,12 +1,16 @@
 # QEMU walkthroughs
 
-These examples use the native `clsh>` shell. Start each independent example
-with a fresh boot unless it explicitly continues the previous one. Goal
-handles and ordinary RamFS changes live for one boot.
+Run the build commands, Python fixtures and QEMU launchers at the Linux
+prompt in the `core` repository. Enter the guest commands at `clsh>` inside
+QEMU. Start each independent example with a fresh boot unless it explicitly
+continues the previous one. Goal handles and ordinary RamFS changes live for one boot.
 [Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)
 
 - [Boot and shell](#boot-and-shell)
   - [Exchange an Ethernet frame over VirtIO-net](#exchange-an-ethernet-frame-over-virtio-net)
+  - [Fetch an HTTP response over native TCP](#fetch-an-http-response-over-native-tcp)
+  - [Seed TCP with VirtIO RNG](#seed-tcp-with-virtio-rng)
+  - [Check the guest Unix clock](#check-the-guest-unix-clock)
   - [Authenticate a TLS peer over native TCP](#authenticate-a-tls-peer-over-native-tcp)
   - [Probe a VirtIO block device](#probe-a-virtio-block-device)
   - [Recover a VirtIO block marker after reboot](#recover-a-virtio-block-marker-after-reboot)
@@ -2337,11 +2341,15 @@ and run one goal in that boot. An unapproved action prints
 after two seconds. In both cases, the delegation history is empty,
 `read_bytes=0`, and the failure reply consumes one reply byte.
 
-With `silent-plan`, run `goal cancel` immediately after `agent run` to
-cancel while the request is pending. Then `wait hello` prints
-`hello cancelled` and the delegation and read histories are empty. The
-journal keeps the operation `in_flight` with its two host units reserved.
-A replay of an `in_flight` request leaves that reservation in place.
+To observe cancellation after dispatch, start a fresh `silent-plan` boot.
+Enter the first three guest commands above. Give `hello` a moment to send
+the request (about half a second), then enter `goal cancel` before the
+two-second timeout. `wait hello` prints `hello cancelled`, and the delegation
+and read histories are empty. After exiting QEMU, use the journal query
+above. An `in_flight` row for this session shows that the broker received the
+request and still holds its two units. Cancelling before dispatch leaves the
+session with no request row. Replaying an `in_flight` request preserves its
+reservation.
 
 ### Run a model-backed plan
 

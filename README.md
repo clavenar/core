@@ -45,32 +45,29 @@ command reference. Press `Ctrl+a`, then `x`, to quit QEMU.
 
 [Boot with a read-only VirtIO block image](docs/qemu-walkthroughs.md#probe-a-virtio-block-device) · [Recover a marker after reboot](docs/qemu-walkthroughs.md#recover-a-virtio-block-marker-after-reboot) · [Recover a previous journal record](docs/qemu-walkthroughs.md#recover-a-previous-journal-record)
 
-With a modern VirtIO-net device attached, the user-space service `netd`
-uses smoltcp to answer ARP and IPv4 echo requests at `192.0.2.2/24`.
-It echoes UDP datagrams on port `49152` and one TCP stream at a time on port
-`49153`.
-The kernel build fetches the locked smoltcp dependencies from crates.io
-when they are absent from the Cargo cache.
-[Verify Ethernet, ARP, IPv4 ping, UDP and TCP in QEMU](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net)
+### Native networking in QEMU
 
-A build with the `http-probe` feature sends one native HTTP request over the
-private QEMU link. [Run the HTTP probe](docs/qemu-walkthroughs.md#fetch-an-http-response-over-native-tcp)
+The quickstart boots with `-nic none`. The network walkthroughs attach a
+modern VirtIO-net device and start `netd`, the guest's user-space network
+service. It uses smoltcp at `192.0.2.2/24` on a private link to the fixture.
 
-A build with `tls-probe` authenticates a fixture peer over TLS 1.3 using native
-TCP. The walkthrough uses OpenSSL 3 and Python's TLS 1.3 support.
-[Run the TLS probe](docs/qemu-walkthroughs.md#authenticate-a-tls-peer-over-native-tcp)
+| Kernel build | What to observe |
+| --- | --- |
+| Default | The guest answers ARP and IPv4 pings, echoes UDP on port `49152`, and echoes a TCP stream on port `49153`. [Ethernet and IP walkthrough](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net) |
+| `http-probe` | The guest sends `GET /probe` to the peer on port `8080` and checks the HTTP response. [HTTP walkthrough](docs/qemu-walkthroughs.md#fetch-an-http-response-over-native-tcp) |
+| `tls-probe` | The guest authenticates `probe.clavenar.test` on port `8443` and closes the TLS 1.3 connection. The fixture requires OpenSSL 3 and Python with TLS 1.3 support. [TLS walkthrough](docs/qemu-walkthroughs.md#authenticate-a-tls-peer-over-native-tcp) |
 
-With modern VirtIO RNG attached, the kernel reads a seed for `netd` at boot.
-The `http-probe` and `tls-probe` builds read a separate 32-byte seed for ChaCha20.
-[Verify TCP seeding with VirtIO RNG](docs/qemu-walkthroughs.md#seed-tcp-with-virtio-rng)
-
-`netd` gets its Unix clock reference from the QEMU `virt` RTC at boot.
-[Check the guest Unix clock](docs/qemu-walkthroughs.md#check-the-guest-unix-clock)
+The TLS handshake uses a separate 32-byte seed from VirtIO RNG. `netd`
+uses the RTC-backed Unix clock to check certificate validity dates.
+[Entropy walkthrough](docs/qemu-walkthroughs.md#seed-tcp-with-virtio-rng) · [Clock walkthrough](docs/qemu-walkthroughs.md#check-the-guest-unix-clock)
 
 ## Run the QEMU host broker
 
-After building the kernel, use Python 3.10 or later with its standard
-`sqlite3` module. Run this from the `core` repository root.
+The broker starts QEMU with `-nic none` and connects a dedicated VirtIO
+console port. The guest submits bounded requests over that port. The broker
+calls Ollama and the MCP server over host loopback and journals requests in SQLite.
+After building the kernel, run this from `core` with Python 3.10 or later
+and its standard `sqlite3` module.
 
 ```sh
 python3 platforms/qemu-riscv64-virt/host_bridge.py --budget-units 2
@@ -153,7 +150,7 @@ tries to read it, `hello` exits with status 1 and `recv hello` prints
 
 ## Documentation
 
-- [QEMU walkthroughs](docs/qemu-walkthroughs.md) give commands and expected results for child programs, goal budgets, read-only observers, delegated resumes, tool delegation, auditing and reviewed renames.
+- [QEMU walkthroughs](docs/qemu-walkthroughs.md) give commands and expected results for guest networking, host-backed plans, goal supervision, reviewed renames and recovery after reboot.
 - [Native syscall ABI](docs/native-syscall-abi.md) documents registers, wire formats and error handling.
 - [Roadmap](ROADMAP.md) links the current prototype to the native release criteria and the file-organizer demonstration.
 - [Repository layout](https://github.com/clavenar/specifications/blob/main/engineering/repository-layout.md) maps the native source and the planned Hosted and Virtual components.
