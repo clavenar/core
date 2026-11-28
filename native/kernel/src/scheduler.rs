@@ -15,7 +15,7 @@ use clv_abi::{
     TaskCompletion,
 };
 
-use crate::arch::riscv64::trap::TrapFrame;
+use crate::arch::{monotonic_nanos, riscv64::trap::TrapFrame};
 use crate::drivers::virtio::block::JournalDisk;
 use crate::drivers::virtio::console::Port;
 use crate::fs::ramfs::{RamFs, TaskFs};
@@ -39,7 +39,7 @@ enum TaskState {
     WaitingForMessage(usize),
     WaitingForPipeData(usize),
     WaitingForPipeSpace(usize),
-    WaitingForNetwork(FrameOperation),
+    WaitingForNetwork(FrameOperation, Option<u64>),
     Stopped,
 }
 
@@ -247,11 +247,21 @@ impl Scheduler {
 
     pub(crate) fn wake_netd(&mut self, receive: bool, transmit: bool) {
         let state = &mut self.tasks[NETD_TASK_INDEX].state;
-        if receive {
-            state.wake_from(TaskState::WaitingForNetwork(FrameOperation::Receive));
+        if let TaskState::WaitingForNetwork(operation, deadline) = *state {
+            let ready = match operation {
+                FrameOperation::Receive => receive,
+                FrameOperation::Transmit => transmit,
+            };
+            if ready || deadline.is_some_and(|at| monotonic_nanos() >= at) {
+                *state = TaskState::Runnable;
+            }
         }
-        if transmit {
-            state.wake_from(TaskState::WaitingForNetwork(FrameOperation::Transmit));
+    }
+
+    pub(crate) fn netd_deadline(&self) -> Option<u64> {
+        match self.tasks[NETD_TASK_INDEX].state {
+            TaskState::WaitingForNetwork(_, deadline) => deadline,
+            _ => None,
         }
     }
 
@@ -259,8 +269,9 @@ impl Scheduler {
         &mut self,
         frame: &mut TrapFrame,
         operation: FrameOperation,
+        deadline: Option<u64>,
     ) -> WaitResult<usize> {
-        if self.block_current(frame, TaskState::WaitingForNetwork(operation)) {
+        if self.block_current(frame, TaskState::WaitingForNetwork(operation, deadline)) {
             WaitResult::Blocked
         } else {
             // The service can retry when no other task can run in its place.

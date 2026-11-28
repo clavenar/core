@@ -1,7 +1,7 @@
 use clv_abi::SYSCALL_ERROR;
-use clv_abi::net::{ETHERNET_HEADER_BYTES, FrameOperation, MAX_FRAME_BYTES};
+use clv_abi::net::{ETHERNET_HEADER_BYTES, FrameOperation, MAX_FRAME_BYTES, NO_RECEIVE_DEADLINE};
 
-use super::{REG_A0, REG_A1, REG_A2};
+use super::{REG_A0, REG_A1, REG_A2, REG_A3};
 use crate::arch::monotonic_nanos;
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::drivers::virtio::net::{self, BUFFER_BYTES, NetError, Nic};
@@ -32,24 +32,30 @@ pub(super) fn frame_io(
     let Some(nic) = interface.as_mut() else {
         return WaitResult::Unavailable;
     };
+    let deadline = frame.registers[REG_A3] as u64;
+    let deadline = (operation == FrameOperation::Receive && deadline != NO_RECEIVE_DEADLINE)
+        .then_some(deadline);
     let result = match operation {
         FrameOperation::Receive => receive(nic, stack, address),
         FrameOperation::Transmit => transmit(nic, stack, address, length),
     };
-    match result {
-        Ok(Some(length)) => {
-            if operation == FrameOperation::Receive && length != SYSCALL_ERROR {
-                // Write the timestamp once the receive has finished and a1 is free.
-                frame.registers[REG_A1] = monotonic_nanos() as usize;
-            }
-            WaitResult::Ready(length)
-        }
-        Ok(None) => scheduler.wait_for_network(frame, operation),
+    let result = match result {
+        Ok(Some(length)) => WaitResult::Ready(length),
+        Ok(None) if deadline.is_some_and(|at| monotonic_nanos() >= at) => WaitResult::Ready(0),
+        Ok(None) => scheduler.wait_for_network(frame, operation, deadline),
         Err(error) => {
             net::retire(interface, error);
             WaitResult::Unavailable
         }
+    };
+    if let WaitResult::Ready(length) = result
+        && operation == FrameOperation::Receive
+        && length != SYSCALL_ERROR
+    {
+        // A parked syscall retries with its original buffer pointer in a1.
+        frame.registers[REG_A1] = monotonic_nanos() as usize;
     }
+    result
 }
 
 fn receive(nic: &mut Nic, stack: UserStack, address: usize) -> Result<Option<usize>, NetError> {

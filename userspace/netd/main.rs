@@ -5,7 +5,7 @@ use clv::net;
 use core::panic::PanicInfo;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::{Socket, udp};
+use smoltcp::socket::{Socket, tcp, udp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{
     ETHERNET_HEADER_LEN, EthernetAddress, HardwareAddress, IPV4_HEADER_LEN, IpAddress, IpCidr,
@@ -17,8 +17,11 @@ const _: &str = include_str!("../user.ld");
 
 const GUEST_ADDRESS: IpAddress = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
 const UDP_ECHO_ENDPOINT: IpEndpoint = IpEndpoint::new(GUEST_ADDRESS, 49152);
+const TCP_ECHO_ENDPOINT: IpEndpoint = IpEndpoint::new(GUEST_ADDRESS, 49153);
+const TCP_BUFFER_BYTES: usize = 1024;
 const MAX_UDP_PAYLOAD_BYTES: usize =
     net::MAX_FRAME_BYTES - ETHERNET_HEADER_LEN - IPV4_HEADER_LEN - UDP_HEADER_LEN;
+const NANOS_PER_MICROSECOND: u64 = 1_000;
 const MIN_FRAME_BYTES: usize = 60;
 const PROBE_ETHERTYPE: [u8; 2] = 0x88b5_u16.to_be_bytes();
 const PROBE_PEER: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
@@ -42,33 +45,61 @@ extern "C" fn _start(_task: usize, packed_mac: usize) -> ! {
     let mut rx_payload = [0; MAX_UDP_PAYLOAD_BYTES];
     let mut tx_packets = [udp::PacketMetadata::EMPTY];
     let mut tx_payload = [0; MAX_UDP_PAYLOAD_BYTES];
-    let mut echo = udp::Socket::new(
+    let mut udp_socket = udp::Socket::new(
         udp::PacketBuffer::new(&mut rx_packets[..], &mut rx_payload[..]),
         udp::PacketBuffer::new(&mut tx_packets[..], &mut tx_payload[..]),
     );
-    echo.bind(UDP_ECHO_ENDPOINT).unwrap();
-    let mut storage = [SocketStorage::EMPTY];
+    udp_socket.bind(UDP_ECHO_ENDPOINT).unwrap();
+
+    let mut tcp_rx = [0; TCP_BUFFER_BYTES];
+    let mut tcp_tx = [0; TCP_BUFFER_BYTES];
+    let mut tcp_socket = tcp::Socket::new(
+        tcp::SocketBuffer::new(&mut tcp_rx[..]),
+        tcp::SocketBuffer::new(&mut tcp_tx[..]),
+    );
+    tcp_socket.listen(TCP_ECHO_ENDPOINT).unwrap();
+
+    let mut storage = [SocketStorage::EMPTY; 2];
     let mut sockets = SocketSet::new(&mut storage[..]);
-    let mut echo = sockets.add(echo);
+    let mut udp_handle = sockets.add(udp_socket);
+    let tcp_handle = sockets.add(tcp_socket);
 
     clv::print(b"netd ready\r\n");
+    let mut deadline = None;
     loop {
-        let Some((frame, received_at)) = net::receive(&mut buffer) else {
+        let Some((frame, now)) = net::receive(&mut buffer, deadline) else {
             clv::exit(1);
         };
+        let timestamp = Instant::from_micros((now / NANOS_PER_MICROSECOND) as i64);
+        interface.poll_maintenance(timestamp);
         if frame == request {
             send_frame(&reply);
         } else if !frame.is_empty() {
-            let timestamp = Instant::from_micros((received_at / 1_000) as i64);
             interface.poll_ingress_single(
                 timestamp,
                 &mut EthernetDevice(Some(frame)),
                 &mut sockets,
             );
             // Ingress has copied the datagram into the socket queue, freeing the frame buffer.
-            echo = queue_udp_echo(&mut sockets, echo, &mut buffer[..MAX_UDP_PAYLOAD_BYTES]);
-            interface.poll_egress(timestamp, &mut EthernetDevice(None), &mut sockets);
+            udp_handle = queue_udp_echo(
+                &mut sockets,
+                udp_handle,
+                &mut buffer[..MAX_UDP_PAYLOAD_BYTES],
+            );
         }
+        queue_tcp_echo(sockets.get_mut::<tcp::Socket>(tcp_handle), &mut buffer);
+        interface.poll_egress(timestamp, &mut EthernetDevice(None), &mut sockets);
+
+        let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
+        if socket.state() == tcp::State::Closed {
+            socket.listen(TCP_ECHO_ENDPOINT).unwrap();
+        }
+        deadline = interface.poll_at(timestamp, &sockets).map(|at| {
+            // smoltcp uses zero for work due now. The ABI reserves zero for an indefinite wait.
+            (at.total_micros().max(0) as u64)
+                .saturating_mul(NANOS_PER_MICROSECOND)
+                .max(1)
+        });
     }
 }
 
@@ -101,6 +132,19 @@ fn queue_udp_echo(
     let socket = sockets.get_mut::<udp::Socket>(echo);
     let _ = socket.send_slice(&buffer[..length], sender.endpoint);
     echo
+}
+
+fn queue_tcp_echo(socket: &mut tcp::Socket<'_>, buffer: &mut [u8]) {
+    if socket.can_recv() && socket.can_send() {
+        let available = socket.send_capacity() - socket.send_queue();
+        let capacity = available.min(buffer.len());
+        let length = socket.recv_slice(&mut buffer[..capacity]).unwrap();
+        let queued = socket.send_slice(&buffer[..length]).unwrap();
+        debug_assert_eq!(queued, length);
+    }
+    if socket.state() == tcp::State::CloseWait && !socket.can_recv() {
+        socket.close();
+    }
 }
 
 struct EthernetDevice<'a>(Option<&'a [u8]>);

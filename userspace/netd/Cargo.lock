@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "clv-abi"
-version = "0.0.9"
+version = "0.0.10"
 
 [[package]]
 name = "hash32"

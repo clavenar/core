@@ -87,8 +87,10 @@ starts a fresh quantum when the timer fires or a stopped task is replaced.
 
 The kernel reads the MAC address from an attached modern VirtIO-net device,
 posts a receive buffer and starts the dedicated `netd` task. The timer wakes
-the service on receive or transmit readiness. Each receive copies one frame
-to the service's stack, returns its monotonic timestamp and reposts the buffer.
+the service on receive or transmit readiness or at its requested receive
+deadline. A receive copies a ready frame to the service's stack and reposts
+the buffer, or returns zero bytes at the deadline. Both results carry
+the current monotonic time.
 A transmit still pending at its 500 ms deadline causes the driver to request
 reset and wake `netd` so its call can fail. DMA buffers remain in supervisor
 memory.
@@ -97,8 +99,10 @@ memory.
 `192.0.2.2/24`. It echoes unicast UDP datagrams sent to `192.0.2.2:49152`.
 The UDP socket has one receive slot and one transmit slot, each sized for
 payloads up to 1,472 bytes. A new valid datagram can replace a reply that
-is still waiting on ARP. The service also answers the 60-byte Ethernet
-probe `CLVNET01` with `CLVNET02` on experimental EtherType `0x88b5`.
+is still waiting on ARP. On `192.0.2.2:49153`, `netd` echoes one TCP stream
+at a time with 1 KiB buffers in each direction. The service also answers the
+60-byte Ethernet probe `CLVNET01` with `CLVNET02` on experimental EtherType
+`0x88b5`.
 [Frame I/O syscall](native-syscall-abi.md#network-frame-io) · [smoltcp interface](https://docs.rs/smoltcp/0.14.0/smoltcp/iface/struct.Interface.html#method.poll_ingress_single) · [VirtIO network specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
 
 After building the kernel, paste this block at the Linux prompt in `core`.
@@ -120,6 +124,8 @@ host_mac = bytes.fromhex("02 00 00 00 00 01")
 guest_ip = inet_aton("192.0.2.2")
 host_ip = inet_aton("192.0.2.1")
 udp_echo_port = 49152
+tcp_echo_port = 49153
+tcp_fin, tcp_syn, tcp_rst, tcp_ack = 0x01, 0x02, 0x04, 0x10
 prompt = b"\x1b[32mclsh> \x1b[0m"
 
 def ethernet_frame(destination, source, ethertype, payload):
@@ -149,13 +155,14 @@ def send_ipv4(host, protocol, identifier, payload):
                   0x45, 0, 20 + len(payload), identifier, 0, 64, protocol, 0, host_ip, guest_ip)
     host.send(ethernet_frame(guest_mac, host_mac, 0x0800, with_checksum(header, 10) + payload))
 
-def receive_ipv4(host, protocol, payload_length):
+def receive_ipv4(host, protocol, payload_length=None):
     frame = host.recv(2048)
     if frame[:14] != host_mac + guest_mac + pack("!H", 0x0800):
         raise RuntimeError("Expected a guest Ethernet frame carrying IPv4")
     ip = frame[14:]
     total_length = int.from_bytes(ip[2:4], "big")
-    if (len(ip) < total_length or total_length != 20 + payload_length or
+    if (not 20 <= total_length <= len(ip) or
+            (payload_length is not None and total_length != 20 + payload_length) or
             ip[0] != 0x45 or ip[9] != protocol or ip[12:20] != guest_ip + host_ip or
             checksum(ip[:20]) != 0):
         raise RuntimeError("Invalid IPv4 echo reply header")
@@ -170,21 +177,74 @@ def check_echo(host, sequence, payload):
             checksum(reply) != 0):
         raise RuntimeError(f"Invalid ICMP echo reply for sequence {sequence}")
 
-def udp_pseudo_header(source, destination, length):
-    return source + destination + pack("!BBH", 0, 17, length)
+def transport_checksum(protocol, source, destination, segment):
+    header = source + destination + pack("!BBH", 0, protocol, len(segment))
+    return checksum(header + segment)
 
 def check_udp(host, port, payload):
     length = 8 + len(payload)
     request = pack("!HHHH", port, udp_echo_port, length, 0) + payload
     # UDP encodes a computed zero checksum as all ones.
-    request_checksum = checksum(udp_pseudo_header(host_ip, guest_ip, length) + request) or 0xffff
+    request_checksum = transport_checksum(17, host_ip, guest_ip, request) or 0xffff
     send_ipv4(host, 17, port, request[:6] + pack("!H", request_checksum) + payload)
     reply = receive_ipv4(host, 17, length)
     source, destination, reply_length, reply_checksum = unpack("!HHHH", reply[:8])
     if ((source, destination, reply_length) != (udp_echo_port, port, length) or
-            not reply_checksum or checksum(udp_pseudo_header(guest_ip, host_ip, length) + reply) != 0 or
+            not reply_checksum or transport_checksum(17, guest_ip, host_ip, reply) != 0 or
             reply[8:] != payload):
         raise RuntimeError(f"Invalid UDP echo reply for port {port}")
+
+def send_tcp(host, port, sequence, acknowledgement, flags, payload=b"", window=4096):
+    segment = pack("!HHIIBBHHH", port, tcp_echo_port, sequence, acknowledgement,
+                   5 << 4, flags, window, 0, 0) + payload
+    value = transport_checksum(6, host_ip, guest_ip, segment)
+    send_ipv4(host, 6, sequence & 0xffff, segment[:16] + pack("!H", value) + segment[18:])
+
+def receive_tcp(host, port):
+    segment = receive_ipv4(host, 6)
+    if len(segment) < 20 or transport_checksum(6, guest_ip, host_ip, segment) != 0:
+        raise RuntimeError("Invalid TCP segment or checksum")
+    source, destination, sequence, acknowledgement, offset, flags, _, _, _ = unpack(
+        "!HHIIBBHHH", segment[:20])
+    header_length = (offset >> 4) * 4
+    if (source, destination) != (tcp_echo_port, port) or not 20 <= header_length <= len(segment):
+        raise RuntimeError("Invalid TCP ports or header length")
+    control = flags & (tcp_syn | tcp_ack | tcp_fin | tcp_rst)
+    return sequence, acknowledgement, control, segment[header_length:]
+
+def check_tcp(host, guest):
+    port = 50010
+    client_sequence = 0x12345678
+    send_tcp(host, port, client_sequence, 0, tcp_syn)
+    server_sequence, acknowledgement, flags, payload = receive_tcp(host, port)
+    client_sequence += 1
+    if (acknowledgement, flags, payload) != (client_sequence, tcp_syn | tcp_ack, b""):
+        raise RuntimeError("Expected TCP SYN-ACK")
+    server_sequence = (server_sequence + 1) & 0xffffffff
+
+    # The first data segment also acknowledges the handshake.
+    for index, payload in enumerate((b"TCP ", b"echoes ", b"a byte stream.")):
+        send_tcp(host, port, client_sequence, server_sequence, tcp_ack, payload)
+        client_sequence += len(payload)
+        expected = (server_sequence, client_sequence, tcp_ack, payload)
+        if receive_tcp(host, port) != expected:
+            raise RuntimeError("TCP echo returned different stream bytes or sequence numbers")
+        if index == 0:
+            # Keep the link silent while the guest retransmits the unacknowledged bytes.
+            check_shell(guest)
+            if receive_tcp(host, port) != expected:
+                raise RuntimeError("Expected retransmission of the unacknowledged TCP bytes")
+        server_sequence = (server_sequence + len(payload)) & 0xffffffff
+
+    send_tcp(host, port, client_sequence, server_sequence, tcp_fin | tcp_ack)
+    client_sequence += 1
+    reply = receive_tcp(host, port)
+    if reply == (server_sequence, client_sequence, tcp_ack, b""):
+        reply = receive_tcp(host, port)
+    if reply != (server_sequence, client_sequence, tcp_fin | tcp_ack, b""):
+        raise RuntimeError("Expected an orderly TCP close")
+    send_tcp(host, port, client_sequence, (server_sequence + 1) & 0xffffffff, tcp_ack)
+    check_shell(guest)
 
 def wait_for_shell(guest):
     serial = bytearray()
@@ -243,22 +303,25 @@ def boot(exercise_network):
                     check_shell(guest)
                     check_udp(host, 50000 + sequence, payload)
                     check_shell(guest)
+                check_tcp(host, guest)
             print()
         finally:
             guest.terminate()
             guest.wait(timeout=5)
 
 boot(exercise_network=True)
-print("Host verified Ethernet probes, ARP, ICMP and UDP echo replies after clsh>", flush=True)
+print("Host verified Ethernet probes, ARP, ICMP, UDP and TCP echo after clsh>", flush=True)
 boot(exercise_network=False)
 print("Silent peer reached clsh>", flush=True)
 PY
 ```
 
 The first boot verifies Ethernet probe replies, resolves the guest MAC by ARP,
-and checks three ICMP and three UDP echo replies. Both protocols exercise a full
-1,500-byte IPv4 packet. The fixture verifies the checksums, ICMP identifiers and
-sequences, UDP ports and payloads. It reads `/hello.txt` between exchanges.
+and checks three ICMP and three UDP echo replies, including full 1,500-byte IPv4
+packets. It verifies TCP checksums, handshake, byte order and orderly closure.
+The fixture withholds one TCP acknowledgement and checks that the guest
+retransmits the same bytes and sequence number while the link is silent. It
+reads `/hello.txt` during that wait and between the other exchanges.
 The second boot reads the same file with the peer silent.
 Run the regular boot command with `-nic none` to check the shell on its
 own. [Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)

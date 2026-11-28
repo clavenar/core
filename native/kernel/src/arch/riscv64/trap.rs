@@ -106,7 +106,7 @@ pub(crate) unsafe fn start(
     uart::write(b"Sv39 paging enabled\r\n");
     after_paging(scheduler, &mut state.ramfs);
     let first_frame = *scheduler.current_frame();
-    arm_timer();
+    arm_timer(scheduler);
     // SAFETY: The first task's code and stack are mapped in the active space.
     unsafe { enter_user(&first_frame) }
 }
@@ -132,13 +132,13 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         return;
     }
     if scause == timer::INTERRUPT_CAUSE {
-        if let Some(ready) = net::poll(&mut state.nic) {
-            scheduler.wake_netd(ready.receive, ready.transmit);
-        }
+        let (receive, transmit) = net::poll(&mut state.nic)
+            .map_or((false, false), |ready| (ready.receive, ready.transmit));
+        scheduler.wake_netd(receive, transmit);
         if scheduler.preempt(frame) {
             switch_task(scheduler, current, SwitchReason::Timer);
         }
-        arm_timer();
+        arm_timer(scheduler);
         // The frame now contains the selected task's interrupted instruction.
         return;
     }
@@ -171,7 +171,7 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         }
         syscall::Outcome::Wait => {
             switch_task(scheduler, current, SwitchReason::Wait);
-            arm_timer();
+            arm_timer(scheduler);
         }
     }
 }
@@ -183,7 +183,7 @@ fn resume_after_stop(scheduler: &mut Scheduler, frame: &mut TrapFrame, reason: S
         idle();
     }
     switch_task(scheduler, previous, reason);
-    arm_timer();
+    arm_timer(scheduler);
 }
 
 enum SwitchReason {
@@ -221,8 +221,8 @@ fn switch_task(scheduler: &Scheduler, previous: usize, reason: SwitchReason) {
     uart::write(b"\r\n");
 }
 
-fn arm_timer() {
-    if !timer::arm() {
+fn arm_timer(scheduler: &Scheduler) {
+    if !timer::arm(scheduler.netd_deadline()) {
         uart::write(b"SBI timer setup failed\r\n");
         idle();
     }

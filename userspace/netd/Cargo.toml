@@ -15,6 +15,7 @@ smoltcp = { version = "=0.14.0", default-features = false, features = [
     "medium-ethernet",
     "proto-ipv4",
     "socket-icmp",
+    "socket-tcp",
     "socket-udp",
     "auto-icmp-echo-reply",
 ] }

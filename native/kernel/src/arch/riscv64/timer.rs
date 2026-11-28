@@ -22,9 +22,13 @@ pub(crate) fn monotonic_nanos() -> u64 {
     time_ticks().saturating_mul(NANOS_PER_TICK)
 }
 
-/// Starts a fresh quantum on the boot hart.
-pub(crate) fn arm() -> bool {
-    if !set_deadline(time_ticks().saturating_add(QUANTUM_TICKS)) {
+/// Arms the timer for the next quantum or an earlier service deadline.
+pub(crate) fn arm(service_deadline_ns: Option<u64>) -> bool {
+    let quantum_end = time_ticks().saturating_add(QUANTUM_TICKS);
+    let next = service_deadline_ns.map_or(quantum_end, |deadline| {
+        quantum_end.min(deadline.div_ceil(NANOS_PER_TICK))
+    });
+    if !set_deadline(next) {
         return false;
     }
 
