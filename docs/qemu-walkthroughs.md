@@ -94,8 +94,11 @@ reset and wake `netd` so its call can fail. DMA buffers remain in supervisor
 memory.
 
 `netd` uses smoltcp to answer ARP and IPv4 ICMP echo requests at
-`192.0.2.2/24`. It also answers the 60-byte Ethernet probe `CLVNET01`
-with `CLVNET02` on experimental EtherType `0x88b5`.
+`192.0.2.2/24`. It echoes unicast UDP datagrams sent to `192.0.2.2:49152`.
+The UDP socket has one receive slot and one transmit slot, each sized for
+payloads up to 1,472 bytes. A new valid datagram can replace a reply that
+is still waiting on ARP. The service also answers the 60-byte Ethernet
+probe `CLVNET01` with `CLVNET02` on experimental EtherType `0x88b5`.
 [Frame I/O syscall](native-syscall-abi.md#network-frame-io) · [smoltcp interface](https://docs.rs/smoltcp/0.14.0/smoltcp/iface/struct.Interface.html#method.poll_ingress_single) · [VirtIO network specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
 
 After building the kernel, paste this block at the Linux prompt in `core`.
@@ -107,7 +110,7 @@ python3 - <<'PY'
 import os
 from select import select
 from socket import SOCK_DGRAM, inet_aton, socketpair
-from struct import iter_unpack, pack
+from struct import iter_unpack, pack, unpack
 from subprocess import PIPE, STDOUT, Popen
 import sys
 from time import monotonic
@@ -116,6 +119,7 @@ guest_mac = bytes.fromhex("52 54 00 12 34 56")
 host_mac = bytes.fromhex("02 00 00 00 00 01")
 guest_ip = inet_aton("192.0.2.2")
 host_ip = inet_aton("192.0.2.1")
+udp_echo_port = 49152
 prompt = b"\x1b[32mclsh> \x1b[0m"
 
 def ethernet_frame(destination, source, ethertype, payload):
@@ -140,25 +144,47 @@ def check_arp(host):
     if host.recv(2048) != ethernet_frame(host_mac, guest_mac, 0x0806, reply):
         raise RuntimeError("ARP did not resolve 192.0.2.2 to the guest MAC")
 
-def check_echo(host, sequence, payload):
-    identifier = 0x1234 + sequence
-    request = with_checksum(pack("!BBHHH", 8, 0, 0, identifier, sequence) + payload, 2)
+def send_ipv4(host, protocol, identifier, payload):
     header = pack("!BBHHHBBH4s4s",
-                  0x45, 0, 20 + len(request), sequence, 0, 64, 1, 0, host_ip, guest_ip)
-    host.send(ethernet_frame(guest_mac, host_mac, 0x0800, with_checksum(header, 10) + request))
+                  0x45, 0, 20 + len(payload), identifier, 0, 64, protocol, 0, host_ip, guest_ip)
+    host.send(ethernet_frame(guest_mac, host_mac, 0x0800, with_checksum(header, 10) + payload))
+
+def receive_ipv4(host, protocol, payload_length):
     frame = host.recv(2048)
     if frame[:14] != host_mac + guest_mac + pack("!H", 0x0800):
         raise RuntimeError("Expected a guest Ethernet frame carrying IPv4")
     ip = frame[14:]
     total_length = int.from_bytes(ip[2:4], "big")
-    if (len(ip) < total_length or total_length != 28 + len(payload) or
-            ip[0] != 0x45 or ip[9] != 1 or ip[12:20] != guest_ip + host_ip or
+    if (len(ip) < total_length or total_length != 20 + payload_length or
+            ip[0] != 0x45 or ip[9] != protocol or ip[12:20] != guest_ip + host_ip or
             checksum(ip[:20]) != 0):
         raise RuntimeError("Invalid IPv4 echo reply header")
-    reply = ip[20:total_length]
+    return ip[20:total_length]
+
+def check_echo(host, sequence, payload):
+    identifier = 0x1234 + sequence
+    request = with_checksum(pack("!BBHHH", 8, 0, 0, identifier, sequence) + payload, 2)
+    send_ipv4(host, 1, sequence, request)
+    reply = receive_ipv4(host, 1, len(request))
     if (reply[:2] != b"\0\0" or reply[4:] != pack("!HH", identifier, sequence) + payload or
             checksum(reply) != 0):
         raise RuntimeError(f"Invalid ICMP echo reply for sequence {sequence}")
+
+def udp_pseudo_header(source, destination, length):
+    return source + destination + pack("!BBH", 0, 17, length)
+
+def check_udp(host, port, payload):
+    length = 8 + len(payload)
+    request = pack("!HHHH", port, udp_echo_port, length, 0) + payload
+    # UDP encodes a computed zero checksum as all ones.
+    request_checksum = checksum(udp_pseudo_header(host_ip, guest_ip, length) + request) or 0xffff
+    send_ipv4(host, 17, port, request[:6] + pack("!H", request_checksum) + payload)
+    reply = receive_ipv4(host, 17, length)
+    source, destination, reply_length, reply_checksum = unpack("!HHHH", reply[:8])
+    if ((source, destination, reply_length) != (udp_echo_port, port, length) or
+            not reply_checksum or checksum(udp_pseudo_header(guest_ip, host_ip, length) + reply) != 0 or
+            reply[8:] != payload):
+        raise RuntimeError(f"Invalid UDP echo reply for port {port}")
 
 def wait_for_shell(guest):
     serial = bytearray()
@@ -215,23 +241,25 @@ def boot(exercise_network):
                 for sequence, payload in enumerate(payloads, start=1):
                     check_echo(host, sequence, payload)
                     check_shell(guest)
+                    check_udp(host, 50000 + sequence, payload)
+                    check_shell(guest)
             print()
         finally:
             guest.terminate()
             guest.wait(timeout=5)
 
 boot(exercise_network=True)
-print("Host verified Ethernet probes, ARP and three IPv4 echo replies after clsh>", flush=True)
+print("Host verified Ethernet probes, ARP, ICMP and UDP echo replies after clsh>", flush=True)
 boot(exercise_network=False)
 print("Silent peer reached clsh>", flush=True)
 PY
 ```
 
 The first boot verifies Ethernet probe replies, resolves the guest MAC by ARP,
-and checks three echo replies, including one with a full 1,500-byte IPv4 packet.
-It validates the IPv4 and ICMP checksums, identifiers, sequences and payloads,
-and reads `/hello.txt` between exchanges. The second boot reads the same file
-with the peer silent.
+and checks three ICMP and three UDP echo replies. Both protocols exercise a full
+1,500-byte IPv4 packet. The fixture verifies the checksums, ICMP identifiers and
+sequences, UDP ports and payloads. It reads `/hello.txt` between exchanges.
+The second boot reads the same file with the peer silent.
 Run the regular boot command with `-nic none` to check the shell on its
 own. [Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)
 

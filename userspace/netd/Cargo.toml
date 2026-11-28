@@ -11,11 +11,11 @@ test = false
 
 [dependencies]
 clv = { path = "../libclv" }
-# The Ethernet medium requires at least one socket feature. Echo replies use an empty socket set.
 smoltcp = { version = "=0.14.0", default-features = false, features = [
     "medium-ethernet",
     "proto-ipv4",
     "socket-icmp",
+    "socket-udp",
     "auto-icmp-echo-reply",
 ] }
 

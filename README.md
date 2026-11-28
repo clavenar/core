@@ -47,9 +47,10 @@ command reference. Press `Ctrl+a`, then `x`, to quit QEMU.
 
 With a modern VirtIO-net device attached, the user-space service `netd`
 uses smoltcp to answer ARP and IPv4 echo requests at `192.0.2.2/24`.
+It echoes UDP datagrams sent to `192.0.2.2:49152`.
 The kernel build fetches the locked smoltcp dependencies from crates.io
 when they are absent from the Cargo cache.
-[Verify Ethernet, ARP and IPv4 ping in QEMU](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net)
+[Verify Ethernet, ARP, IPv4 ping and UDP in QEMU](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net)
 
 ## Run the QEMU host broker
 

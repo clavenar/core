@@ -3,15 +3,22 @@
 
 use clv::net;
 use core::panic::PanicInfo;
-use smoltcp::iface::{Config, Interface, SocketSet};
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::socket::{Socket, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address, Ipv4Cidr};
+use smoltcp::wire::{
+    ETHERNET_HEADER_LEN, EthernetAddress, HardwareAddress, IPV4_HEADER_LEN, IpAddress, IpCidr,
+    IpEndpoint, Ipv4Address, UDP_HEADER_LEN,
+};
 
 // Relink the service when the boot user linker script changes.
 const _: &str = include_str!("../user.ld");
 
-const GUEST_ADDRESS: Ipv4Cidr = Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 2), 24);
+const GUEST_ADDRESS: IpAddress = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
+const UDP_ECHO_ENDPOINT: IpEndpoint = IpEndpoint::new(GUEST_ADDRESS, 49152);
+const MAX_UDP_PAYLOAD_BYTES: usize =
+    net::MAX_FRAME_BYTES - ETHERNET_HEADER_LEN - IPV4_HEADER_LEN - UDP_HEADER_LEN;
 const MIN_FRAME_BYTES: usize = 60;
 const PROBE_ETHERTYPE: [u8; 2] = 0x88b5_u16.to_be_bytes();
 const PROBE_PEER: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
@@ -29,9 +36,20 @@ extern "C" fn _start(_task: usize, packed_mac: usize) -> ! {
     let mut buffer = [0; net::MAX_FRAME_BYTES];
     let config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
     let mut interface = Interface::new(config, &mut EthernetDevice(None), Instant::ZERO);
-    interface.update_ip_addrs(|addrs| addrs.push(IpCidr::Ipv4(GUEST_ADDRESS)).unwrap());
-    let mut storage = [];
+    interface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(GUEST_ADDRESS, 24)).unwrap());
+
+    let mut rx_packets = [udp::PacketMetadata::EMPTY];
+    let mut rx_payload = [0; MAX_UDP_PAYLOAD_BYTES];
+    let mut tx_packets = [udp::PacketMetadata::EMPTY];
+    let mut tx_payload = [0; MAX_UDP_PAYLOAD_BYTES];
+    let mut echo = udp::Socket::new(
+        udp::PacketBuffer::new(&mut rx_packets[..], &mut rx_payload[..]),
+        udp::PacketBuffer::new(&mut tx_packets[..], &mut tx_payload[..]),
+    );
+    echo.bind(UDP_ECHO_ENDPOINT).unwrap();
+    let mut storage = [SocketStorage::EMPTY];
     let mut sockets = SocketSet::new(&mut storage[..]);
+    let mut echo = sockets.add(echo);
 
     clv::print(b"netd ready\r\n");
     loop {
@@ -47,8 +65,42 @@ extern "C" fn _start(_task: usize, packed_mac: usize) -> ! {
                 &mut EthernetDevice(Some(frame)),
                 &mut sockets,
             );
+            // Ingress has copied the datagram into the socket queue, freeing the frame buffer.
+            echo = queue_udp_echo(&mut sockets, echo, &mut buffer[..MAX_UDP_PAYLOAD_BYTES]);
+            interface.poll_egress(timestamp, &mut EthernetDevice(None), &mut sockets);
         }
     }
+}
+
+fn queue_udp_echo(
+    sockets: &mut SocketSet<'_>,
+    echo: SocketHandle,
+    buffer: &mut [u8],
+) -> SocketHandle {
+    let socket = sockets.get_mut::<udp::Socket>(echo);
+    let Ok((length, sender)) = socket.recv_slice(buffer) else {
+        return echo;
+    };
+    if sender.local_address != Some(GUEST_ADDRESS)
+        || !sender.endpoint.addr.is_unicast()
+        || sender.endpoint.port == 0
+    {
+        return echo;
+    }
+    let echo = if socket.can_send() {
+        echo
+    } else {
+        // Discard a reply still waiting for ARP and reset the socket's neighbor wait.
+        let Socket::Udp(mut socket) = sockets.remove(echo) else {
+            unreachable!();
+        };
+        socket.close();
+        socket.bind(UDP_ECHO_ENDPOINT).unwrap();
+        sockets.add(socket)
+    };
+    let socket = sockets.get_mut::<udp::Socket>(echo);
+    let _ = socket.send_slice(&buffer[..length], sender.endpoint);
+    echo
 }
 
 struct EthernetDevice<'a>(Option<&'a [u8]>);
