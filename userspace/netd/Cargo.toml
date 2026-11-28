@@ -9,8 +9,12 @@ name = "netd"
 path = "main.rs"
 test = false
 
+[features]
+http-probe = ["dep:httparse"]
+
 [dependencies]
 clv = { path = "../libclv" }
+httparse = { version = "=1.10.1", default-features = false, optional = true }
 smoltcp = { version = "=0.14.0", default-features = false, features = [
     "medium-ethernet",
     "proto-ipv4",

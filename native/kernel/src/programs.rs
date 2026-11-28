@@ -21,8 +21,8 @@ pub(crate) const ECHO_REPORT_TASK_INDEX: usize = COMMAND_IMAGE_COUNT;
 pub(crate) const GOAL_MONITOR_TASK_INDEX: usize = ECHO_REPORT_TASK_INDEX + 1;
 pub(crate) const NETD_TASK_INDEX: usize = GOAL_MONITOR_TASK_INDEX + 1;
 pub(crate) const TASK_COUNT: usize = NETD_TASK_INDEX + 1;
-// The interface state and full-sized RX and TX buffers exceed one stack page.
-const NETD_STACK_PAGES: usize = 4;
+// The HTTP probe also holds a connection and a response buffer.
+const NETD_STACK_PAGES: usize = if cfg!(feature = "http-probe") { 6 } else { 4 };
 pub(crate) const STACK_PAGE_COUNT: usize = TASK_COUNT - 1 + NETD_STACK_PAGES;
 
 /// The boot shell occupies task 2, between the original hello and echo slots.

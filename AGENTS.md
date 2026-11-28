@@ -39,4 +39,8 @@ When a commit changes the shared `clv-abi` crate, increment its patch version
 in `crates/clv-abi/Cargo.toml` and update its entries in
 `native/kernel/Cargo.lock` and `userspace/netd/Cargo.lock` in the same commit.
 
+For both version bumps, the highest patch number is 99. After patch 99,
+increment the minor number and reset the patch to 0. For example,
+`0.0.99` advances to `0.1.0`.
+
 Start every commit subject with a lowercase letter and keep it short and descriptive. In each pull request, summarize the change and include the checks you ran. Link a relevant issue when one exists and attach screenshots for visible UI changes. Update this section when the project establishes its own commit or review conventions.

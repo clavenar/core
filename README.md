@@ -53,6 +53,9 @@ The kernel build fetches the locked smoltcp dependencies from crates.io
 when they are absent from the Cargo cache.
 [Verify Ethernet, ARP, IPv4 ping, UDP and TCP in QEMU](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net)
 
+A build with the `http-probe` feature sends one native HTTP request over the
+private QEMU link. [Run the HTTP probe](docs/qemu-walkthroughs.md#fetch-an-http-response-over-native-tcp)
+
 ## Run the QEMU host broker
 
 After building the kernel, use Python 3.10 or later with its standard

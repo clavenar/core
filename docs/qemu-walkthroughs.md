@@ -69,15 +69,17 @@ immediate goal observations, delegated resumes and rename reviews. Task 6
 runs `echo` for a background goal monitor. When a NIC initializes, task 7
 runs `netd` with its MAC address. Tasks 3, 5 and 6 share the
 read/execute pages of one ELF. Each task receives its ID in `a0` and has
-its own Sv39 root and read/write, non-executable stack. `netd` has 16 KiB
-for the network interface and packet buffers. The other tasks have 4 KiB each.
+its own Sv39 root and read/write, non-executable stack. `netd` has a 16 KiB
+stack in the standard build and 24 KiB with `http-probe`. The other tasks
+have 4 KiB each.
 The stack starts at `0x00402000` for one- and two-page images and immediately
 after the image for larger programs. The initial stack pointer is at the
 top of the stack. Nonempty syscall buffers must fit within the calling
 task's stack. The kernel, UART and attached VirtIO MMIO mappings are
-shared in supervisor mode. The 114-frame boot pool has room for five full-size
-images, seven task stacks and the page tables. The pool, kernel and 64 KiB
-supervisor stack fit within one aligned 2 MiB physical region.
+shared in supervisor mode. The boot pool has room for five full-size images,
+seven task stacks and the page tables. It holds 114 frames in the standard
+build and 116 with `http-probe`. The pool, kernel and 64 KiB supervisor
+stack fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
@@ -125,6 +127,8 @@ guest_ip = inet_aton("192.0.2.2")
 host_ip = inet_aton("192.0.2.1")
 udp_echo_port = 49152
 tcp_echo_port = 49153
+probe_port = 49154
+http_port = 8080
 tcp_fin, tcp_syn, tcp_rst, tcp_ack = 0x01, 0x02, 0x04, 0x10
 prompt = b"\x1b[32mclsh> \x1b[0m"
 
@@ -194,20 +198,21 @@ def check_udp(host, port, payload):
             reply[8:] != payload):
         raise RuntimeError(f"Invalid UDP echo reply for port {port}")
 
-def send_tcp(host, port, sequence, acknowledgement, flags, payload=b"", window=4096):
-    segment = pack("!HHIIBBHHH", port, tcp_echo_port, sequence, acknowledgement,
+def send_tcp(host, port, sequence, acknowledgement, flags, payload=b"", window=4096,
+             *, guest_port=tcp_echo_port):
+    segment = pack("!HHIIBBHHH", port, guest_port, sequence, acknowledgement,
                    5 << 4, flags, window, 0, 0) + payload
     value = transport_checksum(6, host_ip, guest_ip, segment)
     send_ipv4(host, 6, sequence & 0xffff, segment[:16] + pack("!H", value) + segment[18:])
 
-def receive_tcp(host, port):
+def receive_tcp(host, port, *, guest_port=tcp_echo_port):
     segment = receive_ipv4(host, 6)
     if len(segment) < 20 or transport_checksum(6, guest_ip, host_ip, segment) != 0:
         raise RuntimeError("Invalid TCP segment or checksum")
     source, destination, sequence, acknowledgement, offset, flags, _, _, _ = unpack(
         "!HHIIBBHHH", segment[:20])
     header_length = (offset >> 4) * 4
-    if (source, destination) != (tcp_echo_port, port) or not 20 <= header_length <= len(segment):
+    if (source, destination) != (guest_port, port) or not 20 <= header_length <= len(segment):
         raise RuntimeError("Invalid TCP ports or header length")
     control = flags & (tcp_syn | tcp_ack | tcp_fin | tcp_rst)
     return sequence, acknowledgement, control, segment[header_length:]
@@ -246,20 +251,91 @@ def check_tcp(host, guest):
     send_tcp(host, port, client_sequence, (server_sequence + 1) & 0xffffffff, tcp_ack)
     check_shell(guest)
 
-def wait_for_shell(guest):
+def answer_guest_arp(host):
+    format_fields = pack("!HHBB", 1, 0x0800, 6, 4)
+    request = host.recv(2048)
+    expected = b"\xff" * 6 + guest_mac + pack("!H", 0x0806)
+    expected += format_fields + pack("!H", 1) + guest_mac + guest_ip
+    if request[:32] != expected or request[38:42] != host_ip:
+        raise RuntimeError("Expected the guest to resolve 192.0.2.1 by ARP")
+    reply = format_fields + pack("!H", 2) + host_mac + host_ip + guest_mac + guest_ip
+    host.send(ethernet_frame(guest_mac, host_mac, 0x0806, reply))
+
+def check_http(host, guest, case):
+    answer_guest_arp(host)
+    guest_sequence, _, flags, data = receive_tcp(host, http_port, guest_port=probe_port)
+    if (flags, data) != (tcp_syn, b""):
+        raise RuntimeError("Expected the guest to initiate TCP to port 8080")
+    guest_sequence = (guest_sequence + 1) & 0xffffffff
+    server_sequence = 0x76543210
+    send_tcp(host, http_port, server_sequence, guest_sequence, tcp_syn | tcp_ack,
+             guest_port=probe_port)
+    server_sequence += 1
+
+    expected = b"GET /probe HTTP/1.1\r\nHost: 192.0.2.1:8080\r\nConnection: close\r\n\r\n"
+    request = bytearray()
+    while len(request) < len(expected):
+        sequence, acknowledged, flags, data = receive_tcp(host, http_port, guest_port=probe_port)
+        if (sequence, acknowledged, flags) != (guest_sequence, server_sequence, tcp_ack):
+            raise RuntimeError("Unexpected TCP segment while receiving HTTP request")
+        request.extend(data)
+        if not expected.startswith(request):
+            raise RuntimeError(f"Unexpected HTTP request {request!r}")
+        guest_sequence = (guest_sequence + len(data)) & 0xffffffff
+
+    if case == "silent":
+        send_tcp(host, http_port, server_sequence, guest_sequence, tcp_ack, guest_port=probe_port)
+        wait_for_serial(guest, b"netd HTTP probe timed out", timeout=8)
+        return
+
+    body = b"Hello from native HTTP\n"
+    chunks = (
+        b"HTTP/1.1 200 OK\r\nContent-Len",
+        f"gth: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body[:5],
+        body[5:],
+    )
+    if case == "truncated":
+        chunks = chunks[:-1]
+    for index, chunk in enumerate(chunks):
+        final = index == len(chunks) - 1
+        flags = tcp_ack | (tcp_fin if final else 0)
+        send_tcp(host, http_port, server_sequence, guest_sequence, flags, chunk,
+                 guest_port=probe_port)
+        server_sequence += len(chunk) + int(final)
+        if not final:
+            reply = receive_tcp(host, http_port, guest_port=probe_port)
+            if reply != (guest_sequence, server_sequence, tcp_ack, b""):
+                raise RuntimeError("Expected an ACK for the HTTP response segment")
+
+    if case == "truncated":
+        wait_for_serial(guest, b"netd HTTP probe truncated response")
+        return
+    reply = receive_tcp(host, http_port, guest_port=probe_port)
+    if reply == (guest_sequence, server_sequence, tcp_ack, b""):
+        reply = receive_tcp(host, http_port, guest_port=probe_port)
+    if reply != (guest_sequence, server_sequence, tcp_fin | tcp_ack, b""):
+        raise RuntimeError("Expected the guest to close the HTTP connection")
+    send_tcp(host, http_port, server_sequence, (guest_sequence + 1) & 0xffffffff,
+             tcp_ack, guest_port=probe_port)
+    wait_for_serial(guest, b"netd HTTP probe received Hello from native HTTP")
+
+def wait_for_serial(guest, expected, timeout=5):
     serial = bytearray()
-    deadline = monotonic() + 5
-    while prompt not in serial:
+    deadline = monotonic() + timeout
+    while expected not in serial:
         remaining = deadline - monotonic()
         if remaining <= 0 or not select([guest.stdout], [], [], remaining)[0]:
-            raise RuntimeError("Timed out waiting for clsh>")
+            raise RuntimeError(f"Timed out waiting for {expected!r}")
         chunk = os.read(guest.stdout.fileno(), 4096)
         if not chunk:
-            raise RuntimeError("QEMU stopped while waiting for clsh>")
+            raise RuntimeError(f"QEMU stopped while waiting for {expected!r}")
         sys.stdout.buffer.write(chunk)
         sys.stdout.buffer.flush()
         serial.extend(chunk)
     return serial
+
+def wait_for_shell(guest):
+    return wait_for_serial(guest, prompt)
 
 def check_shell(guest):
     guest.stdin.write(b"cat /hello.txt\n")
@@ -267,7 +343,9 @@ def check_shell(guest):
     if b"Hello from RamFS" not in wait_for_shell(guest):
         raise RuntimeError("The shell could not read /hello.txt")
 
-def boot(exercise_network):
+def boot(exercise_network=False, *, http_case=None):
+    target = "target/http-probe" if http_case is not None else "target"
+    image = f"{target}/riscv64gc-unknown-none-elf/release/clavenar-kernel"
     host, nic = socketpair(type=SOCK_DGRAM)
     with host, nic:
         fd = nic.fileno()
@@ -275,7 +353,7 @@ def boot(exercise_network):
             "qemu-system-riscv64", "-machine", "virt", "-smp", "1", "-m", "128M",
             "-bios", "default", "-display", "none", "-monitor", "none",
             "-serial", "stdio", "-nic", "none",
-            "-kernel", "target/riscv64gc-unknown-none-elf/release/clavenar-kernel",
+            "-kernel", image,
             "-global", "virtio-mmio.force-legacy=off",
             "-netdev", f"dgram,id=net0,local.type=fd,local.str={fd}",
             "-device", "virtio-net-device,netdev=net0,mac=52:54:00:12:34:56",
@@ -287,7 +365,10 @@ def boot(exercise_network):
                 raise RuntimeError("VirtIO-net did not report the configured MAC")
             host.settimeout(2)
             check_shell(guest)
-            if exercise_network:
+            if http_case is not None:
+                check_http(host, guest, http_case)
+                check_shell(guest)
+            elif exercise_network:
                 request = ethernet_frame(guest_mac, host_mac, 0x88b5, b"CLVNET01")
                 expected = ethernet_frame(host_mac, guest_mac, 0x88b5, b"CLVNET02")
                 for _ in range(3):
@@ -309,10 +390,15 @@ def boot(exercise_network):
             guest.terminate()
             guest.wait(timeout=5)
 
-boot(exercise_network=True)
-print("Host verified Ethernet probes, ARP, ICMP, UDP and TCP echo after clsh>", flush=True)
-boot(exercise_network=False)
-print("Silent peer reached clsh>", flush=True)
+if sys.argv[1:] == ["http"]:
+    for case in ("complete", "truncated", "silent"):
+        boot(http_case=case)
+    print("Host verified the guest HTTP request, split response, truncation and timeout", flush=True)
+else:
+    boot(exercise_network=True)
+    print("Host verified Ethernet probes, ARP, ICMP, UDP and TCP echo after clsh>", flush=True)
+    boot(exercise_network=False)
+    print("Silent peer reached clsh>", flush=True)
 PY
 ```
 
@@ -325,6 +411,36 @@ reads `/hello.txt` during that wait and between the other exchanges.
 The second boot reads the same file with the peer silent.
 Run the regular boot command with `-nic none` to check the shell on its
 own. [Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)
+
+### Fetch an HTTP response over native TCP
+
+From the Linux prompt in `core`, build with `http-probe` and run the
+HTTP cases in the private QEMU fixture.
+
+```bash
+(
+  set -o pipefail
+  cargo +stable rustc --locked --manifest-path native/kernel/Cargo.toml \
+    --features http-probe --target riscv64gc-unknown-none-elf \
+    --target-dir target/http-probe --release \
+    -- -C "link-arg=-T$PWD/native/linker/riscv64.ld" -C link-arg=--no-relax &&
+  awk '
+    /^### Exchange an Ethernet frame over VirtIO-net$/ { section = 1 }
+    section && /^python3 - .*PY/ { script = 1; next }
+    script && /^PY$/ { exit }
+    script { print }
+  ' docs/qemu-walkthroughs.md | python3 - http
+)
+```
+
+`netd` initiates TCP to `192.0.2.1:8080` and sends an HTTP/1.1
+`GET /probe`. It checks a `200` response with one `Content-Length`,
+up to 32 header fields, up to 1 KiB each for headers and body, and a
+five-second deadline for the exchange. The fixture splits the response
+across TCP segments, checks the exact body through the guest's success
+message, and then boots again for a truncated response and a silent HTTP
+peer. Each boot checks
+`cat /hello.txt` and stops QEMU. [HTTP/1.1 message framing](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3)
 
 ### Probe a VirtIO block device
 

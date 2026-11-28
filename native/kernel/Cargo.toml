@@ -1,7 +1,10 @@
 [package]
 name = "clavenar-kernel"
-version = "0.0.87"
+version = "0.0.88"
 edition = "2024"
+
+[features]
+http-probe = []
 
 [dependencies]
 clv-abi = { path = "../../crates/clv-abi" }

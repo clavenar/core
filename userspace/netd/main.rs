@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 
+#[cfg(feature = "http-probe")]
+mod http_probe;
+
 use clv::net;
 use core::panic::PanicInfo;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};
@@ -59,13 +62,28 @@ extern "C" fn _start(_task: usize, packed_mac: usize) -> ! {
     );
     tcp_socket.listen(TCP_ECHO_ENDPOINT).unwrap();
 
-    let mut storage = [SocketStorage::EMPTY; 2];
+    let mut storage = [SocketStorage::EMPTY; if cfg!(feature = "http-probe") { 3 } else { 2 }];
     let mut sockets = SocketSet::new(&mut storage[..]);
     let mut udp_handle = sockets.add(udp_socket);
     let tcp_handle = sockets.add(tcp_socket);
 
+    #[cfg(feature = "http-probe")]
+    let (mut probe_rx, mut probe_tx) =
+        ([0; http_probe::SOCKET_BYTES], [0; http_probe::SOCKET_BYTES]);
+    #[cfg(feature = "http-probe")]
+    let mut response = [0; http_probe::RESPONSE_BYTES];
+    #[cfg(feature = "http-probe")]
+    let mut probe = {
+        let socket = tcp::Socket::new(
+            tcp::SocketBuffer::new(&mut probe_rx[..]),
+            tcp::SocketBuffer::new(&mut probe_tx[..]),
+        );
+        http_probe::Probe::new(sockets.add(socket), &mut response)
+    };
+
     clv::print(b"netd ready\r\n");
-    let mut deadline = None;
+    // An expired deadline supplies the probe's initial clock on a silent link.
+    let mut deadline = cfg!(feature = "http-probe").then_some(1);
     loop {
         let Some((frame, now)) = net::receive(&mut buffer, deadline) else {
             clv::exit(1);
@@ -88,13 +106,18 @@ extern "C" fn _start(_task: usize, packed_mac: usize) -> ! {
             );
         }
         queue_tcp_echo(sockets.get_mut::<tcp::Socket>(tcp_handle), &mut buffer);
+        #[cfg(feature = "http-probe")]
+        probe.poll(timestamp, &mut interface, &mut sockets);
         interface.poll_egress(timestamp, &mut EthernetDevice(None), &mut sockets);
 
         let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
         if socket.state() == tcp::State::Closed {
             socket.listen(TCP_ECHO_ENDPOINT).unwrap();
         }
-        deadline = interface.poll_at(timestamp, &sockets).map(|at| {
+        let poll_at = interface.poll_at(timestamp, &sockets);
+        #[cfg(feature = "http-probe")]
+        let poll_at = poll_at.into_iter().chain(probe.deadline()).min();
+        deadline = poll_at.map(|at| {
             // smoltcp uses zero for work due now. The ABI reserves zero for an indefinite wait.
             (at.total_micros().max(0) as u64)
                 .saturating_mul(NANOS_PER_MICROSECOND)

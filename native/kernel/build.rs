@@ -101,11 +101,16 @@ fn build_netd(source: &Path, linker_script: &Path, output: &Path) {
     let target = env::var("TARGET").unwrap();
     // The nested Cargo build needs its own target directory and build lock.
     let target_dir = output.join("netd-target");
-    let status = Command::new(env::var_os("CARGO").unwrap())
+    let mut cargo = Command::new(env::var_os("CARGO").unwrap());
+    cargo
         .args(["rustc", "--locked", "--release", "--manifest-path"])
         .arg(source.join("Cargo.toml"))
         .args(["--target", &target, "--target-dir"])
-        .arg(&target_dir)
+        .arg(&target_dir);
+    if cfg!(feature = "http-probe") {
+        cargo.args(["--features", "http-probe"]);
+    }
+    let status = cargo
         .arg("--")
         .args(user_linker_args(linker_script))
         .status()
