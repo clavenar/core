@@ -14,14 +14,31 @@ use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 use webpki::EndEntityCert;
 
 use super::Network;
+use super::http_response::{RESPONSE_BYTES, body_range};
 
 const PEER: IpEndpoint = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1)), 8443);
 const SERVER_NAME: &str = "probe.clavenar.test";
+const REQUEST: &[u8] =
+    b"GET /probe HTTP/1.1\r\nHost: probe.clavenar.test:8443\r\nConnection: close\r\n\r\n";
+const BODY: &[u8] = b"Hello from native HTTPS\n";
 const TRUST_ANCHOR: &[u8] = include_bytes!(env!("CLV_TLS_CA_DER"));
 const TIMEOUT: Duration = Duration::from_secs(5);
 const CERTIFICATE_BYTES: usize = 1024;
 const READ_RECORD_BYTES: usize = 4096;
 const WRITE_RECORD_BYTES: usize = 2048;
+
+enum Failure {
+    Tls(TlsError),
+    InvalidResponse,
+    TruncatedResponse,
+    UnexpectedBody,
+}
+
+impl From<TlsError> for Failure {
+    fn from(error: TlsError) -> Self {
+        Self::Tls(error)
+    }
+}
 
 pub(super) fn run(network: &mut Network<'_>, handle: SocketHandle, rng: Option<ChaCha20Rng>) {
     let Some(rng) = rng else {
@@ -32,32 +49,35 @@ pub(super) fn run(network: &mut Network<'_>, handle: SocketHandle, rng: Option<C
         clv::print(b"netd TLS probe clock unavailable\r\n");
         return;
     }
-    let result = handshake(network, handle, rng);
+    let result = exchange(network, handle, rng);
     if result.is_err() {
         network.sockets.get_mut::<tcp::Socket>(handle).abort();
         network.flush();
     }
     let message: &[u8] = match result {
-        Ok(()) => b"netd TLS probe authenticated probe.clavenar.test\r\n",
-        Err(
+        Ok(()) => b"netd HTTPS probe received Hello from native HTTPS\r\n",
+        Err(Failure::Tls(
             TlsError::InvalidCertificate
             | TlsError::InvalidCertificateEntry
             | TlsError::InvalidSignature,
-        ) => b"netd TLS probe certificate rejected\r\n",
-        Err(TlsError::Io(ErrorKind::TimedOut)) => b"netd TLS probe timed out\r\n",
-        Err(TlsError::Io(_) | TlsError::IoError | TlsError::ConnectionClosed) => {
+        )) => b"netd TLS probe certificate rejected\r\n",
+        Err(Failure::Tls(TlsError::Io(ErrorKind::TimedOut))) => b"netd HTTPS probe timed out\r\n",
+        Err(Failure::Tls(TlsError::Io(_) | TlsError::IoError | TlsError::ConnectionClosed)) => {
             b"netd TLS probe transport failed\r\n"
         }
-        Err(_) => b"netd TLS probe handshake failed\r\n",
+        Err(Failure::Tls(_)) => b"netd TLS probe failed\r\n",
+        Err(Failure::InvalidResponse) => b"netd HTTPS probe invalid response\r\n",
+        Err(Failure::TruncatedResponse) => b"netd HTTPS probe truncated response\r\n",
+        Err(Failure::UnexpectedBody) => b"netd HTTPS probe unexpected body\r\n",
     };
     clv::print(message);
 }
 
-fn handshake(
+fn exchange(
     network: &mut Network<'_>,
     handle: SocketHandle,
     mut rng: ChaCha20Rng,
-) -> Result<(), TlsError> {
+) -> Result<(), Failure> {
     network
         .receive(Some(Instant::ZERO))
         .ok_or(TlsError::IoError)?;
@@ -78,7 +98,7 @@ fn handshake(
         stream.wait().map_err(TlsError::Io)?;
     }
     if stream.socket().state() != tcp::State::Established {
-        return Err(TlsError::ConnectionClosed);
+        return Err(TlsError::ConnectionClosed.into());
     }
 
     let mut read_buffer = [0; READ_RECORD_BYTES];
@@ -94,13 +114,56 @@ fn handshake(
     };
     tls.open(TlsContext::new(&config, &mut provider))?;
     if provider.peer.state != Verification::Complete {
-        return Err(TlsError::InvalidCertificate);
+        return Err(TlsError::InvalidCertificate.into());
     }
+    clv::print(b"netd TLS probe authenticated probe.clavenar.test\r\n");
+    tls.write_all(REQUEST)?;
+    tls.flush()?;
+    read_response(&mut tls)?;
 
     let mut stream = tls.close().map_err(|(_, error)| error)?;
     stream.socket().close();
     stream.network.flush();
     Ok(())
+}
+
+fn read_response(
+    tls: &mut TlsConnection<'_, TcpStream<'_, '_>, Aes128GcmSha256>,
+) -> Result<(), Failure> {
+    let mut bytes = [0; RESPONSE_BYTES];
+    let mut received = 0;
+    let mut body = None;
+    loop {
+        let mut plaintext = match tls.read_buffered() {
+            Ok(plaintext) => plaintext,
+            // The TLS reader maps close_notify to ConnectionClosed and TCP EOF to IoError.
+            Err(TlsError::ConnectionClosed | TlsError::IoError) => {
+                return Err(Failure::TruncatedResponse);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let chunk = plaintext.pop_all();
+        let end = received + chunk.len();
+        bytes
+            .get_mut(received..end)
+            .ok_or(Failure::InvalidResponse)?
+            .copy_from_slice(chunk);
+        received = end;
+        if body.is_none() {
+            body = body_range(&bytes[..received]).map_err(|_| Failure::InvalidResponse)?;
+        }
+        if let Some(range) = &body
+            && received >= range.end
+        {
+            if received != range.end {
+                return Err(Failure::InvalidResponse);
+            }
+            if &bytes[range.clone()] != BODY {
+                return Err(Failure::UnexpectedBody);
+            }
+            return Ok(());
+        }
+    }
 }
 
 struct Clock;

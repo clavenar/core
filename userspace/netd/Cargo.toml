@@ -14,6 +14,7 @@ http-probe = ["dep:httparse", "dep:rand_chacha"]
 tls-probe = [
     "dep:embedded-io",
     "dep:embedded-tls",
+    "dep:httparse",
     "dep:rand_chacha",
     "dep:rustls-pki-types",
     "dep:webpki",

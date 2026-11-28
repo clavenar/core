@@ -55,9 +55,9 @@ service. It uses smoltcp at `192.0.2.2/24` on a private link to the fixture.
 | --- | --- |
 | Default | The guest answers ARP and IPv4 pings, echoes UDP on port `49152`, and echoes a TCP stream on port `49153`. [Ethernet and IP walkthrough](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net) |
 | `http-probe` | The guest sends `GET /probe` to the peer on port `8080` and checks the HTTP response. [HTTP walkthrough](docs/qemu-walkthroughs.md#fetch-an-http-response-over-native-tcp) |
-| `tls-probe` | The guest authenticates `probe.clavenar.test` on port `8443` and closes the TLS 1.3 connection. The fixture requires OpenSSL 3 and Python with TLS 1.3 support. [TLS walkthrough](docs/qemu-walkthroughs.md#authenticate-a-tls-peer-over-native-tcp) |
+| `tls-probe` | The guest authenticates `probe.clavenar.test` on port `8443`, sends `GET /probe` over TLS 1.3 and validates the HTTPS response. The fixture requires OpenSSL 3 and Python with TLS 1.3 support. [HTTPS walkthrough](docs/qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) |
 
-The TLS handshake uses a separate 32-byte seed from VirtIO RNG. `netd`
+The HTTPS probe uses a separate 32-byte seed from VirtIO RNG for TLS. `netd`
 uses the RTC-backed Unix clock to check certificate validity dates.
 [Entropy walkthrough](docs/qemu-walkthroughs.md#seed-tcp-with-virtio-rng) · [Clock walkthrough](docs/qemu-walkthroughs.md#check-the-guest-unix-clock)
 

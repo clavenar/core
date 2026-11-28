@@ -11,7 +11,7 @@ continues the previous one. Goal handles and ordinary RamFS changes live for one
   - [Fetch an HTTP response over native TCP](#fetch-an-http-response-over-native-tcp)
   - [Seed TCP with VirtIO RNG](#seed-tcp-with-virtio-rng)
   - [Check the guest Unix clock](#check-the-guest-unix-clock)
-  - [Authenticate a TLS peer over native TCP](#authenticate-a-tls-peer-over-native-tcp)
+  - [Fetch an HTTPS response over native TCP](#fetch-an-https-response-over-native-tcp)
   - [Probe a VirtIO block device](#probe-a-virtio-block-device)
   - [Recover a VirtIO block marker after reboot](#recover-a-virtio-block-marker-after-reboot)
   - [Recover a previous journal record](#recover-a-previous-journal-record)
@@ -511,7 +511,7 @@ def check_rtc():
             raise RuntimeError(f"Unexpected guest elapsed time {done - start} ns")
         print(f"Host verified RTC base {base} UTC and clock progression", flush=True)
 
-def check_tls_peer(host, guest, log, *, credentials, authenticate):
+def check_tls_peer(host, guest, log, *, credentials, case):
     name = "probe.clavenar.test"
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_3
@@ -525,9 +525,31 @@ def check_tls_peer(host, guest, log, *, credentials, authenticate):
     context.sni_callback = check_sni
     incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
     server = context.wrap_bio(incoming, outgoing, server_side=True)
-    expected = b"netd TLS probe certificate rejected"
-    if authenticate:
-        expected = f"netd TLS probe authenticated {name}\r\n".encode()
+    expected = {
+        "complete": b"netd HTTPS probe received Hello from native HTTPS",
+        "malformed": b"netd HTTPS probe invalid response",
+        "truncated": b"netd HTTPS probe truncated response",
+        "stalled": b"netd HTTPS probe timed out",
+        "wrong-body": b"netd HTTPS probe unexpected body",
+        "rejected": b"netd TLS probe certificate rejected",
+    }[case]
+    expected_request = (
+        b"GET /probe HTTP/1.1\r\n"
+        b"Host: probe.clavenar.test:8443\r\n"
+        b"Connection: close\r\n\r\n"
+    )
+    body = b"Hello from native HTTPS\n"
+    chunks = (
+        b"HTTP/1.1 200 OK\r\nContent-Len",
+        f"gth: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body[:5],
+        body[5:],
+    )
+    if case in ("truncated", "stalled"):
+        chunks = chunks[:-1]
+    elif case == "malformed":
+        chunks = (b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",)
+    elif case == "wrong-body":
+        chunks = chunks[:-1] + (body[5:].upper(),)
 
     port = 8443
     answer_guest_arp(host)
@@ -539,17 +561,18 @@ def check_tls_peer(host, guest, log, *, credentials, authenticate):
     send_tcp(host, port, server_next, guest_next, tcp_syn | tcp_ack, guest_port=guest_port)
     server_next += 1
     pending = b""
+    request = bytearray()
     completed = False
     close_notify = False
     finished = False
     deadline = monotonic() + 7
-    while expected not in log or (authenticate and not finished):
+    while expected not in log or (case == "complete" and not finished):
         ready = select([host, guest.stdout], [], [], max(0, deadline - monotonic()))[0]
         if not ready or monotonic() >= deadline:
             raise RuntimeError(f"Timed out waiting for {expected!r}")
         if host in ready:
             sequence, acknowledged, flags, data = receive_tcp(host, port, guest_port=guest_port)
-            if flags & tcp_syn or (authenticate and flags & tcp_rst) or acknowledged > server_next:
+            if flags & tcp_syn or (case == "complete" and flags & tcp_rst) or acknowledged > server_next:
                 raise RuntimeError("Unexpected TCP control or acknowledgement during TLS")
             if data or flags & tcp_fin:
                 if sequence != guest_next:
@@ -565,9 +588,20 @@ def check_tls_peer(host, guest, log, *, credentials, authenticate):
                     if not completed:
                         server.do_handshake()
                         completed = True
-                    if server.read(1):
-                        raise RuntimeError("Unexpected TLS application data")
-                    close_notify = True
+                        if case == "rejected":
+                            raise RuntimeError("The guest completed TLS with a rejected certificate")
+                    plaintext = server.read(len(expected_request) + 1)
+                    if plaintext:
+                        request.extend(plaintext)
+                        if not expected_request.startswith(request):
+                            raise RuntimeError(f"Unexpected HTTPS request {request!r}")
+                        if request == expected_request:
+                            for chunk in chunks:
+                                server.write(chunk)
+                            if case == "truncated":
+                                server.unwrap()
+                    else:
+                        close_notify = True
                 except ssl.SSLWantReadError:
                     pass
                 pending += outgoing.read()
@@ -578,8 +612,13 @@ def check_tls_peer(host, guest, log, *, credentials, authenticate):
         if guest.stdout in ready:
             log.extend(read_serial(guest))
 
-    if completed != authenticate or (completed and (server.version() != "TLSv1.3" or not close_notify)):
-        raise RuntimeError("The OpenSSL peer's TLS result differs from the guest's expected result")
+    authenticated = case != "rejected"
+    if completed != authenticated or (authenticated and server.version() != "TLSv1.3"):
+        raise RuntimeError("Unexpected TLS handshake result")
+    if request != (expected_request if authenticated else b""):
+        raise RuntimeError(f"Unexpected decrypted request bytes {request!r}")
+    if case == "complete" and not close_notify:
+        raise RuntimeError("Expected the guest to send TLS close_notify before TCP FIN")
 
 def check_tls_prerequisite(host, guest, log, *, reason):
     expected = f"netd TLS probe {reason} unavailable".encode()
@@ -632,15 +671,19 @@ def check_tls():
         def rtc(time):
             return "-rtc", f"base={time:%Y-%m-%dT%H:%M:%S},clock=vm"
 
-        for label, credentials, time, authenticate in (
-            ("valid certificate", valid, now, True),
-            ("expired certificate", valid, now + timedelta(days=3), False),
-            ("wrong certificate name", wrong_name, now, False),
-            ("untrusted CA", other_ca, now, False),
+        for label, credentials, time in (
+            ("expired certificate", valid, now + timedelta(days=3)),
+            ("wrong certificate name", wrong_name, now),
+            ("untrusted CA", other_ca, now),
         ):
             boot(target=target, extra_args=system_rng + rtc(time),
-                 verify=partial(check_tls_peer, credentials=credentials, authenticate=authenticate))
-            print(f"Host verified TLS with {label}", flush=True)
+                 verify=partial(check_tls_peer, credentials=credentials, case="rejected"))
+            print(f"Host verified TLS rejected the {label} before HTTP", flush=True)
+
+        for case in ("complete", "malformed", "truncated", "stalled", "wrong-body"):
+            boot(target=target, extra_args=system_rng + rtc(now),
+                 verify=partial(check_tls_peer, credentials=valid, case=case))
+            print(f"Host verified HTTPS response case {case}", flush=True)
 
         for reason, args in (
             ("entropy", rtc(now)),
@@ -773,7 +816,7 @@ checks the reported time and `cat /hello.txt` during the wait.
 )
 ```
 
-### Authenticate a TLS peer over native TCP
+### Fetch an HTTPS response over native TCP
 
 With `tls-probe`, `netd` connects once to `192.0.2.1:8443` using
 `probe.clavenar.test` for SNI and hostname verification. The RV64 client uses
@@ -781,8 +824,13 @@ With `tls-probe`, `netd` connects once to `192.0.2.1:8443` using
 one P-256 leaf against the configured fixture CA, checks its validity dates
 and DNS subject alternative name, and verifies the peer's TLS signature.
 A complete VirtIO RNG seed and usable Unix time are required before
-connecting. The probe uses a five-second transport deadline and sends
-`close_notify` after authentication. [WebPKI name verification](https://docs.rs/rustls-webpki/latest/webpki/struct.EndEntityCert.html#method.verify_is_valid_for_subject_name)
+connecting. After authenticating the peer, `netd` sends `GET /probe` with
+`Host: probe.clavenar.test:8443` over TLS. It accepts an HTTP/1.1 `200` response
+with one `Content-Length`, up to 32 headers and up to 1 KiB each for the
+headers and body. The response parser also serves the plain HTTP probe.
+The five-second deadline covers TCP connection setup, TLS authentication,
+the request and response, and the TLS `close_notify` sent on success.
+[WebPKI name verification](https://docs.rs/rustls-webpki/latest/webpki/struct.EndEntityCert.html#method.verify_is_valid_for_subject_name)
 
 Run this block at the Linux prompt in `core` with OpenSSL 3 and Python 3
 with TLS 1.3 support. It generates temporary P-256 credentials and builds
@@ -801,19 +849,19 @@ into `target/tls-probe`. The build takes the DER-encoded CA certificate from
 )
 ```
 
-The valid case prints `netd TLS probe authenticated probe.clavenar.test`.
-An expired leaf, a different DNS SAN with a matching common name, and an
-untrusted CA each produce `netd TLS probe certificate rejected`. The last
-two boots report `entropy unavailable` and `clock unavailable` before
-sending any frames.
-The host verifies the successful handshake and reads `/hello.txt` on each
-boot before stopping QEMU.
+The host decrypts and checks the exact GET, then splits the response
+across TLS records. The guest prints `netd HTTPS probe received Hello from native HTTPS`
+after validating the body. A duplicate content length, a short closed
+response, a stalled partial response and the wrong body produce distinct
+errors. An expired leaf, a different DNS SAN with a matching common name,
+and an untrusted CA each produce `netd TLS probe certificate rejected`
+before any GET. Missing entropy or clock causes rejection before the guest
+sends a frame. Each boot reads `/hello.txt` before the fixture stops QEMU.
 
-On Rust 1.100, the RV64 release build links a roughly 139 KiB `netd`
-read/execute segment with `tls-probe` and 154 KiB with both probe features.
-The successful TLS handshake reached about 60 KiB into the reserved 96 KiB
-stack, or 64 KiB with both features. These measurements use the lowest
-nonzero byte in the initially zeroed stack after the exchange.
+On Rust 1.100, the read/execute segment is about 145 KiB with `tls-probe`
+and 152 KiB with both probe features, within the 160 KiB limit. The lowest
+nonzero byte in the initially zeroed stack was about 63 KiB below its top
+after a successful exchange in either build. The stack reserves 96 KiB.
 
 ### Probe a VirtIO block device
 

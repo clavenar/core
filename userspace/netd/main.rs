@@ -3,6 +3,8 @@
 
 #[cfg(feature = "http-probe")]
 mod http_probe;
+#[cfg(any(feature = "http-probe", feature = "tls-probe"))]
+mod http_response;
 #[cfg(feature = "tls-probe")]
 mod tls_probe;
 
@@ -92,7 +94,7 @@ extern "C" fn _start(
     let (mut probe_rx, mut probe_tx) =
         ([0; http_probe::SOCKET_BYTES], [0; http_probe::SOCKET_BYTES]);
     #[cfg(feature = "http-probe")]
-    let mut response = [0; http_probe::RESPONSE_BYTES];
+    let mut response = [0; http_response::RESPONSE_BYTES];
     #[cfg(feature = "http-probe")]
     let mut probe = {
         let socket = tcp::Socket::new(

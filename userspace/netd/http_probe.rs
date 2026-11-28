@@ -6,14 +6,13 @@ use smoltcp::socket::tcp;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 
+use super::http_response::{RESPONSE_BYTES, body_range};
+
 const PEER: IpEndpoint = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1)), 8080);
 const FALLBACK_PORT: u16 = 49154;
 const REQUEST: &[u8] = b"GET /probe HTTP/1.1\r\nHost: 192.0.2.1:8080\r\nConnection: close\r\n\r\n";
 const BODY: &[u8] = b"Hello from native HTTP\n";
 const TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_HEAD_BYTES: usize = 1024;
-const MAX_BODY_BYTES: usize = 1024;
-pub(super) const RESPONSE_BYTES: usize = MAX_HEAD_BYTES + MAX_BODY_BYTES;
 pub(super) const SOCKET_BYTES: usize = 512;
 
 #[derive(Clone, Copy)]
@@ -165,7 +164,8 @@ impl<'a> Probe<'a> {
                 .recv_slice(&mut self.bytes[self.received..])
                 .map_err(|_| Failure::Connection)?;
             if self.body.is_none() {
-                self.body = response_body(&self.bytes[..self.received])?;
+                self.body =
+                    body_range(&self.bytes[..self.received]).map_err(|_| Failure::Invalid)?;
             }
             if let Some(body) = &self.body
                 && self.received >= body.end
@@ -203,40 +203,4 @@ fn report_unix_time(label: &[u8], unix_nanos: Option<u64>) {
     line[..label.len()].copy_from_slice(label);
     line[label.len()..end].copy_from_slice(timestamp);
     let _ = clv::write_console(&line[..end]);
-}
-
-fn response_body(bytes: &[u8]) -> Result<Option<Range<usize>>, Failure> {
-    let mut headers = [httparse::EMPTY_HEADER; 32];
-    let mut response = httparse::Response::new(&mut headers);
-    let head = &bytes[..bytes.len().min(MAX_HEAD_BYTES)];
-    let end = match response.parse(head) {
-        Ok(httparse::Status::Complete(end)) => end,
-        Ok(httparse::Status::Partial) if head.len() < MAX_HEAD_BYTES => return Ok(None),
-        _ => return Err(Failure::Invalid),
-    };
-    if response.version != Some(1) || response.code != Some(200) {
-        return Err(Failure::Invalid);
-    }
-
-    let mut length = None;
-    for header in response.headers {
-        if header.name.eq_ignore_ascii_case("Transfer-Encoding") {
-            return Err(Failure::Invalid);
-        }
-        if header.name.eq_ignore_ascii_case("Content-Length") {
-            let value = header.value.trim_ascii();
-            if length.is_some() || value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
-                return Err(Failure::Invalid);
-            }
-            length = core::str::from_utf8(value)
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .filter(|length| *length <= MAX_BODY_BYTES);
-            if length.is_none() {
-                return Err(Failure::Invalid);
-            }
-        }
-    }
-    let length = length.ok_or(Failure::Invalid)?;
-    Ok(Some(end..end + length))
 }
