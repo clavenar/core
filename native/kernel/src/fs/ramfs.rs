@@ -344,10 +344,10 @@ impl RamFs {
     }
 
     fn lookup(&self, parent: DirectoryId, name: &[u8]) -> Option<Node> {
-        if parent == DirectoryId::Root {
-            if let Some(index) = BOOT_FILES.iter().position(|file| file.name == name) {
-                return Some(Node::BootFile(index));
-            }
+        if parent == DirectoryId::Root
+            && let Some(index) = BOOT_FILES.iter().position(|file| file.name == name)
+        {
+            return Some(Node::BootFile(index));
         }
         if let Some(index) = self.directories.iter().position(|slot| {
             slot.as_ref()

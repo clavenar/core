@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "clv-abi"
-version = "0.0.17"
+version = "0.0.18"
 
 [[package]]
 name = "const-oid"

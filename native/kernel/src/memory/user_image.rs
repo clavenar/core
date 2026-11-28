@@ -44,9 +44,11 @@ pub(crate) fn load<'a>(
         return None;
     }
     let table_end = table_start.checked_add(count * PROGRAM_HEADER_SIZE)?;
-    let headers = image.get(table_start..table_end)?;
+    let (headers, _) = image
+        .get(table_start..table_end)?
+        .as_chunks::<PROGRAM_HEADER_SIZE>();
     let mut segment = None;
-    for header in headers.chunks_exact(PROGRAM_HEADER_SIZE) {
+    for header in headers {
         match u32_at(header, 0) {
             PT_NULL | PT_RISCV_ATTRIBUTES => {}
             PT_LOAD if segment.is_none() => segment = Some(load_segment(image, header, max_bytes)?),
@@ -56,7 +58,7 @@ pub(crate) fn load<'a>(
 
     let (bytes, memory_size) = segment?;
     let entry_offset = entry.checked_sub(USER_TEXT_BASE)?;
-    if entry % 2 != 0 || entry_offset.checked_add(2)? > bytes.len() {
+    if !entry.is_multiple_of(2) || entry_offset.checked_add(2)? > bytes.len() {
         return None;
     }
     let mut pages = [None; MAX_USER_IMAGE_PAGES];
@@ -71,14 +73,18 @@ pub(crate) fn load<'a>(
     Some(LoadedImage { entry, pages })
 }
 
-fn load_segment<'a>(image: &'a [u8], header: &[u8], max_bytes: usize) -> Option<(&'a [u8], usize)> {
+fn load_segment<'a>(
+    image: &'a [u8],
+    header: &[u8; PROGRAM_HEADER_SIZE],
+    max_bytes: usize,
+) -> Option<(&'a [u8], usize)> {
     let offset = usize_at(header, 8);
     let file_size = usize_at(header, 32);
     let memory_size = usize_at(header, 40);
     if u32_at(header, 4) != PF_READ_EXECUTE
         || usize_at(header, 16) != USER_TEXT_BASE
         || usize_at(header, 48) != FRAME_SIZE
-        || offset % FRAME_SIZE != 0
+        || !offset.is_multiple_of(FRAME_SIZE)
         || file_size == 0
         || file_size > memory_size
         || memory_size > max_bytes.min(NETD_IMAGE_MAX_BYTES)

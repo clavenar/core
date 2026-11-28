@@ -42,9 +42,11 @@ pub(crate) struct FrameAllocator<'a> {
 impl FrameAllocator<'static> {
     /// The boot hart must call this exactly once, with no other pool access.
     pub(crate) unsafe fn from_boot_pool() -> Self {
+        let frames = &raw mut BOOT_FRAMES;
         // SAFETY: The caller gives this allocator exclusive access to the pool.
-        let frames = unsafe { &mut *(&raw mut BOOT_FRAMES) };
-        Self { remaining: frames }
+        Self {
+            remaining: unsafe { &mut *frames },
+        }
     }
 }
 

@@ -126,8 +126,9 @@ pub fn write_console(bytes: &[u8]) -> Option<usize> {
     ))
 }
 
+/// Stage short messages in one write so other tasks cannot split a diagnostic.
 pub fn print(text: &[u8]) {
-    let mut buffer = [0; 32];
+    let mut buffer = [0; clv_abi::CONSOLE_WRITE_MAX_BYTES];
     for chunk in text.chunks(buffer.len()) {
         let bytes = &mut buffer[..chunk.len()];
         bytes.copy_from_slice(chunk);

@@ -1,6 +1,6 @@
-use clv::mcp::{self, FRAME_BYTES, Frame};
+mod mcp;
+
 use clv::net::{self, HTTPS_PROBE_BODY, HttpsRequest, HttpsStatus};
-use core::fmt::Write as _;
 use core::ops::Range;
 use embedded_io::{ErrorKind, ErrorType, Read, Write};
 use embedded_tls::blocking::{
@@ -153,60 +153,9 @@ fn exchange(
         HttpsRequest::Probe => https
             .request(PROBE_REQUEST, b"", ExpectedResponse::Ok, &mut response)
             .map(|_| ()),
-        HttpsRequest::McpInit => mcp_initialize(&mut https, &mut response),
-        HttpsRequest::McpList => {
-            mcp_initialize(&mut https, &mut response)?;
-            mcp_list(&mut https, &mut response)
-        }
+        HttpsRequest::McpInit => mcp::initialize(&mut https, &mut response),
+        HttpsRequest::McpList => mcp::discover(&mut https, &mut response),
     }
-}
-
-fn mcp_initialize(
-    https: &mut HttpsConnection<'_, '_>,
-    response: &mut [u8; RESPONSE_BYTES],
-) -> Result<(), Failure> {
-    let mut buffer = [0; FRAME_BYTES];
-    let mut initialize = Frame::new(&mut buffer);
-    write!(
-        initialize,
-        concat!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"{}","#,
-            r#""capabilities":{{}},"clientInfo":{{"name":"clavenar-netd","version":"1"}}}}}}"#
-        ),
-        mcp::VERSION
-    )
-    .map_err(|_| Failure::InvalidResponse)?;
-    let result = https.post(
-        initialize.into_bytes(),
-        None,
-        ExpectedResponse::McpJson,
-        response,
-    )?;
-    if !mcp::result(result, "1").is_some_and(mcp::accepts_initialize) {
-        return Err(Failure::InvalidResponse);
-    }
-    https.post(
-        br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-        Some(mcp::VERSION),
-        ExpectedResponse::McpAccepted,
-        response,
-    )?;
-    Ok(())
-}
-
-fn mcp_list(
-    https: &mut HttpsConnection<'_, '_>,
-    response: &mut [u8; RESPONSE_BYTES],
-) -> Result<(), Failure> {
-    let body = https.post(
-        br#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-        Some(mcp::VERSION),
-        ExpectedResponse::McpJson,
-        response,
-    )?;
-    mcp::result(body, "2")
-        .and_then(mcp::validate_search_list)
-        .ok_or(Failure::InvalidResponse)
 }
 
 struct HttpsConnection<'a, 's> {
@@ -219,30 +168,6 @@ struct HttpsConnection<'a, 's> {
 }
 
 impl HttpsConnection<'_, '_> {
-    fn post<'a>(
-        &mut self,
-        body: &[u8],
-        protocol_version: Option<&str>,
-        expected: ExpectedResponse,
-        response: &'a mut [u8; RESPONSE_BYTES],
-    ) -> Result<&'a [u8], Failure> {
-        let mut buffer = [0; FRAME_BYTES];
-        let mut header = Frame::new(&mut buffer);
-        let mut write_header = || {
-            header.write_str(concat!(
-                "POST /mcp HTTP/1.1\r\nHost: probe.clavenar.test:8443\r\n",
-                "Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n",
-                "Connection: close\r\n"
-            ))?;
-            if let Some(version) = protocol_version {
-                write!(header, "MCP-Protocol-Version: {version}\r\n")?;
-            }
-            write!(header, "Content-Length: {}\r\n\r\n", body.len())
-        };
-        write_header().map_err(|_| Failure::InvalidResponse)?;
-        self.request(header.into_bytes(), body, expected, response)
-    }
-
     fn request<'a>(
         &mut self,
         header: &[u8],

@@ -27,13 +27,15 @@ impl Scheduler {
         kind: HttpsRequest,
         network_available: bool,
     ) -> Result<usize, HttpsStatus> {
-        let (goal, member, _) = self.current_agent_member().ok_or(HttpsStatus::Denied)?;
-        let available = match kind {
-            HttpsRequest::Probe => goal.https_available,
-            HttpsRequest::McpInit => goal.mcp_init_available,
-            HttpsRequest::McpList => goal.mcp_list_available,
+        let (_, member, _) = self.current_agent_member().ok_or(HttpsStatus::Denied)?;
+        let launch = member.handle;
+        let goal = self.goal.as_mut().ok_or(HttpsStatus::Denied)?;
+        let grant = match kind {
+            HttpsRequest::Probe => &mut goal.https_available,
+            HttpsRequest::McpInit => &mut goal.mcp_init_available,
+            HttpsRequest::McpList => &mut goal.mcp_list_available,
         };
-        if !available {
+        if !*grant {
             return Err(HttpsStatus::Denied);
         }
         let now = monotonic_nanos();
@@ -50,7 +52,6 @@ impl Scheduler {
         {
             return Err(HttpsStatus::Unavailable);
         }
-        let (goal, launch) = (goal.handle, member.handle);
         let id = match kind {
             HttpsRequest::Probe => launch,
             HttpsRequest::McpInit | HttpsRequest::McpList => {
@@ -60,19 +61,14 @@ impl Scheduler {
             }
         };
         self.https = Some(HttpsExchange {
-            goal,
+            goal: goal.handle,
             launch,
             id,
             kind,
             deadline,
             phase: Phase::Queued,
         });
-        let goal = self.goal.as_mut().unwrap();
-        match kind {
-            HttpsRequest::Probe => goal.https_available = false,
-            HttpsRequest::McpInit => goal.mcp_init_available = false,
-            HttpsRequest::McpList => goal.mcp_list_available = false,
-        }
+        *grant = false;
         self.wake_netd(true, false);
         Ok(id)
     }

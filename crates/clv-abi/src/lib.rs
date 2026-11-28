@@ -241,6 +241,8 @@ pub enum GrantKind {
     RenamePair = 3,
 }
 
+/// Maximum length of a single `SYS_WRITE_CONSOLE` call.
+pub const CONSOLE_WRITE_MAX_BYTES: usize = 128;
 pub const PATH_MAX_BYTES: usize = 64;
 pub const MESSAGE_MAX_BYTES: usize = 64;
 pub const PIPE_CAPACITY: usize = 32;

@@ -11,6 +11,10 @@ use crate::pipe;
 
 pub const VERSION: &str = "2025-11-25";
 pub const SEARCH_TOOL: &str = "text.search";
+pub const INITIALIZED_NOTIFICATION: &str =
+    r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+pub const LIST_TOOLS_REQUEST: &str =
+    r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
 
 // Includes the newline. A 64-byte result can occupy 384 escaped bytes.
 pub const FRAME_BYTES: usize = 576;
@@ -114,6 +118,16 @@ impl<'a> Frame<'a> {
 
     pub fn into_bytes(self) -> &'a [u8] {
         &self.buffer[..self.length]
+    }
+
+    pub fn initialize_request(&mut self, client_name: &str) -> fmt::Result {
+        self.write_str(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"#,
+        )?;
+        self.string(VERSION)?;
+        self.write_str(r#","capabilities":{},"clientInfo":{"name":"#)?;
+        self.string(client_name)?;
+        self.write_str(r#","version":"1"}}}"#)
     }
 
     fn append(&mut self, bytes: &[u8]) -> fmt::Result {

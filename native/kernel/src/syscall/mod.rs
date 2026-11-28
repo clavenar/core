@@ -51,10 +51,9 @@ use crate::ipc::pipe::PipeResult;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::usercopy::UserStack;
 use crate::scheduler::{
-    DelegationTarget, LaunchScope, Mailbox, ReceiveResult, Scheduler, WaitResult,
+    AgentRunOptions, DelegationTarget, LaunchScope, Mailbox, ReceiveResult, Scheduler, WaitResult,
 };
 
-const CONSOLE_WRITE_LIMIT: usize = 128;
 const REG_A0: usize = 10;
 const REG_A1: usize = 11;
 const REG_A2: usize = 12;
@@ -341,15 +340,24 @@ pub(crate) fn dispatch(
                 fs,
                 a0,
                 a1,
-                number == SYS_AGENT_RUN_SUSPENDED,
-                None,
-                None,
-                false,
+                AgentRunOptions {
+                    suspended: number == SYS_AGENT_RUN_SUSPENDED,
+                    ..Default::default()
+                },
             ),
         ),
         SYS_AGENT_RUN_WITH_REPLY_BUDGET if a3 <= 1 => write_agent_launch(
             frame,
-            scheduler.run_agent(fs, a0, a1, a3 == 1, Some(a2), None, false),
+            scheduler.run_agent(
+                fs,
+                a0,
+                a1,
+                AgentRunOptions {
+                    suspended: a3 == 1,
+                    reply_bytes: Some(a2),
+                    ..Default::default()
+                },
+            ),
         ),
         SYS_AGENT_RUN_WITH_REQUEST => {
             let kind = match a2 & !(RUN_SUSPENDED | RUN_REPLY_LIMIT | RUN_CHECKPOINT) {
@@ -386,10 +394,12 @@ pub(crate) fn dispatch(
                         fs,
                         a0,
                         a1,
-                        a2 & RUN_SUSPENDED != 0,
-                        (a2 & RUN_REPLY_LIMIT != 0).then_some(a3),
-                        Some(request),
-                        a2 & RUN_CHECKPOINT != 0,
+                        AgentRunOptions {
+                            suspended: a2 & RUN_SUSPENDED != 0,
+                            reply_bytes: (a2 & RUN_REPLY_LIMIT != 0).then_some(a3),
+                            request: Some(request),
+                            checkpoint: a2 & RUN_CHECKPOINT != 0,
+                        },
                     )
                 });
             write_agent_launch(frame, launch)
@@ -775,7 +785,7 @@ fn write_file(
 }
 
 fn write_console(stack: UserStack, address: usize, length: usize) -> usize {
-    let mut buffer = [0; CONSOLE_WRITE_LIMIT];
+    let mut buffer = [0; clv_abi::CONSOLE_WRITE_MAX_BYTES];
     let Some(bytes) = buffer.get_mut(..length) else {
         return SYSCALL_ERROR;
     };

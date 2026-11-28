@@ -442,7 +442,7 @@ impl Scheduler {
             .ok_or(BridgeFailure::Unavailable)?;
         let pin = binding
             .definition
-            .and_then(|definition| DefinitionPin::decode(definition))
+            .and_then(DefinitionPin::decode)
             .ok_or(BridgeFailure::Unavailable)?;
         let launch = member.handle;
         let combined = pin.id == FIND_GREETING_V8;

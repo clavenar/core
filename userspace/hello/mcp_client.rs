@@ -34,20 +34,18 @@ fn exchange(
     matches: &mut [u8; MESSAGE_MAX_BYTES],
 ) -> Option<usize> {
     let pattern = core::str::from_utf8(pattern).ok()?;
-    let initialize = request(stream, frame, "1", "initialize", |frame| {
-        frame.write_str(r#"{"protocolVersion":"#)?;
-        frame.string(mcp::VERSION)?;
-        frame.write_str(r#","capabilities":{},"clientInfo":{"name":"hello","version":"1"}}"#)
+    let initialize = request(stream, frame, "1", |frame| {
+        frame.initialize_request("hello")
     })?;
     if !mcp::accepts_initialize(initialize) {
         return None;
     }
     stream.send(frame, |frame| {
-        frame.write_str(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+        frame.write_str(mcp::INITIALIZED_NOTIFICATION)
     })?;
 
-    let list = request(stream, frame, "2", "tools/list", |frame| {
-        frame.write_str("{}")
+    let list = request(stream, frame, "2", |frame| {
+        frame.write_str(mcp::LIST_TOOLS_REQUEST)
     })?;
     let [kind, properties, required, additional] = mcp::search_tool_schema(list)?.fields([
         b"type",
@@ -66,12 +64,12 @@ fn exchange(
         return None;
     }
 
-    let result = request(stream, frame, "3", "tools/call", |frame| {
-        frame.write_str(r#"{"name":"#)?;
+    let result = request(stream, frame, "3", |frame| {
+        frame.write_str(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"#)?;
         frame.string(mcp::SEARCH_TOOL)?;
         frame.write_str(r#","arguments":{"pattern":"#)?;
         frame.string(pattern)?;
-        frame.write_str("}}")
+        frame.write_str("}}}")
     })?;
     let [content, is_error] = result.fields([b"content", b"isError"])?;
     if let Some(is_error) = is_error
@@ -90,16 +88,8 @@ fn request<'a>(
     stream: &mut Stdio,
     buffer: &'a mut [u8; FRAME_BYTES],
     id: &str,
-    method: &str,
-    params: impl FnOnce(&mut Frame<'_>) -> fmt::Result,
+    message: impl FnOnce(&mut Frame<'_>) -> fmt::Result,
 ) -> Option<Value<'a>> {
-    stream.send(buffer, |frame| {
-        write!(
-            frame,
-            r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":"#
-        )?;
-        params(frame)?;
-        frame.write_char('}')
-    })?;
+    stream.send(buffer, message)?;
     mcp::result(stream.receive(buffer)??, id)
 }

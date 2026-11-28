@@ -89,8 +89,9 @@ pub(crate) unsafe fn start(
     unix_time_offset: i64,
     after_paging: impl FnOnce(&mut Scheduler, &mut RamFs),
 ) -> ! {
+    let state = &raw mut KERNEL_STATE;
     // SAFETY: No user task has run, and only this hart accesses the state.
-    let state = unsafe { &mut *(&raw mut KERNEL_STATE) };
+    let state = unsafe { &mut *state };
     state.nic = nic;
     let scheduler = state
         .scheduler
@@ -122,9 +123,10 @@ pub(crate) unsafe fn start(
 // SAFETY: The trap stub uses this unique symbol with the RISC-V C ABI.
 #[unsafe(no_mangle)]
 extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: usize) {
+    let state = &raw mut KERNEL_STATE;
     // SAFETY: On the single boot hart this handler runs with supervisor
     // interrupts disabled. Supervisor traps take the fatal path instead.
-    let state = unsafe { &mut *(&raw mut KERNEL_STATE) };
+    let state = unsafe { &mut *state };
     let scheduler = state
         .scheduler
         .as_mut()

@@ -93,7 +93,8 @@ impl GreetingCheckpoint {
         bytes[0] = tag;
         bytes[1..1 + PIN_BYTES].copy_from_slice(&self.definition);
         let (budget, reply) = bytes[1 + PIN_BYTES..].split_at_mut(BUDGET_BYTES);
-        for (field, value) in budget.chunks_exact_mut(8).zip([
+        let (fields, _) = budget.as_chunks_mut::<8>();
+        for (field, value) in fields.iter_mut().zip([
             self.read_limit,
             self.read_spent,
             self.reply_limit,

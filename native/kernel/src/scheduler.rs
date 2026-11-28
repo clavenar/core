@@ -122,6 +122,14 @@ struct PreparedLaunch {
     grant: Option<LaunchGrant>,
 }
 
+#[derive(Default)]
+pub(crate) struct AgentRunOptions {
+    pub(crate) suspended: bool,
+    pub(crate) reply_bytes: Option<usize>,
+    pub(crate) request: Option<Message>,
+    pub(crate) checkpoint: bool,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum LaunchScope {
     Plain,
@@ -370,15 +378,17 @@ impl Scheduler {
         fs: &mut RamFs,
         goal: usize,
         program: usize,
-        suspended: bool,
-        reply_bytes: Option<usize>,
-        request: Option<Message>,
-        checkpoint: bool,
+        options: AgentRunOptions,
     ) -> Option<AgentLaunch> {
         let agent = self.next_handle;
-        let binding = AgentBinding::resolve(agent, program, request.as_ref())?;
-        let checkpoint = if checkpoint {
-            Some(self.check_checkpoint_launch(goal, binding, reply_bytes, suspended)?)
+        let binding = AgentBinding::resolve(agent, program, options.request.as_ref())?;
+        let checkpoint = if options.checkpoint {
+            Some(self.check_checkpoint_launch(
+                goal,
+                binding,
+                options.reply_bytes,
+                options.suspended,
+            )?)
         } else {
             None
         };
@@ -388,11 +398,11 @@ impl Scheduler {
             program,
             LaunchScope::Goal {
                 handle: goal,
-                reply_bytes,
+                reply_bytes: options.reply_bytes,
             },
-            request,
+            options.request,
             Some(binding),
-            TaskState::for_agent(suspended || await_receipt),
+            TaskState::for_agent(options.suspended || await_receipt),
         )?;
         if checkpoint.is_some() {
             self.arm_checkpoint(child);

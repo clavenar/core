@@ -51,6 +51,13 @@ command reference. Press `Ctrl+a`, then `x`, to quit QEMU.
 The quickstart boots with `-nic none`. The network walkthroughs attach a
 modern VirtIO-net device and start `netd`, the guest's user-space network
 service. It uses smoltcp at `192.0.2.2/24` on a private link to the fixture.
+From the Linux prompt in `core`, run the Ethernet walkthrough with the
+command below. It builds the kernel, boots QEMU and closes each VM after
+checking its output. Use `--help` to see the other walkthroughs.
+
+```sh
+python3 platforms/qemu-riscv64-virt/network_fixture.py
+```
 
 | Kernel build | What to observe |
 | --- | --- |

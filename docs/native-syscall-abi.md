@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements the 78 calls defined by `clv-abi` 0.0.17,
+The RV64 prototype implements the 78 calls defined by `clv-abi` 0.0.18,
 numbered from 0 through 77.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
@@ -41,7 +41,8 @@ Call 2 writes to the console. It takes a user stack address in `a0` and a byte
 count in `a1`. The kernel accepts up to 128 bytes, copies the full range before
 writing, and returns the byte count in `a0`. An empty write returns 0. An
 oversized write or a range outside the user stack returns -1 without output.
-The hello program uses this call to print `Hello from user mode`.
+The `libclv` print helper uses the same 128-byte limit. A diagnostic that
+fits in one write stays together when another task prints to the console.
 
 Call 4 polls the console. It returns one UART byte in `a0` when input is ready
 and -1 otherwise. At the `clsh>` prompt, type `help` to see the available
@@ -336,10 +337,11 @@ The kernel retains the MMIO and DMA mappings in supervisor memory.
 
 Frame operations use Ethernet bytes without a VirtIO header or FCS. An empty
 receive queue or a busy transmitter parks the service until the timer observes
-readiness or the receive deadline elapses. A ready frame takes precedence over
-an elapsed deadline. When another runnable task is unavailable, the call
-returns zero and the service can retry. Each successful receive returns the
-current time, including a zero-length result. Invalid arguments, ordinary
+readiness or the applicable deadline elapses. When the kernel polls the NIC,
+it delivers a ready frame before checking the receive deadline in `a3`.
+If no other task can run, the call returns zero and the service can retry.
+Each successful receive returns the current time, including a zero-length
+result. Invalid arguments, ordinary
 tasks and unavailable devices return -1. A queue failure or transmit timeout
 stops the device path and wakes a pending service call with an error.
 Since kernel 0.0.92, operation 2 reads the RTC-backed clock without accessing
@@ -373,9 +375,12 @@ timeout if an otherwise live request completes after its deadline.
 
 For frame I/O during the exchange, `netd` puts the request ID in `a4`.
 The kernel checks it before accessing the device, including when a parked
-call retries. Set `a4` to zero for ordinary `netd` traffic. A queued
-request wakes an ordinary receive with a zero-length result. Cancelling
-or stopping the submitting launch releases the request and wakes `netd`
+call retries. At the operation deadline a scoped receive returns zero, even
+with a ready frame, and a scoped transmit returns -1. A stale request ID
+returns -1 for either operation. Set `a4` to zero for ordinary `netd`
+traffic. A queued request wakes an ordinary receive with a zero-length
+result before the kernel polls the NIC. Cancelling or stopping the
+submitting launch releases the request and wakes `netd`
 to discard its DNS and TCP state.
 
 `netd` checks the resolved address before connecting and verifies TLS
@@ -385,8 +390,8 @@ and `notifications/initialized` POSTs. Tool discovery continues with
 After validation, the agent returns the GET's 24-byte body, the 16-byte
 MCP acknowledgment, or the 12-byte tool name including its newline as
 `Matches`. Failed operations send `HttpsFailed`, `McpInitFailed`, or
-`McpListFailed` with the status byte. All replies consume the agent's
-existing reply-byte allowance.
+`McpListFailed` with the status byte. Queuing a reply spends its payload
+length from the agent's reply-byte allowance.
 [HTTPS GET](qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) · [MCP initialization](qemu-walkthroughs.md#initialize-mcp-over-native-https) · [MCP tool discovery](qemu-walkthroughs.md#discover-the-mcp-search-tool-over-native-https)
 
 ## Goal and agent calls
