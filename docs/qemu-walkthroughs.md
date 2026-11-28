@@ -113,6 +113,7 @@ shell and stops the VM after the checks. [QEMU datagram backend options](https:/
 
 ```sh
 python3 - <<'PY'
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import os
 import re
@@ -129,7 +130,7 @@ guest_ip = inet_aton("192.0.2.2")
 host_ip = inet_aton("192.0.2.1")
 udp_echo_port = 49152
 tcp_echo_port = 49153
-probe_port = 49154
+fallback_probe_port = 49154
 http_port = 8080
 tcp_fin, tcp_syn, tcp_rst, tcp_ack = 0x01, 0x02, 0x04, 0x10
 prompt = b"\x1b[32mclsh> \x1b[0m"
@@ -207,17 +208,23 @@ def send_tcp(host, port, sequence, acknowledgement, flags, payload=b"", window=4
     value = transport_checksum(6, host_ip, guest_ip, segment)
     send_ipv4(host, 6, sequence & 0xffff, segment[:16] + pack("!H", value) + segment[18:])
 
-def receive_tcp(host, port, *, guest_port=tcp_echo_port):
+def read_tcp_segment(host, port):
     segment = receive_ipv4(host, 6)
     if len(segment) < 20 or transport_checksum(6, guest_ip, host_ip, segment) != 0:
         raise RuntimeError("Invalid TCP segment or checksum")
     source, destination, sequence, acknowledgement, offset, flags, _, _, _ = unpack(
         "!HHIIBBHHH", segment[:20])
     header_length = (offset >> 4) * 4
-    if (source, destination) != (guest_port, port) or not 20 <= header_length <= len(segment):
+    if destination != port or not 20 <= header_length <= len(segment):
         raise RuntimeError("Invalid TCP ports or header length")
     control = flags & (tcp_syn | tcp_ack | tcp_fin | tcp_rst)
-    return sequence, acknowledgement, control, segment[header_length:]
+    return source, (sequence, acknowledgement, control, segment[header_length:])
+
+def receive_tcp(host, port, *, guest_port=tcp_echo_port):
+    source, segment = read_tcp_segment(host, port)
+    if source != guest_port:
+        raise RuntimeError("Unexpected TCP source port")
+    return segment
 
 def check_tcp(host, guest):
     port = 50010
@@ -265,9 +272,10 @@ def answer_guest_arp(host):
 
 def check_http(host, guest, case, response_delay):
     answer_guest_arp(host)
-    initial_sequence, _, flags, data = receive_tcp(host, http_port, guest_port=probe_port)
+    probe_port, (initial_sequence, _, flags, data) = read_tcp_segment(host, http_port)
     if (flags, data) != (tcp_syn, b""):
         raise RuntimeError("Expected the guest to initiate TCP to port 8080")
+    connection = (initial_sequence, probe_port)
     guest_sequence = (initial_sequence + 1) & 0xffffffff
     server_sequence = 0x76543210
     send_tcp(host, http_port, server_sequence, guest_sequence, tcp_syn | tcp_ack,
@@ -289,7 +297,7 @@ def check_http(host, guest, case, response_delay):
         send_tcp(host, http_port, server_sequence, guest_sequence, tcp_ack, guest_port=probe_port)
     if case == "silent":
         log = wait_for_serial(guest, b"netd HTTP probe timed out", timeout=8)
-        return initial_sequence, log
+        return connection, log
     log = b""
     if response_delay:
         log = check_shell(guest)
@@ -316,7 +324,7 @@ def check_http(host, guest, case, response_delay):
 
     if case == "truncated":
         log += wait_for_serial(guest, b"netd HTTP probe truncated response")
-        return initial_sequence, log
+        return connection, log
     reply = receive_tcp(host, http_port, guest_port=probe_port)
     if reply == (guest_sequence, server_sequence, tcp_ack, b""):
         reply = receive_tcp(host, http_port, guest_port=probe_port)
@@ -325,7 +333,7 @@ def check_http(host, guest, case, response_delay):
     send_tcp(host, http_port, server_sequence, (guest_sequence + 1) & 0xffffffff,
              tcp_ack, guest_port=probe_port)
     log += wait_for_serial(guest, b"netd HTTP probe received Hello from native HTTP")
-    return initial_sequence, log
+    return connection, log
 
 def wait_for_serial(guest, expected, timeout=5):
     serial = bytearray()
@@ -376,9 +384,9 @@ def boot(exercise_network=False, *, http_case=None, response_delay=0, extra_args
                 raise RuntimeError("VirtIO-net did not report the configured MAC")
             host.settimeout(2)
             boot_log += check_shell(guest)
-            sequence = None
+            connection = None
             if http_case is not None:
-                sequence, http_log = check_http(host, guest, http_case, response_delay)
+                connection, http_log = check_http(host, guest, http_case, response_delay)
                 boot_log += http_log + check_shell(guest)
             elif exercise_network:
                 request = ethernet_frame(guest_mac, host_mac, 0x88b5, b"CLVNET01")
@@ -398,37 +406,76 @@ def boot(exercise_network=False, *, http_case=None, response_delay=0, extra_args
                     check_shell(guest)
                 check_tcp(host, guest)
             print()
-            return boot_log, sequence
+            return boot_log, connection
         finally:
             guest.terminate()
             guest.wait(timeout=5)
 
+def boot_with_entropy(chunks, quota):
+    peer, source = socketpair(type=SOCK_STREAM)
+    with peer, source, ThreadPoolExecutor(max_workers=1) as workers:
+        peer.settimeout(2)
+
+        def supply():
+            for chunk in chunks:
+                request = bytearray()
+                while len(request) < 2:
+                    data = peer.recv(2 - len(request))
+                    if not data:
+                        raise RuntimeError("QEMU closed the entropy backend")
+                    request.extend(data)
+                if request != bytes([2, len(chunk)]):
+                    raise RuntimeError(f"Unexpected entropy request {request.hex()}")
+                peer.sendall(chunk)
+
+        pending = workers.submit(supply)
+        fd = source.fileno()
+        args = (
+            "-chardev", f"socket,id=rng-source,fd={fd}",
+            "-object", "rng-egd,id=rng0,chardev=rng-source",
+            "-device", f"virtio-rng-device,rng=rng0,max-bytes={quota},period=40",
+        )
+        result = boot(http_case="complete", extra_args=args, extra_fds=(fd,))
+        pending.result()
+        return result
+
 def check_rng():
+    ready = b"netd crypto entropy ready"
+    unavailable = b"netd crypto entropy unavailable"
     device = ("-device", "virtio-rng-device,rng=rng0")
     system_rng = ("-object", "rng-random,id=rng0,filename=/dev/urandom")
     sequences = []
     for _ in range(2):
-        log, sequence = boot(http_case="complete", extra_args=system_rng + device)
-        if b"virtio rng ready" not in log:
-            raise RuntimeError("The entropy device did not supply a boot seed")
+        log, (sequence, port) = boot(http_case="complete", extra_args=system_rng + device)
+        if b"virtio rng ready" not in log or ready not in log or port < 57344:
+            raise RuntimeError("The entropy device did not supply both boot seeds")
         sequences.append(sequence)
     if sequences[0] == sequences[1]:
         raise RuntimeError("The two seeded boots had the same TCP SYN sequence")
 
     log, absent = boot(http_case="complete")
-    if b"virtio rng" in log:
-        raise RuntimeError("Expected a boot with no entropy device")
-    peer, source = socketpair(type=SOCK_STREAM)
-    with peer, source:
-        fd = source.fileno()
-        stalled_rng = (
-            "-chardev", f"socket,id=rng-source,fd={fd}",
-            "-object", "rng-egd,id=rng0,chardev=rng-source",
-        )
-        log, stalled = boot(http_case="complete", extra_args=stalled_rng + device, extra_fds=(fd,))
-    if b"virtio rng timed out" not in log or stalled != absent:
-        raise RuntimeError("The stalled entropy device did not fall back to the prototype seed")
+    if b"virtio rng" in log or unavailable not in log or absent[1] != fallback_probe_port:
+        raise RuntimeError("Expected the fallback when the entropy device is absent")
+    log, stalled = boot_with_entropy((), 40)
+    if b"virtio rng timed out" not in log or unavailable not in log or stalled != absent:
+        raise RuntimeError("Expected the fallback when the entropy device stalls")
+
+    transport = bytes.fromhex("92 31 4f 0a 12 51 d9 b3")
+    crypto = bytes(range(32))
+    chunks = (transport, *(crypto[index:index + 8] for index in range(0, 32, 8)))
+    full_log, full = boot_with_entropy((transport, crypto), 40)
+    split_log, split = boot_with_entropy(chunks, 8)
+    # The first ChaCha20 word for this test key, with counter and nonce zero.
+    expected_port = 0xe000 | (0x7d2bfd39 & 0x1fff)
+    if ready not in full_log or ready not in split_log or full[1] != expected_port or full != split:
+        raise RuntimeError("Short entropy reads did not reproduce the expected seeded connection")
+
+    log, partial = boot_with_entropy(chunks[:2], 8)
+    if (b"virtio rng ready" not in log or unavailable not in log or
+            partial != (full[0], fallback_probe_port)):
+        raise RuntimeError("An incomplete cryptographic seed affected the connection fallback")
     print("Host verified TCP seeding and fallback with VirtIO RNG", flush=True)
+    print("Host verified complete, split and incomplete cryptographic seed reads", flush=True)
 
 def check_rtc():
     nanos_per_second = 1_000_000_000
@@ -509,12 +556,18 @@ VirtIO entropy device. It accumulates short reads within the 500 ms boot
 deadline, resets the device and passes the seed to `netd`. The seed
 initializes smoltcp's transport randomness. The prototype uses seed zero
 when the device is absent or the probe fails.
+The `http-probe` build also requests a separate 32-byte sample in the
+same deadline. It seeds `ChaCha20Rng` with a complete sample and uses
+its output to choose a source port from 57344–65535. When that sample is
+unavailable, the HTTP probe uses port 49154.
 [VirtIO entropy device specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
 
 Run this at the Linux prompt in `core`. The first two boots use the host
-OS RNG and compare the outgoing TCP SYN sequence numbers. Two further
-boots omit the device and stall its backend. Each checks the native HTTP
-response and reads `/hello.txt`. [QEMU RNG backends](https://www.qemu.org/docs/master/system/invocation.html)
+OS RNG and compare the outgoing TCP SYN sequence numbers. The fixture
+then checks the absent and stalled device paths, supplies a known seed
+in full and split reads, and withholds the rest of an incomplete sample.
+Each boot checks the native HTTP response and reads `/hello.txt`.
+[QEMU RNG backends](https://www.qemu.org/docs/master/system/invocation.html)
 
 ```bash
 (

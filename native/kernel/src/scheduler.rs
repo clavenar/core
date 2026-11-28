@@ -9,7 +9,7 @@ use self::pipe::LaunchPipes;
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
 use clv_abi::goal::GoalMonitorKind;
-use clv_abi::net::FrameOperation;
+use clv_abi::net::{CRYPTO_SEED_BYTES, CRYPTO_SEED_PRESENT, FrameOperation};
 use clv_abi::{
     ChildEvent, CompletionKind, GrantKind, LaunchParent, Program, ReplyKind, RequestKind,
     TaskCompletion,
@@ -233,12 +233,28 @@ impl Scheduler {
         self.host_bridge = port.map(HostBridge::new);
     }
 
-    pub(crate) fn start_netd(&mut self, mac: [u8; 6], seed: u64, unix_time_offset: i64) {
+    pub(crate) fn start_netd(
+        &mut self,
+        mac: [u8; 6],
+        seed: u64,
+        unix_time_offset: i64,
+        crypto_seed: Option<[u8; CRYPTO_SEED_BYTES]>,
+    ) {
         let [a, b, c, d, e, f] = mac;
-        let mac = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]) as usize;
+        let mut mac = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
         let task = &mut self.tasks[NETD_TASK_INDEX];
+        if let Some(seed) = crypto_seed {
+            mac |= CRYPTO_SEED_PRESENT;
+            // Slot 14 is a4. The four words extend the three existing startup arguments.
+            for (register, word) in task.frame.registers[14..18]
+                .iter_mut()
+                .zip(seed.as_chunks::<8>().0)
+            {
+                *register = u64::from_le_bytes(*word) as usize;
+            }
+        }
         task.frame
-            .set_startup_args(mac, seed as usize, unix_time_offset as usize);
+            .set_startup_args(mac as usize, seed as usize, unix_time_offset as usize);
         task.state = TaskState::Runnable;
     }
 

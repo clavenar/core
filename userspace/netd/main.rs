@@ -34,7 +34,16 @@ const PROBE_REPLY: &[u8; 8] = b"CLVNET02";
 // SAFETY: The kernel enters this unique symbol with an aligned user stack.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
-extern "C" fn _start(_task: usize, packed_mac: usize, seed: u64, _unix_time_offset: i64) -> ! {
+extern "C" fn _start(
+    _task: usize,
+    packed_mac: usize,
+    seed: u64,
+    _unix_time_offset: i64,
+    _crypto_word0: u64,
+    _crypto_word1: u64,
+    _crypto_word2: u64,
+    _crypto_word3: u64,
+) -> ! {
     let [a, b, c, d, e, f, _, _] = (packed_mac as u64).to_le_bytes();
     let mac = [a, b, c, d, e, f];
     let request = probe_frame(mac, PROBE_PEER, PROBE_REQUEST);
@@ -79,7 +88,11 @@ extern "C" fn _start(_task: usize, packed_mac: usize, seed: u64, _unix_time_offs
             tcp::SocketBuffer::new(&mut probe_rx[..]),
             tcp::SocketBuffer::new(&mut probe_tx[..]),
         );
-        http_probe::Probe::new(sockets.add(socket), &mut response)
+        let seed = net::crypto_seed(
+            packed_mac as u64,
+            [_crypto_word0, _crypto_word1, _crypto_word2, _crypto_word3],
+        );
+        http_probe::Probe::new(sockets.add(socket), &mut response, seed)
     };
 
     clv::print(b"netd ready\r\n");

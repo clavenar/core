@@ -5,11 +5,26 @@
 //! supplies zero as the prototype seed when it cannot read the entropy device.
 //! Register a3 holds the signed offset in nanoseconds from guest monotonic
 //! time to Unix time, or NO_UNIX_TIME_OFFSET.
+//! When bit 48 of a1 is set, a4 through a7 hold the cryptographic seed
+//! as four little-endian words in order.
 
 pub const ETHERNET_HEADER_BYTES: usize = 14;
 pub const MAX_FRAME_BYTES: usize = ETHERNET_HEADER_BYTES + 1500;
 pub const NO_RECEIVE_DEADLINE: u64 = 0;
 pub const NO_UNIX_TIME_OFFSET: i64 = i64::MIN;
+pub const CRYPTO_SEED_PRESENT: u64 = 1 << 48;
+pub const CRYPTO_SEED_BYTES: usize = 32;
+
+pub fn crypto_seed(packed_mac: u64, words: [u64; 4]) -> Option<[u8; CRYPTO_SEED_BYTES]> {
+    if packed_mac & CRYPTO_SEED_PRESENT == 0 {
+        return None;
+    }
+    let mut seed = [0; CRYPTO_SEED_BYTES];
+    for (chunk, word) in seed.as_chunks_mut::<8>().0.iter_mut().zip(words) {
+        *chunk = word.to_le_bytes();
+    }
+    Some(seed)
+}
 
 /// Applies the boot clock offset to a guest monotonic timestamp.
 pub fn unix_nanos(monotonic_nanos: u64, offset: i64) -> Option<u64> {

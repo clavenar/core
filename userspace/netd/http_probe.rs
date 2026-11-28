@@ -1,11 +1,13 @@
 use core::ops::Range;
+use rand_chacha::ChaCha20Rng;
+use rand_chacha::rand_core::{RngCore, SeedableRng};
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 
 const PEER: IpEndpoint = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1)), 8080);
-const LOCAL_PORT: u16 = 49154;
+const FALLBACK_PORT: u16 = 49154;
 const REQUEST: &[u8] = b"GET /probe HTTP/1.1\r\nHost: 192.0.2.1:8080\r\nConnection: close\r\n\r\n";
 const BODY: &[u8] = b"Hello from native HTTP\n";
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -44,6 +46,7 @@ impl Failure {
 
 pub(super) struct Probe<'a> {
     handle: SocketHandle,
+    local_port: u16,
     phase: Phase,
     sent: usize,
     bytes: &'a mut [u8; RESPONSE_BYTES],
@@ -52,9 +55,23 @@ pub(super) struct Probe<'a> {
 }
 
 impl<'a> Probe<'a> {
-    pub(super) fn new(handle: SocketHandle, bytes: &'a mut [u8; RESPONSE_BYTES]) -> Self {
+    pub(super) fn new(
+        handle: SocketHandle,
+        bytes: &'a mut [u8; RESPONSE_BYTES],
+        seed: Option<[u8; clv::net::CRYPTO_SEED_BYTES]>,
+    ) -> Self {
+        let local_port = if let Some(seed) = seed {
+            // Use the upper half of the dynamic port range for the probe.
+            let port = 0xe000 | (ChaCha20Rng::from_seed(seed).next_u32() as u16 & 0x1fff);
+            clv::print(b"netd crypto entropy ready\r\n");
+            port
+        } else {
+            clv::print(b"netd crypto entropy unavailable\r\n");
+            FALLBACK_PORT
+        };
         Self {
             handle,
+            local_port,
             phase: Phase::Pending,
             sent: 0,
             bytes,
@@ -110,7 +127,7 @@ impl<'a> Probe<'a> {
         let deadline = match self.phase {
             Phase::Pending => {
                 socket
-                    .connect(iface.context(), PEER, LOCAL_PORT)
+                    .connect(iface.context(), PEER, self.local_port)
                     .map_err(|_| Failure::Connection)?;
                 self.phase = Phase::Exchanging(now + TIMEOUT);
                 return Ok(false);

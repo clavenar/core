@@ -57,6 +57,7 @@ A build with the `http-probe` feature sends one native HTTP request over the
 private QEMU link. [Run the HTTP probe](docs/qemu-walkthroughs.md#fetch-an-http-response-over-native-tcp)
 
 With modern VirtIO RNG attached, the kernel reads a seed for `netd` at boot.
+The `http-probe` build also reads a separate 32-byte seed for ChaCha20.
 [Verify TCP seeding with VirtIO RNG](docs/qemu-walkthroughs.md#seed-tcp-with-virtio-rng)
 
 `netd` gets its Unix clock reference from the QEMU `virt` RTC at boot.

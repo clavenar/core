@@ -41,12 +41,12 @@ extern "C" fn kernel_main() -> ! {
     let journal = probe_block();
     // SAFETY: QEMU virt supplies the MMIO windows, and paging is still disabled.
     let nic = unsafe { net::Nic::attach() };
-    let (net_seed, unix_time_offset) = if nic.is_some() {
-        let seed = probe_net_seed().unwrap_or_default();
+    let (net_seeds, unix_time_offset) = if nic.is_some() {
+        let seeds = probe_net_seeds().unwrap_or_default();
         // SAFETY: QEMU virt provides the RTC, and paging is still disabled.
-        (seed, unsafe { rtc::monotonic_offset() })
+        (seeds, unsafe { rtc::monotonic_offset() })
     } else {
-        (0, NO_UNIX_TIME_OFFSET)
+        (rng::BootSeeds::default(), NO_UNIX_TIME_OFFSET)
     };
     // SAFETY: The transport windows are still accessible before paging.
     let bridge = unsafe { Console::discover() };
@@ -88,15 +88,15 @@ extern "C" fn kernel_main() -> ! {
         scheduler.attach_host_bridge(bridge.and_then(probe_bridge));
     };
     // SAFETY: The boot hart installed the trap vector and built every task's address space.
-    unsafe { trap::start(tasks, nic, net_seed, unix_time_offset, after_paging) }
+    unsafe { trap::start(tasks, nic, net_seeds, unix_time_offset, after_paging) }
 }
 
-fn probe_net_seed() -> Option<u64> {
+fn probe_net_seeds() -> Option<rng::BootSeeds> {
     // SAFETY: The boot hart probes once before it enables paging.
-    match unsafe { rng::probe() }? {
-        Ok(seed) => {
+    match unsafe { rng::probe(cfg!(feature = "http-probe")) }? {
+        Ok(seeds) => {
             uart::write(b"virtio rng ready\r\n");
-            Some(seed)
+            Some(seeds)
         }
         Err(error) => {
             uart::write(match error {

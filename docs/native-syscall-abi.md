@@ -317,6 +317,10 @@ Since 0.0.90, `a3` holds the signed nanosecond offset from the guest
 monotonic clock to Unix time. The bit pattern `0x8000000000000000` marks
 an unavailable offset. `netd` adds the offset to a monotonic timestamp
 with checked arithmetic to obtain Unix nanoseconds.
+Since 0.0.91, bit 48 of the startup `a1` marks a complete 32-byte
+cryptographic seed. When the bit is set, `a4`–`a7` hold its four
+little-endian words in order. The `http-probe` build requests this seed
+separately from the transport seed.
 The kernel retains the MMIO and DMA mappings in supervisor memory.
 
 | Operation in `a0` | Stack buffer in `a1` | Size in `a2` | Deadline in `a3` | Result in `a0` | Result in `a1` |

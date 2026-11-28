@@ -5,6 +5,7 @@ use super::{idle, timer};
 use crate::console::{write_hex, write_task};
 use crate::drivers::uart;
 use crate::drivers::virtio::net::{self, Nic};
+use crate::drivers::virtio::rng::BootSeeds;
 use crate::fs::ramfs::RamFs;
 use crate::memory::sv39::AddressSpace;
 use crate::memory::usercopy::SSTATUS_SUM;
@@ -84,7 +85,7 @@ fn supervisor_status() -> usize {
 pub(crate) unsafe fn start(
     tasks: [(AddressSpace, usize); TASK_COUNT],
     nic: Option<Nic>,
-    net_seed: u64,
+    net_seeds: BootSeeds,
     unix_time_offset: i64,
     after_paging: impl FnOnce(&mut Scheduler, &mut RamFs),
 ) -> ! {
@@ -95,7 +96,12 @@ pub(crate) unsafe fn start(
         .scheduler
         .insert(Scheduler::new(tasks, supervisor_status()));
     if let Some(nic) = &state.nic {
-        scheduler.start_netd(nic.mac(), net_seed, unix_time_offset);
+        scheduler.start_netd(
+            nic.mac(),
+            net_seeds.transport,
+            unix_time_offset,
+            net_seeds.crypto,
+        );
     }
     let space = scheduler.address_space();
     uart::write(b"boot frame=");

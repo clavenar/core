@@ -1,4 +1,4 @@
-pub use clv_abi::net::{MAX_FRAME_BYTES, unix_nanos};
+pub use clv_abi::net::{CRYPTO_SEED_BYTES, MAX_FRAME_BYTES, crypto_seed, unix_nanos};
 
 use clv_abi::SYS_NET_FRAME;
 use clv_abi::net::{FrameOperation, NO_RECEIVE_DEADLINE};

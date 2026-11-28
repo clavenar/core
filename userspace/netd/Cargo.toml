@@ -10,11 +10,12 @@ path = "main.rs"
 test = false
 
 [features]
-http-probe = ["dep:httparse"]
+http-probe = ["dep:httparse", "dep:rand_chacha"]
 
 [dependencies]
 clv = { path = "../libclv" }
 httparse = { version = "=1.10.1", default-features = false, optional = true }
+rand_chacha = { version = "=0.3.1", default-features = false, optional = true }
 smoltcp = { version = "=0.14.0", default-features = false, features = [
     "medium-ethernet",
     "proto-ipv4",
