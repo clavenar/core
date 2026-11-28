@@ -1,7 +1,8 @@
 # Native syscall ABI
 
 The RV64 prototype implements 78 calls numbered from 0 through 77.
-Kernel 0.0.83 adds Ethernet frame I/O for the dedicated `netd` boot service.
+Since kernel 0.0.84, a successful Ethernet receive also returns its timestamp
+to the dedicated `netd` boot service.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -311,17 +312,18 @@ When a modern VirtIO-net device initializes successfully, that slot starts
 `netd` with the six MAC octets in the low 48 bits of `a1`, in little-endian
 order. The kernel retains the MMIO and DMA mappings in supervisor memory.
 
-| Operation in `a0` | Stack buffer in `a1` | Size in `a2` | Result in `a0` |
-| --- | --- | --- | --- |
-| 0 receive | Writable destination | 1,514-byte capacity | Actual frame length |
-| 1 transmit | Readable source | Frame length from 14 through 1,514 bytes | Length accepted into the transmit queue |
+| Operation in `a0` | Stack buffer in `a1` | Size in `a2` | Result in `a0` | Result in `a1` |
+| --- | --- | --- | --- | --- |
+| 0 receive | Writable destination | 1,514-byte capacity | Actual frame length | Guest monotonic nanoseconds when a frame is copied |
+| 1 transmit | Readable source | Frame length from 14 through 1,514 bytes | Length accepted into the transmit queue | Unspecified |
 
 Both operations use Ethernet bytes without a VirtIO header or FCS. An empty
 receive queue or a busy transmitter parks the service until the timer
 observes readiness. When another runnable task is unavailable, the call
 returns zero and the service can retry. Invalid arguments, ordinary tasks
-and unavailable devices return -1. A queue failure or transmit timeout
-stops the device path and wakes a pending service call with an error.
+and unavailable devices return -1. The timestamp is defined for a positive
+receive length. A queue failure or transmit timeout stops the device path
+and wakes a pending service call with an error.
 [QEMU walkthrough](qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net)
 
 ## Goal and agent calls

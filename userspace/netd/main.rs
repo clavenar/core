@@ -3,8 +3,16 @@
 
 use clv::net;
 use core::panic::PanicInfo;
+use smoltcp::iface::{Config, Interface, SocketSet};
+use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::time::Instant;
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr, Ipv4Address, Ipv4Cidr};
 
-const FRAME_BYTES: usize = 60;
+// Relink the service when the boot user linker script changes.
+const _: &str = include_str!("../user.ld");
+
+const GUEST_ADDRESS: Ipv4Cidr = Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 2), 24);
+const MIN_FRAME_BYTES: usize = 60;
 const PROBE_ETHERTYPE: [u8; 2] = 0x88b5_u16.to_be_bytes();
 const PROBE_PEER: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
 const PROBE_REQUEST: &[u8; 8] = b"CLVNET01";
@@ -19,18 +27,81 @@ extern "C" fn _start(_task: usize, packed_mac: usize) -> ! {
     let request = probe_frame(mac, PROBE_PEER, PROBE_REQUEST);
     let reply = probe_frame(PROBE_PEER, mac, PROBE_REPLY);
     let mut buffer = [0; net::MAX_FRAME_BYTES];
+    let config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
+    let mut interface = Interface::new(config, &mut EthernetDevice(None), Instant::ZERO);
+    interface.update_ip_addrs(|addrs| addrs.push(IpCidr::Ipv4(GUEST_ADDRESS)).unwrap());
+    let mut storage = [];
+    let mut sockets = SocketSet::new(&mut storage[..]);
+
     clv::print(b"netd ready\r\n");
     loop {
-        let Some(frame) = net::receive(&mut buffer) else {
+        let Some((frame, received_at)) = net::receive(&mut buffer) else {
             clv::exit(1);
         };
         if frame == request {
-            send_reply(&reply);
+            send_frame(&reply);
+        } else if !frame.is_empty() {
+            let timestamp = Instant::from_micros((received_at / 1_000) as i64);
+            interface.poll_ingress_single(
+                timestamp,
+                &mut EthernetDevice(Some(frame)),
+                &mut sockets,
+            );
         }
     }
 }
 
-fn send_reply(frame: &[u8]) {
+struct EthernetDevice<'a>(Option<&'a [u8]>);
+
+impl Device for EthernetDevice<'_> {
+    type RxToken<'a>
+        = ReceiveToken<'a>
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = TransmitToken
+    where
+        Self: 'a;
+
+    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        self.0
+            .take()
+            .map(|frame| (ReceiveToken(frame), TransmitToken))
+    }
+
+    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
+        Some(TransmitToken)
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        let mut capabilities = DeviceCapabilities::default();
+        capabilities.medium = Medium::Ethernet;
+        capabilities.max_transmission_unit = net::MAX_FRAME_BYTES;
+        capabilities.max_burst_size = Some(1);
+        capabilities
+    }
+}
+
+struct ReceiveToken<'a>(&'a [u8]);
+
+impl RxToken for ReceiveToken<'_> {
+    fn consume<R, F: FnOnce(&[u8]) -> R>(self, read: F) -> R {
+        read(self.0)
+    }
+}
+
+struct TransmitToken;
+
+impl TxToken for TransmitToken {
+    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, length: usize, write: F) -> R {
+        let mut buffer = [0; net::MAX_FRAME_BYTES];
+        let result = write(&mut buffer[..length]);
+        send_frame(&buffer[..length.max(MIN_FRAME_BYTES)]);
+        result
+    }
+}
+
+fn send_frame(frame: &[u8]) {
     loop {
         match net::transmit(frame) {
             Some(0) => core::hint::spin_loop(),
@@ -40,8 +111,8 @@ fn send_reply(frame: &[u8]) {
     }
 }
 
-fn probe_frame(destination: [u8; 6], source: [u8; 6], marker: &[u8; 8]) -> [u8; FRAME_BYTES] {
-    let mut frame = [0; FRAME_BYTES];
+fn probe_frame(destination: [u8; 6], source: [u8; 6], marker: &[u8; 8]) -> [u8; MIN_FRAME_BYTES] {
+    let mut frame = [0; MIN_FRAME_BYTES];
     frame[..6].copy_from_slice(&destination);
     frame[6..12].copy_from_slice(&source);
     frame[12..14].copy_from_slice(&PROBE_ETHERTYPE);

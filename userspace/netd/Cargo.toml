@@ -1,0 +1,25 @@
+[package]
+name = "clavenar-netd"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "netd"
+path = "main.rs"
+test = false
+
+[dependencies]
+clv = { path = "../libclv" }
+# The Ethernet medium requires at least one socket feature. Echo replies use an empty socket set.
+smoltcp = { version = "=0.14.0", default-features = false, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-icmp",
+    "auto-icmp-echo-reply",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+panic = "abort"

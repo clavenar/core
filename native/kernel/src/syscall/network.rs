@@ -2,6 +2,7 @@ use clv_abi::SYSCALL_ERROR;
 use clv_abi::net::{ETHERNET_HEADER_BYTES, FrameOperation, MAX_FRAME_BYTES};
 
 use super::{REG_A0, REG_A1, REG_A2};
+use crate::arch::monotonic_nanos;
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::drivers::virtio::net::{self, BUFFER_BYTES, NetError, Nic};
 use crate::memory::usercopy::UserStack;
@@ -36,7 +37,13 @@ pub(super) fn frame_io(
         FrameOperation::Transmit => transmit(nic, stack, address, length),
     };
     match result {
-        Ok(Some(length)) => WaitResult::Ready(length),
+        Ok(Some(length)) => {
+            if operation == FrameOperation::Receive && length != SYSCALL_ERROR {
+                // Write the timestamp once the receive has finished and a1 is free.
+                frame.registers[REG_A1] = monotonic_nanos() as usize;
+            }
+            WaitResult::Ready(length)
+        }
         Ok(None) => scheduler.wait_for_network(frame, operation),
         Err(error) => {
             net::retire(interface, error);

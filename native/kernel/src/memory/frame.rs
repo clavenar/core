@@ -1,12 +1,12 @@
 use core::ptr;
-use core::slice::IterMut;
 
 use super::user_image::MAX_USER_IMAGE_PAGES;
-use crate::programs::{BOOT_IMAGE_COUNT, TASK_COUNT};
+use crate::programs::{BOOT_IMAGE_COUNT, STACK_PAGE_COUNT, TASK_COUNT};
 
 pub(crate) const FRAME_SIZE: usize = 4096;
-// Three shared tables, three private tables and a stack per task, one copy of each image.
-const FRAME_COUNT: usize = 3 + 4 * TASK_COUNT + BOOT_IMAGE_COUNT * MAX_USER_IMAGE_PAGES;
+// Three shared tables, three private tables per task, all stacks and one copy of each image.
+const FRAME_COUNT: usize =
+    3 + 3 * TASK_COUNT + STACK_PAGE_COUNT + BOOT_IMAGE_COUNT * MAX_USER_IMAGE_PAGES;
 const WORDS_PER_FRAME: usize = FRAME_SIZE / size_of::<u64>();
 
 #[repr(C, align(4096))]
@@ -34,7 +34,7 @@ impl Frame {
 static mut BOOT_FRAMES: [Frame; FRAME_COUNT] = [const { Frame([0; WORDS_PER_FRAME]) }; FRAME_COUNT];
 
 pub(crate) struct FrameAllocator<'a> {
-    remaining: IterMut<'a, Frame>,
+    remaining: &'a mut [Frame],
 }
 
 impl FrameAllocator<'static> {
@@ -42,16 +42,24 @@ impl FrameAllocator<'static> {
     pub(crate) unsafe fn from_boot_pool() -> Self {
         // SAFETY: The caller gives this allocator exclusive access to the pool.
         let frames = unsafe { &mut *(&raw mut BOOT_FRAMES) };
-        Self {
-            remaining: frames.iter_mut(),
-        }
+        Self { remaining: frames }
     }
 }
 
 impl<'a> FrameAllocator<'a> {
     pub(crate) fn allocate_zeroed(&mut self) -> Option<&'a mut Frame> {
-        let frame = self.remaining.next()?;
-        frame.0.fill(0);
-        Some(frame)
+        self.allocate_zeroed_frames(1)?.first_mut()
+    }
+
+    pub(super) fn allocate_zeroed_frames(&mut self, count: usize) -> Option<&'a mut [Frame]> {
+        if count > self.remaining.len() {
+            return None;
+        }
+        let (frames, remaining) = core::mem::take(&mut self.remaining).split_at_mut(count);
+        self.remaining = remaining;
+        for frame in frames.iter_mut() {
+            frame.0.fill(0);
+        }
+        Some(frames)
     }
 }

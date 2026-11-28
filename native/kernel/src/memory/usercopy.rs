@@ -1,17 +1,16 @@
 use core::arch::asm;
 
-use super::frame::FRAME_SIZE;
-
 pub(crate) const SSTATUS_SUM: usize = 1 << 18;
 
 #[derive(Clone, Copy)]
 pub(crate) struct UserStack {
     pub(super) base: usize,
+    pub(super) size: usize,
 }
 
 impl UserStack {
     pub(crate) fn top(self) -> usize {
-        self.base + FRAME_SIZE
+        self.base + self.size
     }
 
     pub(crate) fn contains(self, address: usize, length: usize) -> bool {

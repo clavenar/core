@@ -64,7 +64,7 @@ extern "C" fn kernel_main() -> ! {
         let image = programs::task_image_index(task);
         (
             mappings
-                .task_address_space(&mut frames, image)
+                .task_address_space(&mut frames, image, programs::task_stack_pages(task))
                 .expect("boot frame pool cannot hold user mappings"),
             images[image].entry,
         )

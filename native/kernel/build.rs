@@ -40,7 +40,7 @@ fn main() {
     }
     images.push(']');
     fs::write(output.join("program-images.rs"), images).unwrap();
-    for name in ["shell", "netd"]
+    for name in ["shell"]
         .into_iter()
         .chain(clv_abi::PROGRAMS.iter().map(|&(_, name)| name))
     {
@@ -48,6 +48,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", program.display());
         build_program(&program.join("main.rs"), &linker_script, &output, name);
     }
+    build_netd(&userspace.join("netd"), &linker_script, &output);
     let hashes: Vec<[u8; SHA256_BYTES]> = FILE_TOOLS
         .iter()
         .map(|tool| {
@@ -85,19 +86,43 @@ fn build_library(name: &str, directory: &Path, output: &Path, dependencies: &[&s
 fn build_program(source: &Path, linker_script: &Path, output: &Path, name: &str) {
     let status = target_rustc(output, &["clv_abi", "clv"])
         .arg(format!("--crate-name=clavenar_{name}"))
-        .args([
-            "-Clto=fat",
-            "-Clink-arg=--no-relax",
-            "-Clink-arg=--strip-all",
-        ])
-        .arg(format!(
-            "-Clink-arg=--defsym=USER_IMAGE_MAX_BYTES={USER_IMAGE_MAX_BYTES}"
-        ))
-        .arg(format!("-Clink-arg=-T{}", linker_script.display()))
+        .arg("-Clto=fat")
+        .args(user_linker_args(linker_script))
         .arg(source)
         .arg("-o")
         .arg(output.join(format!("{name}.elf")))
         .status()
         .expect("could not invoke rustc for the boot user program");
     assert!(status.success(), "could not build the {name} program");
+}
+
+fn build_netd(source: &Path, linker_script: &Path, output: &Path) {
+    println!("cargo:rerun-if-changed={}", source.display());
+    let target = env::var("TARGET").unwrap();
+    // The nested Cargo build needs its own target directory and build lock.
+    let target_dir = output.join("netd-target");
+    let status = Command::new(env::var_os("CARGO").unwrap())
+        .args(["rustc", "--locked", "--release", "--manifest-path"])
+        .arg(source.join("Cargo.toml"))
+        .args(["--target", &target, "--target-dir"])
+        .arg(&target_dir)
+        .arg("--")
+        .args(user_linker_args(linker_script))
+        .status()
+        .expect("could not invoke Cargo for netd");
+    assert!(status.success(), "could not build netd");
+    fs::copy(
+        target_dir.join(target).join("release/netd"),
+        output.join("netd.elf"),
+    )
+    .expect("could not stage the netd image");
+}
+
+fn user_linker_args(linker_script: &Path) -> [String; 4] {
+    [
+        "-Clink-arg=--no-relax".into(),
+        "-Clink-arg=--strip-all".into(),
+        format!("-Clink-arg=--defsym=USER_IMAGE_MAX_BYTES={USER_IMAGE_MAX_BYTES}"),
+        format!("-Clink-arg=-T{}", linker_script.display()),
+    ]
 }

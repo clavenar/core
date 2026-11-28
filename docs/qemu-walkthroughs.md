@@ -69,12 +69,13 @@ immediate goal observations, delegated resumes and rename reviews. Task 6
 runs `echo` for a background goal monitor. When a NIC initializes, task 7
 runs `netd` with its MAC address. Tasks 3, 5 and 6 share the
 read/execute pages of one ELF. Each task receives its ID in `a0` and has
-its own Sv39 root and 4 KiB read/write, non-executable stack.
+its own Sv39 root and read/write, non-executable stack. `netd` has 16 KiB
+for the network interface and packet buffers. The other tasks have 4 KiB each.
 The stack starts at `0x00402000` for one- and two-page images and immediately
 after the image for larger programs. The initial stack pointer is at the
-top of that page. Nonempty syscall buffers must fit within the calling
+top of the stack. Nonempty syscall buffers must fit within the calling
 task's stack. The kernel, UART and attached VirtIO MMIO mappings are
-shared in supervisor mode. The 111-frame boot pool has room for five full-size
+shared in supervisor mode. The 114-frame boot pool has room for five full-size
 images, seven task stacks and the page tables. The pool, kernel and 64 KiB
 supervisor stack fit within one aligned 2 MiB physical region.
 
@@ -87,14 +88,15 @@ starts a fresh quantum when the timer fires or a stopped task is replaced.
 The kernel reads the MAC address from an attached modern VirtIO-net device,
 posts a receive buffer and starts the dedicated `netd` task. The timer wakes
 the service on receive or transmit readiness. Each receive copies one frame
-to the service's stack and reposts the buffer. A transmit still pending at its
-500 ms deadline causes the driver to request reset and wake `netd` so its
-call can fail. DMA buffers remain in supervisor memory.
+to the service's stack, returns its monotonic timestamp and reposts the buffer.
+A transmit still pending at its 500 ms deadline causes the driver to request
+reset and wake `netd` so its call can fail. DMA buffers remain in supervisor
+memory.
 
-`netd` accepts a 60-byte Ethernet frame with the local experimental
-EtherType `0x88b5` and the padded request `CLVNET01`.
-It sends one `CLVNET02` reply per request after printing `netd ready`.
-[Frame I/O syscall](native-syscall-abi.md#network-frame-io) · [VirtIO network specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html) · [EtherType registry](https://www.iana.org/assignments/ieee-802-numbers/ieee-802-numbers.xhtml)
+`netd` uses smoltcp to answer ARP and IPv4 ICMP echo requests at
+`192.0.2.2/24`. It also answers the 60-byte Ethernet probe `CLVNET01`
+with `CLVNET02` on experimental EtherType `0x88b5`.
+[Frame I/O syscall](native-syscall-abi.md#network-frame-io) · [smoltcp interface](https://docs.rs/smoltcp/0.14.0/smoltcp/iface/struct.Interface.html#method.poll_ingress_single) · [VirtIO network specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
 
 After building the kernel, paste this block at the Linux prompt in `core`.
 It connects each QEMU boot to a private Unix datagram socket, checks the
@@ -104,17 +106,59 @@ shell and stops the VM after the checks. [QEMU datagram backend options](https:/
 python3 - <<'PY'
 import os
 from select import select
-from socket import SOCK_DGRAM, socketpair
+from socket import SOCK_DGRAM, inet_aton, socketpair
+from struct import iter_unpack, pack
 from subprocess import PIPE, STDOUT, Popen
 import sys
 from time import monotonic
 
 guest_mac = bytes.fromhex("52 54 00 12 34 56")
 host_mac = bytes.fromhex("02 00 00 00 00 01")
-ethertype = bytes.fromhex("88 b5")
-request = (guest_mac + host_mac + ethertype + b"CLVNET01").ljust(60, b"\0")
-expected = (host_mac + guest_mac + ethertype + b"CLVNET02").ljust(60, b"\0")
+guest_ip = inet_aton("192.0.2.2")
+host_ip = inet_aton("192.0.2.1")
 prompt = b"\x1b[32mclsh> \x1b[0m"
+
+def ethernet_frame(destination, source, ethertype, payload):
+    return (destination + source + pack("!H", ethertype) + payload).ljust(60, b"\0")
+
+def checksum(data):
+    if len(data) % 2:
+        data += b"\0"
+    total = sum(word for (word,) in iter_unpack("!H", data))
+    while total >> 16:
+        total = (total & 0xffff) + (total >> 16)
+    return (~total) & 0xffff
+
+def with_checksum(packet, offset):
+    return packet[:offset] + pack("!H", checksum(packet)) + packet[offset + 2:]
+
+def check_arp(host):
+    format_fields = pack("!HHBB", 1, 0x0800, 6, 4)
+    request = format_fields + pack("!H", 1) + host_mac + host_ip + bytes(6) + guest_ip
+    host.send(ethernet_frame(b"\xff" * 6, host_mac, 0x0806, request))
+    reply = format_fields + pack("!H", 2) + guest_mac + guest_ip + host_mac + host_ip
+    if host.recv(2048) != ethernet_frame(host_mac, guest_mac, 0x0806, reply):
+        raise RuntimeError("ARP did not resolve 192.0.2.2 to the guest MAC")
+
+def check_echo(host, sequence, payload):
+    identifier = 0x1234 + sequence
+    request = with_checksum(pack("!BBHHH", 8, 0, 0, identifier, sequence) + payload, 2)
+    header = pack("!BBHHHBBH4s4s",
+                  0x45, 0, 20 + len(request), sequence, 0, 64, 1, 0, host_ip, guest_ip)
+    host.send(ethernet_frame(guest_mac, host_mac, 0x0800, with_checksum(header, 10) + request))
+    frame = host.recv(2048)
+    if frame[:14] != host_mac + guest_mac + pack("!H", 0x0800):
+        raise RuntimeError("Expected a guest Ethernet frame carrying IPv4")
+    ip = frame[14:]
+    total_length = int.from_bytes(ip[2:4], "big")
+    if (len(ip) < total_length or total_length != 28 + len(payload) or
+            ip[0] != 0x45 or ip[9] != 1 or ip[12:20] != guest_ip + host_ip or
+            checksum(ip[:20]) != 0):
+        raise RuntimeError("Invalid IPv4 echo reply header")
+    reply = ip[20:total_length]
+    if (reply[:2] != b"\0\0" or reply[4:] != pack("!HH", identifier, sequence) + payload or
+            checksum(reply) != 0):
+        raise RuntimeError(f"Invalid ICMP echo reply for sequence {sequence}")
 
 def wait_for_shell(guest):
     serial = bytearray()
@@ -137,7 +181,7 @@ def check_shell(guest):
     if b"Hello from RamFS" not in wait_for_shell(guest):
         raise RuntimeError("The shell could not read /hello.txt")
 
-def boot(requests):
+def boot(exercise_network):
     host, nic = socketpair(type=SOCK_DGRAM)
     with host, nic:
         fd = nic.fileno()
@@ -157,25 +201,37 @@ def boot(requests):
                 raise RuntimeError("VirtIO-net did not report the configured MAC")
             host.settimeout(2)
             check_shell(guest)
-            for _ in range(requests):
-                host.send(request)
-                if host.recv(2048) != expected:
-                    raise RuntimeError("The Ethernet reply differs from the expected frame")
+            if exercise_network:
+                request = ethernet_frame(guest_mac, host_mac, 0x88b5, b"CLVNET01")
+                expected = ethernet_frame(host_mac, guest_mac, 0x88b5, b"CLVNET02")
+                for _ in range(3):
+                    host.send(request)
+                    if host.recv(2048) != expected:
+                        raise RuntimeError("The Ethernet reply differs from the expected frame")
+                    check_shell(guest)
+                check_arp(host)
                 check_shell(guest)
+                payloads = (b"", b"hello from host", bytes(index % 256 for index in range(1472)))
+                for sequence, payload in enumerate(payloads, start=1):
+                    check_echo(host, sequence, payload)
+                    check_shell(guest)
             print()
         finally:
             guest.terminate()
             guest.wait(timeout=5)
 
-boot(requests=3)
-print("Host verified three 60-byte Ethernet replies after clsh>", flush=True)
-boot(requests=0)
+boot(exercise_network=True)
+print("Host verified Ethernet probes, ARP and three IPv4 echo replies after clsh>", flush=True)
+boot(exercise_network=False)
 print("Silent peer reached clsh>", flush=True)
 PY
 ```
 
-The first boot verifies all three replies and reads `/hello.txt` between
-exchanges. The second reaches the shell and reads the file with the peer silent.
+The first boot verifies Ethernet probe replies, resolves the guest MAC by ARP,
+and checks three echo replies, including one with a full 1,500-byte IPv4 packet.
+It validates the IPv4 and ICMP checksums, identifiers, sequences and payloads,
+and reads `/hello.txt` between exchanges. The second boot reads the same file
+with the peer silent.
 Run the regular boot command with `-nic none` to check the shell on its
 own. [Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)
 

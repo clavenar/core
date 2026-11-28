@@ -36,7 +36,7 @@ For every commit in `core`, increment the patch version of `clavenar-kernel` in
 update in the same commit. The kernel boot banner reads this package version.
 
 When a commit changes the shared `clv-abi` crate, increment its patch version
-in `crates/clv-abi/Cargo.toml` and update its entry in
-`native/kernel/Cargo.lock` in the same commit.
+in `crates/clv-abi/Cargo.toml` and update its entries in
+`native/kernel/Cargo.lock` and `userspace/netd/Cargo.lock` in the same commit.
 
 Start every commit subject with a lowercase letter and keep it short and descriptive. In each pull request, summarize the change and include the checks you ran. Link a relevant issue when one exists and attach screenshots for visible UI changes. Update this section when the project establishes its own commit or review conventions.

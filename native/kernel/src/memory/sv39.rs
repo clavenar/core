@@ -94,12 +94,13 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
         &self,
         frames: &mut FrameAllocator<'_>,
         program: usize,
+        stack_pages: usize,
     ) -> Option<AddressSpace> {
         let user_code = *self.user_code.get(program)?;
         let root = frames.allocate_zeroed()?;
         let low_middle = frames.allocate_zeroed()?;
         let user_leaves = frames.allocate_zeroed()?;
-        let stack_frame = frames.allocate_zeroed()?;
+        let stack_frames = frames.allocate_zeroed_frames(stack_pages)?;
 
         // The user image and stack share a leaf table. MMIO uses a separate
         // supervisor leaf table under the same low root entry on QEMU virt.
@@ -113,10 +114,12 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
                 stack_base = stack_base.max(virtual_address + FRAME_SIZE);
             }
         }
-        entries[vpn_index(stack_base, 0)] = pte(
-            stack_frame.physical_address(),
-            VALID | ACCESSED | READ | WRITE | DIRTY | USER,
-        );
+        for (index, frame) in stack_frames.iter().enumerate() {
+            entries[vpn_index(stack_base + index * FRAME_SIZE, 0)] = pte(
+                frame.physical_address(),
+                VALID | ACCESSED | READ | WRITE | DIRTY | USER,
+            );
+        }
 
         low_middle.words_mut()[vpn_index(self.uart, 1)] = pte(self.mmio_leaves, VALID);
         low_middle.words_mut()[vpn_index(USER_TEXT_BASE, 1)] =
@@ -125,8 +128,11 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
         root.words_mut()[vpn_index(self.uart, 2)] = pte(low_middle.physical_address(), VALID);
         Some(AddressSpace {
             root: root.physical_address(),
-            stack: UserStack { base: stack_base },
-            stack_frame: NonNull::from(stack_frame),
+            stack: UserStack {
+                base: stack_base,
+                size: size_of_val(stack_frames),
+            },
+            stack_frames: NonNull::from(stack_frames),
         })
     }
 }
@@ -135,7 +141,7 @@ impl<const PROGRAMS: usize> BootMappings<PROGRAMS> {
 pub(crate) struct AddressSpace {
     root: usize,
     pub(crate) stack: UserStack,
-    stack_frame: NonNull<Frame>,
+    stack_frames: NonNull<[Frame]>,
 }
 
 impl AddressSpace {
@@ -144,12 +150,17 @@ impl AddressSpace {
     }
 
     /// # Safety
-    /// The task must be stopped and its stack frame must be writable through
+    /// The task must be stopped and its stack frames must be writable through
     /// the supervisor identity map.
     pub(crate) unsafe fn clear_user_stack(self) {
-        // SAFETY: The frame is reserved for this task and the caller ensures
+        // SAFETY: The frames are reserved for this task and the caller ensures
         // exclusive access while clearing it.
-        unsafe { self.stack_frame.as_ptr().write_bytes(0, 1) };
+        unsafe {
+            self.stack_frames
+                .cast::<Frame>()
+                .as_ptr()
+                .write_bytes(0, self.stack_frames.len());
+        }
     }
 
     pub(crate) fn activate(self) -> bool {

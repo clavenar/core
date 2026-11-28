@@ -45,7 +45,11 @@ command reference. Press `Ctrl+a`, then `x`, to quit QEMU.
 
 [Boot with a read-only VirtIO block image](docs/qemu-walkthroughs.md#probe-a-virtio-block-device) · [Recover a marker after reboot](docs/qemu-walkthroughs.md#recover-a-virtio-block-marker-after-reboot) · [Recover a previous journal record](docs/qemu-walkthroughs.md#recover-a-previous-journal-record)
 
-[Verify the VirtIO-net Ethernet exchange](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net)
+With a modern VirtIO-net device attached, the user-space service `netd`
+uses smoltcp to answer ARP and IPv4 echo requests at `192.0.2.2/24`.
+The kernel build fetches the locked smoltcp dependencies from crates.io
+when they are absent from the Cargo cache.
+[Verify Ethernet, ARP and IPv4 ping in QEMU](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net)
 
 ## Run the QEMU host broker
 

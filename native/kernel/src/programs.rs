@@ -21,6 +21,9 @@ pub(crate) const ECHO_REPORT_TASK_INDEX: usize = COMMAND_IMAGE_COUNT;
 pub(crate) const GOAL_MONITOR_TASK_INDEX: usize = ECHO_REPORT_TASK_INDEX + 1;
 pub(crate) const NETD_TASK_INDEX: usize = GOAL_MONITOR_TASK_INDEX + 1;
 pub(crate) const TASK_COUNT: usize = NETD_TASK_INDEX + 1;
+// The interface state and full-sized RX and TX buffers exceed one stack page.
+const NETD_STACK_PAGES: usize = 4;
+pub(crate) const STACK_PAGE_COUNT: usize = TASK_COUNT - 1 + NETD_STACK_PAGES;
 
 /// The boot shell occupies task 2, between the original hello and echo slots.
 pub(crate) const fn task_index(program: Program) -> usize {
@@ -37,6 +40,13 @@ pub(crate) const fn task_image_index(task: usize) -> usize {
         ECHO_REPORT_TASK_INDEX | GOAL_MONITOR_TASK_INDEX => task_index(Program::Echo),
         NETD_TASK_INDEX => NETD_IMAGE_INDEX,
         _ => task,
+    }
+}
+
+pub(crate) const fn task_stack_pages(task: usize) -> usize {
+    match task {
+        NETD_TASK_INDEX => NETD_STACK_PAGES,
+        _ => 1,
     }
 }
 
