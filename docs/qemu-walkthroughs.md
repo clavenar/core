@@ -7,6 +7,7 @@ handles and ordinary RamFS changes live for one boot.
 
 - [Boot and shell](#boot-and-shell)
   - [Exchange an Ethernet frame over VirtIO-net](#exchange-an-ethernet-frame-over-virtio-net)
+  - [Authenticate a TLS peer over native TCP](#authenticate-a-tls-peer-over-native-tcp)
   - [Probe a VirtIO block device](#probe-a-virtio-block-device)
   - [Recover a VirtIO block marker after reboot](#recover-a-virtio-block-marker-after-reboot)
   - [Recover a previous journal record](#recover-a-previous-journal-record)
@@ -54,12 +55,13 @@ program registry. The build, shell and kernel use that registry for names
 and stable launch selectors. A versioned file tool maps an exact tool ID
 to one of those programs. [Program registry](../crates/clv-abi/src/program.rs) · [File tool registry](../crates/clv-abi/src/tool.rs)
 The loader accepts static, little-endian ELF64 executables with one
-read/execute segment of at most 64 KiB at `0x00400000`. The kernel build
-supplies this limit from `clv-abi`. When linking a program directly with
-`userspace/user.ld`, pass `--defsym=USER_IMAGE_MAX_BYTES=65536` to the linker.
-The loader allocates one to sixteen pages based on the segment's memory size
-(`p_memsz`) and zero-fills any bytes beyond the file data. Boot reports each
-program's validated entry address. If loading fails, it prints
+read/execute segment at `0x00400000`. The kernel build takes the 64 KiB limit
+from `clv-abi` and allows up to 160 KiB for `netd` with `tls-probe`. When
+linking a shell program directly with `userspace/user.ld`, pass
+`--defsym=USER_IMAGE_MAX_BYTES=65536` to the linker. The loader allocates
+frames based on the segment's memory size (`p_memsz`) and zero-fills any
+bytes beyond the file data. Boot reports each program's validated entry
+address. If loading fails, it prints
 `User ELF load failed` with the program name and idles.
 
 The kernel activates paging, prints `Sv39 paging enabled`, and starts `hello`
@@ -70,16 +72,16 @@ runs `echo` for a background goal monitor. When a NIC initializes, task 7
 runs `netd` with its MAC address. Tasks 3, 5 and 6 share the
 read/execute pages of one ELF. Each task receives its ID in `a0` and has
 its own Sv39 root and read/write, non-executable stack. `netd` has a 16 KiB
-stack in the standard build and 24 KiB with `http-probe`. The other tasks
-have 4 KiB each.
+stack in the standard build, 24 KiB with `http-probe` and 96 KiB with
+`tls-probe`. The other tasks have 4 KiB each.
 The stack starts at `0x00402000` for one- and two-page images and immediately
 after the image for larger programs. The initial stack pointer is at the
 top of the stack. Nonempty syscall buffers must fit within the calling
 task's stack. The kernel, UART and attached VirtIO MMIO mappings are
 shared in supervisor mode. The boot pool has room for five full-size images,
 seven task stacks and the page tables. It holds 114 frames in the standard
-build and 116 with `http-probe`. The pool, kernel and 64 KiB supervisor
-stack fit within one aligned 2 MiB physical region.
+build, 116 with `http-probe` and 158 with `tls-probe`. The pool, kernel and
+64 KiB supervisor stack fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
 shows which task was interrupted and which task will run next. The kernel
@@ -114,14 +116,18 @@ shell and stops the VM after the checks. [QEMU datagram backend options](https:/
 ```sh
 python3 - <<'PY'
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from functools import partial
 import os
+from pathlib import Path
 import re
 from select import select
 from socket import SOCK_DGRAM, SOCK_STREAM, inet_aton, socketpair
+import ssl
 from struct import iter_unpack, pack, unpack
-from subprocess import PIPE, STDOUT, Popen
+from subprocess import PIPE, STDOUT, Popen, run
 import sys
+from tempfile import TemporaryDirectory
 from time import monotonic, sleep
 
 guest_mac = bytes.fromhex("52 54 00 12 34 56")
@@ -335,6 +341,14 @@ def check_http(host, guest, case, response_delay):
     log += wait_for_serial(guest, b"netd HTTP probe received Hello from native HTTP")
     return connection, log
 
+def read_serial(guest):
+    chunk = os.read(guest.stdout.fileno(), 4096)
+    if not chunk:
+        raise RuntimeError("QEMU stopped while reading the serial console")
+    sys.stdout.buffer.write(chunk)
+    sys.stdout.buffer.flush()
+    return chunk
+
 def wait_for_serial(guest, expected, timeout=5):
     serial = bytearray()
     deadline = monotonic() + timeout
@@ -342,12 +356,7 @@ def wait_for_serial(guest, expected, timeout=5):
         remaining = deadline - monotonic()
         if remaining <= 0 or not select([guest.stdout], [], [], remaining)[0]:
             raise RuntimeError(f"Timed out waiting for {expected!r}")
-        chunk = os.read(guest.stdout.fileno(), 4096)
-        if not chunk:
-            raise RuntimeError(f"QEMU stopped while waiting for {expected!r}")
-        sys.stdout.buffer.write(chunk)
-        sys.stdout.buffer.flush()
-        serial.extend(chunk)
+        serial.extend(read_serial(guest))
     return serial
 
 def wait_for_shell(guest):
@@ -361,8 +370,10 @@ def check_shell(guest):
         raise RuntimeError("The shell could not read /hello.txt")
     return log
 
-def boot(exercise_network=False, *, http_case=None, response_delay=0, extra_args=(), extra_fds=()):
-    target = "target/http-probe" if http_case is not None else "target"
+def boot(exercise_network=False, *, http_case=None, response_delay=0, extra_args=(), extra_fds=(),
+         target=None, verify=None):
+    if target is None:
+        target = "target/http-probe" if http_case is not None else "target"
     image = f"{target}/riscv64gc-unknown-none-elf/release/clavenar-kernel"
     host, nic = socketpair(type=SOCK_DGRAM)
     with host, nic:
@@ -388,6 +399,9 @@ def boot(exercise_network=False, *, http_case=None, response_delay=0, extra_args
             if http_case is not None:
                 connection, http_log = check_http(host, guest, http_case, response_delay)
                 boot_log += http_log + check_shell(guest)
+            elif verify is not None:
+                verify(host, guest, boot_log)
+                check_shell(guest)
             elif exercise_network:
                 request = ethernet_frame(guest_mac, host_mac, 0x88b5, b"CLVNET01")
                 expected = ethernet_frame(host_mac, guest_mac, 0x88b5, b"CLVNET02")
@@ -493,6 +507,144 @@ def check_rtc():
             raise RuntimeError(f"Unexpected guest elapsed time {done - start} ns")
         print(f"Host verified RTC base {base} UTC and clock progression", flush=True)
 
+def check_tls_peer(host, guest, log, *, credentials, authenticate):
+    name = "probe.clavenar.test"
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_3
+    context.num_tickets = 0
+    context.load_cert_chain(*credentials)
+
+    def check_sni(_server, requested, _context):
+        if requested != name:
+            return ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
+
+    context.sni_callback = check_sni
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    server = context.wrap_bio(incoming, outgoing, server_side=True)
+    expected = b"netd TLS probe certificate rejected"
+    if authenticate:
+        expected = f"netd TLS probe authenticated {name}\r\n".encode()
+
+    port = 8443
+    answer_guest_arp(host)
+    guest_port, (initial_sequence, _, flags, data) = read_tcp_segment(host, port)
+    if guest_port < 57344 or flags != tcp_syn or data:
+        raise RuntimeError("Expected a TLS probe SYN from a seeded source port")
+    guest_next = (initial_sequence + 1) & 0xffffffff
+    server_next = 0x23456789
+    send_tcp(host, port, server_next, guest_next, tcp_syn | tcp_ack, guest_port=guest_port)
+    server_next += 1
+    pending = b""
+    completed = False
+    close_notify = False
+    finished = False
+    deadline = monotonic() + 7
+    while expected not in log or (authenticate and not finished):
+        ready = select([host, guest.stdout], [], [], max(0, deadline - monotonic()))[0]
+        if not ready or monotonic() >= deadline:
+            raise RuntimeError(f"Timed out waiting for {expected!r}")
+        if host in ready:
+            sequence, acknowledged, flags, data = receive_tcp(host, port, guest_port=guest_port)
+            if flags & tcp_syn or (authenticate and flags & tcp_rst) or acknowledged > server_next:
+                raise RuntimeError("Unexpected TCP control or acknowledgement during TLS")
+            if data or flags & tcp_fin:
+                if sequence != guest_next:
+                    raise RuntimeError("Unexpected TCP stream sequence during TLS")
+                finished = bool(flags & tcp_fin)
+                guest_next = (guest_next + len(data) + finished) & 0xffffffff
+                send_tcp(host, port, server_next, guest_next, tcp_ack | (flags & tcp_fin),
+                         guest_port=guest_port)
+                server_next += int(finished)
+            if data:
+                incoming.write(data)
+                try:
+                    if not completed:
+                        server.do_handshake()
+                        completed = True
+                    if server.read(1):
+                        raise RuntimeError("Unexpected TLS application data")
+                    close_notify = True
+                except ssl.SSLWantReadError:
+                    pass
+                pending += outgoing.read()
+            if pending and acknowledged == server_next:
+                chunk, pending = pending[:512], pending[512:]
+                send_tcp(host, port, server_next, guest_next, tcp_ack, chunk, guest_port=guest_port)
+                server_next += len(chunk)
+        if guest.stdout in ready:
+            log.extend(read_serial(guest))
+
+    if completed != authenticate or (completed and (server.version() != "TLSv1.3" or not close_notify)):
+        raise RuntimeError("The OpenSSL peer's TLS result differs from the guest's expected result")
+
+def check_tls_prerequisite(host, guest, log, *, reason):
+    expected = f"netd TLS probe {reason} unavailable".encode()
+    if expected not in log:
+        wait_for_serial(guest, expected)
+    if select([host], [], [], 0.1)[0]:
+        raise RuntimeError(f"Unexpected guest traffic without {reason}")
+
+def check_tls():
+    def openssl(*args):
+        run(["openssl", *args], check=True)
+
+    target = "target/tls-probe"
+    with TemporaryDirectory(prefix="clavenar-tls-") as directory:
+        files = Path(directory)
+        keygen = ("-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-noenc")
+        for authority in ("fixture", "other"):
+            openssl("req", "-x509", *keygen, "-days", "4", "-subj", f"/CN={authority} CA",
+                    "-addext", "basicConstraints=critical,CA:TRUE",
+                    "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+                    "-keyout", files / f"{authority}.key", "-out", files / f"{authority}.pem")
+        ca = files / "fixture.der"
+        openssl("x509", "-in", files / "fixture.pem", "-outform", "DER", "-out", ca)
+
+        def leaf(label, name, authority, serial):
+            key, csr, pem = (files / f"{label}.{suffix}" for suffix in ("key", "csr", "pem"))
+            openssl("req", "-new", *keygen, "-subj", "/CN=probe.clavenar.test", "-keyout", key, "-out", csr)
+            extensions = files / "leaf.conf"
+            extensions.write_text(f"subjectAltName=DNS:{name}\n"
+                                  "basicConstraints=critical,CA:FALSE\n"
+                                  "keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")
+            openssl("x509", "-req", "-in", csr, "-CA", files / f"{authority}.pem",
+                    "-CAkey", files / f"{authority}.key", "-set_serial", str(serial), "-days", "2",
+                    "-sha256", "-extfile", extensions, "-out", pem)
+            return pem, key
+
+        valid = leaf("valid", "probe.clavenar.test", "fixture", 1)
+        wrong_name = leaf("wrong-name", "other.clavenar.test", "fixture", 2)
+        other_ca = leaf("other-ca", "probe.clavenar.test", "other", 1)
+        run(["cargo", "+stable", "rustc", "--locked", "--manifest-path", "native/kernel/Cargo.toml",
+             "--features", "tls-probe", "--target", "riscv64gc-unknown-none-elf",
+             "--target-dir", target, "--release", "--",
+             "-C", f"link-arg=-T{Path('native/linker/riscv64.ld').resolve()}",
+             "-C", "link-arg=--no-relax"], env=os.environ | {"CLV_TLS_CA_DER": str(ca)}, check=True)
+
+        now = datetime.now(timezone.utc) + timedelta(seconds=1)
+        system_rng = ("-object", "rng-random,id=rng0,filename=/dev/urandom",
+                      "-device", "virtio-rng-device,rng=rng0")
+
+        def rtc(time):
+            return "-rtc", f"base={time:%Y-%m-%dT%H:%M:%S},clock=vm"
+
+        for label, credentials, time, authenticate in (
+            ("valid certificate", valid, now, True),
+            ("expired certificate", valid, now + timedelta(days=3), False),
+            ("wrong certificate name", wrong_name, now, False),
+            ("untrusted CA", other_ca, now, False),
+        ):
+            boot(target=target, extra_args=system_rng + rtc(time),
+                 verify=partial(check_tls_peer, credentials=credentials, authenticate=authenticate))
+            print(f"Host verified TLS with {label}", flush=True)
+
+        for reason, args in (
+            ("entropy", rtc(now)),
+            ("clock", system_rng + ("-rtc", "base=1969-12-31T23:59:30,clock=vm")),
+        ):
+            boot(target=target, extra_args=args, verify=partial(check_tls_prerequisite, reason=reason))
+            print(f"Host verified TLS refuses to connect without {reason}", flush=True)
+
 if sys.argv[1:] == ["rtc"]:
     check_rtc()
 elif sys.argv[1:] == ["rng"]:
@@ -501,6 +653,8 @@ elif sys.argv[1:] == ["http"]:
     for case in ("complete", "truncated", "silent"):
         boot(http_case=case)
     print("Host verified the guest HTTP request, split response, truncation and timeout", flush=True)
+elif sys.argv[1:] == ["tls"]:
+    check_tls()
 else:
     boot(exercise_network=True)
     print("Host verified Ethernet probes, ARP, ICMP, UDP and TCP echo after clsh>", flush=True)
@@ -556,10 +710,11 @@ VirtIO entropy device. It accumulates short reads within the 500 ms boot
 deadline, resets the device and passes the seed to `netd`. The seed
 initializes smoltcp's transport randomness. The prototype uses seed zero
 when the device is absent or the probe fails.
-The `http-probe` build also requests a separate 32-byte sample in the
-same deadline. It seeds `ChaCha20Rng` with a complete sample and uses
-its output to choose a source port from 57344–65535. When that sample is
-unavailable, the HTTP probe uses port 49154.
+The `http-probe` and `tls-probe` builds also request a separate 32-byte
+sample in the same deadline. A complete sample seeds `ChaCha20Rng` for
+source port selection from 57344–65535 and for TLS handshake randomness.
+When that sample is unavailable, the HTTP probe uses port 49154 and the
+TLS probe reports `entropy unavailable` before trying TCP.
 [VirtIO entropy device specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
 
 Run this at the Linux prompt in `core`. The first two boots use the host
@@ -613,6 +768,48 @@ checks the reported time and `cat /hello.txt` during the wait.
   ' docs/qemu-walkthroughs.md | python3 - rtc
 )
 ```
+
+### Authenticate a TLS peer over native TCP
+
+With `tls-probe`, `netd` connects once to `192.0.2.1:8443` using
+`probe.clavenar.test` for SNI and hostname verification. The RV64 client uses
+`embedded-tls` with `rustpki`, TLS 1.3 and `TLS_AES_128_GCM_SHA256`. It checks
+one P-256 leaf against the configured fixture CA, checks its validity dates
+and DNS subject alternative name, and verifies the peer's TLS signature.
+A complete VirtIO RNG seed and usable Unix time are required before
+connecting. The probe uses a five-second transport deadline and sends
+`close_notify` after authentication. [WebPKI name verification](https://docs.rs/rustls-webpki/latest/webpki/struct.EndEntityCert.html#method.verify_is_valid_for_subject_name)
+
+Run this block at the Linux prompt in `core` with OpenSSL 3 and Python 3
+with TLS 1.3 support. It generates temporary P-256 credentials and builds
+into `target/tls-probe`. The build takes the DER-encoded CA certificate from
+`CLV_TLS_CA_DER`. The fixture keeps the private keys on the host.
+
+```bash
+(
+  set -o pipefail
+  awk '
+    /^### Exchange an Ethernet frame over VirtIO-net$/ { section = 1 }
+    section && /^python3 - .*PY/ { script = 1; next }
+    script && /^PY$/ { exit }
+    script { print }
+  ' docs/qemu-walkthroughs.md | python3 - tls
+)
+```
+
+The valid case prints `netd TLS probe authenticated probe.clavenar.test`.
+An expired leaf, a different DNS SAN with a matching common name, and an
+untrusted CA each produce `netd TLS probe certificate rejected`. The last
+two boots report `entropy unavailable` and `clock unavailable` before
+sending any frames.
+The host verifies the successful handshake and reads `/hello.txt` on each
+boot before stopping QEMU.
+
+On Rust 1.100, the RV64 release build links a roughly 139 KiB `netd`
+read/execute segment with `tls-probe` and 154 KiB with both probe features.
+The successful TLS handshake reached about 60 KiB into the reserved 96 KiB
+stack, or 64 KiB with both features. These measurements use the lowest
+nonzero byte in the initially zeroed stack after the exchange.
 
 ### Probe a VirtIO block device
 

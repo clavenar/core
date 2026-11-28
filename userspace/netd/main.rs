@@ -3,9 +3,13 @@
 
 #[cfg(feature = "http-probe")]
 mod http_probe;
+#[cfg(feature = "tls-probe")]
+mod tls_probe;
 
 use clv::net;
 use core::panic::PanicInfo;
+#[cfg(any(feature = "http-probe", feature = "tls-probe"))]
+use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::{Socket, tcp, udp};
@@ -46,9 +50,6 @@ extern "C" fn _start(
 ) -> ! {
     let [a, b, c, d, e, f, _, _] = (packed_mac as u64).to_le_bytes();
     let mac = [a, b, c, d, e, f];
-    let request = probe_frame(mac, PROBE_PEER, PROBE_REQUEST);
-    let reply = probe_frame(PROBE_PEER, mac, PROBE_REPLY);
-    let mut buffer = [0; net::MAX_FRAME_BYTES];
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
     config.random_seed = seed;
     let mut interface = Interface::new(config, &mut EthernetDevice(None), Instant::ZERO);
@@ -72,10 +73,20 @@ extern "C" fn _start(
     );
     tcp_socket.listen(TCP_ECHO_ENDPOINT).unwrap();
 
-    let mut storage = [SocketStorage::EMPTY; if cfg!(feature = "http-probe") { 3 } else { 2 }];
+    let mut storage = [SocketStorage::EMPTY;
+        2 + cfg!(feature = "http-probe") as usize + cfg!(feature = "tls-probe") as usize];
     let mut sockets = SocketSet::new(&mut storage[..]);
-    let mut udp_handle = sockets.add(udp_socket);
+    let udp_handle = sockets.add(udp_socket);
     let tcp_handle = sockets.add(tcp_socket);
+
+    #[cfg(any(feature = "http-probe", feature = "tls-probe"))]
+    let probe_rng = net::crypto_seed(
+        packed_mac as u64,
+        [_crypto_word0, _crypto_word1, _crypto_word2, _crypto_word3],
+    )
+    .map(ChaCha20Rng::from_seed);
+    #[cfg(feature = "http-probe")]
+    let mut probe_rng = probe_rng;
 
     #[cfg(feature = "http-probe")]
     let (mut probe_rx, mut probe_tx) =
@@ -88,60 +99,112 @@ extern "C" fn _start(
             tcp::SocketBuffer::new(&mut probe_rx[..]),
             tcp::SocketBuffer::new(&mut probe_tx[..]),
         );
-        let seed = net::crypto_seed(
-            packed_mac as u64,
-            [_crypto_word0, _crypto_word1, _crypto_word2, _crypto_word3],
-        );
-        http_probe::Probe::new(sockets.add(socket), &mut response, seed)
+        http_probe::Probe::new(sockets.add(socket), &mut response, probe_rng.as_mut())
     };
 
-    clv::print(b"netd ready\r\n");
-    // An expired deadline supplies the probe's initial clock on a silent link.
-    let mut deadline = cfg!(feature = "http-probe").then_some(1);
-    loop {
-        let Some((frame, now)) = net::receive(&mut buffer, deadline) else {
-            clv::exit(1);
-        };
-        let timestamp = Instant::from_micros((now / NANOS_PER_MICROSECOND) as i64);
-        interface.poll_maintenance(timestamp);
-        if frame == request {
-            send_frame(&reply);
-        } else if !frame.is_empty() {
-            interface.poll_ingress_single(
-                timestamp,
-                &mut EthernetDevice(Some(frame)),
-                &mut sockets,
-            );
-            // Ingress has copied the datagram into the socket queue, freeing the frame buffer.
-            udp_handle = queue_udp_echo(
-                &mut sockets,
-                udp_handle,
-                &mut buffer[..MAX_UDP_PAYLOAD_BYTES],
-            );
-        }
-        queue_tcp_echo(sockets.get_mut::<tcp::Socket>(tcp_handle), &mut buffer);
-        #[cfg(feature = "http-probe")]
-        probe.poll(
-            timestamp,
-            net::unix_nanos(now, _unix_time_offset),
-            &mut interface,
-            &mut sockets,
-        );
-        interface.poll_egress(timestamp, &mut EthernetDevice(None), &mut sockets);
+    #[cfg(feature = "tls-probe")]
+    let (mut tls_rx, mut tls_tx) = ([0; TCP_BUFFER_BYTES], [0; TCP_BUFFER_BYTES]);
+    #[cfg(feature = "tls-probe")]
+    let tls_handle = sockets.add(tcp::Socket::new(
+        tcp::SocketBuffer::new(&mut tls_rx[..]),
+        tcp::SocketBuffer::new(&mut tls_tx[..]),
+    ));
 
-        let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
-        if socket.state() == tcp::State::Closed {
-            socket.listen(TCP_ECHO_ENDPOINT).unwrap();
+    let mut network = Network {
+        interface,
+        sockets,
+        udp_handle,
+        tcp_handle,
+        now: 0,
+        buffer: [0; net::MAX_FRAME_BYTES],
+        request: probe_frame(mac, PROBE_PEER, PROBE_REQUEST),
+        reply: probe_frame(PROBE_PEER, mac, PROBE_REPLY),
+    };
+    clv::print(b"netd ready\r\n");
+    #[cfg(feature = "tls-probe")]
+    tls_probe::run(&mut network, tls_handle, probe_rng);
+    // An expired deadline supplies the probe's initial clock on a silent link.
+    #[cfg(feature = "http-probe")]
+    let mut deadline = Some(Instant::ZERO);
+    #[cfg(not(feature = "http-probe"))]
+    let deadline = None;
+    loop {
+        if network.receive(deadline).is_none() {
+            clv::exit(1);
         }
-        let poll_at = interface.poll_at(timestamp, &sockets);
         #[cfg(feature = "http-probe")]
-        let poll_at = poll_at.into_iter().chain(probe.deadline()).min();
-        deadline = poll_at.map(|at| {
+        {
+            probe.poll(
+                network.timestamp(),
+                net::unix_nanos(network.now, _unix_time_offset),
+                &mut network.interface,
+                &mut network.sockets,
+            );
+            deadline = probe.deadline();
+        }
+        network.flush();
+    }
+}
+
+struct Network<'a> {
+    interface: Interface,
+    sockets: SocketSet<'a>,
+    udp_handle: SocketHandle,
+    tcp_handle: SocketHandle,
+    now: u64,
+    buffer: [u8; net::MAX_FRAME_BYTES],
+    request: [u8; MIN_FRAME_BYTES],
+    reply: [u8; MIN_FRAME_BYTES],
+}
+
+impl Network<'_> {
+    fn timestamp(&self) -> Instant {
+        Instant::from_micros((self.now / NANOS_PER_MICROSECOND) as i64)
+    }
+
+    fn receive(&mut self, deadline: Option<Instant>) -> Option<()> {
+        let now = self.timestamp();
+        let poll_at = self.interface.poll_at(now, &self.sockets);
+        let deadline = poll_at.into_iter().chain(deadline).min().map(|at| {
             // smoltcp uses zero for work due now. The ABI reserves zero for an indefinite wait.
             (at.total_micros().max(0) as u64)
                 .saturating_mul(NANOS_PER_MICROSECOND)
                 .max(1)
         });
+        let (frame, now) = net::receive(&mut self.buffer, deadline)?;
+        self.now = now;
+        let timestamp = Instant::from_micros((now / NANOS_PER_MICROSECOND) as i64);
+        self.interface.poll_maintenance(timestamp);
+        if frame == self.request {
+            send_frame(&self.reply);
+        } else if !frame.is_empty() {
+            self.interface.poll_ingress_single(
+                timestamp,
+                &mut EthernetDevice(Some(frame)),
+                &mut self.sockets,
+            );
+            // Ingress has copied the datagram into the socket queue, freeing the frame buffer.
+            self.udp_handle = queue_udp_echo(
+                &mut self.sockets,
+                self.udp_handle,
+                &mut self.buffer[..MAX_UDP_PAYLOAD_BYTES],
+            );
+        }
+        queue_tcp_echo(
+            self.sockets.get_mut::<tcp::Socket>(self.tcp_handle),
+            &mut self.buffer,
+        );
+        Some(())
+    }
+
+    fn flush(&mut self) {
+        let timestamp = self.timestamp();
+        self.interface
+            .poll_egress(timestamp, &mut EthernetDevice(None), &mut self.sockets);
+        let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp_handle);
+        if socket.state() == tcp::State::Closed {
+            socket.listen(TCP_ECHO_ENDPOINT).unwrap();
+        }
     }
 }
 

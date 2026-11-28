@@ -9,7 +9,9 @@ use self::pipe::LaunchPipes;
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
 use clv_abi::goal::GoalMonitorKind;
-use clv_abi::net::{CRYPTO_SEED_BYTES, CRYPTO_SEED_PRESENT, FrameOperation};
+use clv_abi::net::{
+    CRYPTO_SEED_BYTES, CRYPTO_SEED_PRESENT, FrameOperation, NO_UNIX_TIME_OFFSET, unix_nanos,
+};
 use clv_abi::{
     ChildEvent, CompletionKind, GrantKind, LaunchParent, Program, ReplyKind, RequestKind,
     TaskCompletion,
@@ -200,6 +202,7 @@ pub(crate) struct Scheduler {
     durable_disk: Option<JournalDisk>,
     checkpoint_disk: Option<CheckpointJournal>,
     host_bridge: Option<HostBridge>,
+    netd_time_offset: i64,
     /// The dedicated monitor owns this snapshot from wakeup until its grant is used or revoked.
     monitor_report: Option<MonitorReport>,
     read_denial_watch: Option<ReadDenialWatch>,
@@ -221,6 +224,7 @@ impl Scheduler {
             durable_disk: None,
             checkpoint_disk: None,
             host_bridge: None,
+            netd_time_offset: NO_UNIX_TIME_OFFSET,
             monitor_report: None,
             read_denial_watch: None,
             next_handle: 1,
@@ -240,6 +244,7 @@ impl Scheduler {
         unix_time_offset: i64,
         crypto_seed: Option<[u8; CRYPTO_SEED_BYTES]>,
     ) {
+        self.netd_time_offset = unix_time_offset;
         let [a, b, c, d, e, f] = mac;
         let mut mac = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]);
         let task = &mut self.tasks[NETD_TASK_INDEX];
@@ -260,6 +265,11 @@ impl Scheduler {
 
     pub(crate) fn is_netd(&self) -> bool {
         self.current == NETD_TASK_INDEX
+    }
+
+    pub(crate) fn netd_unix_time(&self) -> Option<usize> {
+        unix_nanos(monotonic_nanos(), self.netd_time_offset)
+            .map(|nanos| (nanos / 1_000_000_000) as usize)
     }
 
     pub(crate) fn wake_netd(&mut self, receive: bool, transmit: bool) {

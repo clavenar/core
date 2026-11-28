@@ -1,6 +1,8 @@
 use clv_abi::agent::SHA256_BYTES;
 use clv_abi::tool::{FILE_TOOLS, ToolId};
-use clv_abi::{PROGRAMS, Program};
+use clv_abi::{PROGRAMS, Program, USER_IMAGE_MAX_BYTES};
+
+use crate::image_limits::NETD_IMAGE_MAX_BYTES;
 
 static TOOL_IMAGE_HASHES: [[u8; SHA256_BYTES]; FILE_TOOLS.len()] =
     include!(concat!(env!("OUT_DIR"), "/tool-image-hashes.rs"));
@@ -21,8 +23,14 @@ pub(crate) const ECHO_REPORT_TASK_INDEX: usize = COMMAND_IMAGE_COUNT;
 pub(crate) const GOAL_MONITOR_TASK_INDEX: usize = ECHO_REPORT_TASK_INDEX + 1;
 pub(crate) const NETD_TASK_INDEX: usize = GOAL_MONITOR_TASK_INDEX + 1;
 pub(crate) const TASK_COUNT: usize = NETD_TASK_INDEX + 1;
-// The HTTP probe also holds a connection and a response buffer.
-const NETD_STACK_PAGES: usize = if cfg!(feature = "http-probe") { 6 } else { 4 };
+// TLS certificate verification uses the most stack when both probes are built.
+const NETD_STACK_PAGES: usize = if cfg!(feature = "tls-probe") {
+    24
+} else if cfg!(feature = "http-probe") {
+    6
+} else {
+    4
+};
 pub(crate) const STACK_PAGE_COUNT: usize = TASK_COUNT - 1 + NETD_STACK_PAGES;
 
 /// The boot shell occupies task 2, between the original hello and echo slots.
@@ -50,21 +58,34 @@ pub(crate) const fn task_stack_pages(task: usize) -> usize {
     }
 }
 
-pub(crate) const BOOT_IMAGES: [(&str, &[u8]); BOOT_IMAGE_COUNT] = {
+#[derive(Clone, Copy)]
+pub(crate) struct BootImage {
+    pub(crate) name: &'static str,
+    pub(crate) elf: &'static [u8],
+    pub(crate) max_bytes: usize,
+}
+
+pub(crate) const BOOT_IMAGES: [BootImage; BOOT_IMAGE_COUNT] = {
     let tools: [&[u8]; PROGRAMS.len()] = include!(concat!(env!("OUT_DIR"), "/program-images.rs"));
-    let mut images = [(
-        "shell",
-        include_bytes!(concat!(env!("OUT_DIR"), "/shell.elf")) as &[u8],
-    ); BOOT_IMAGE_COUNT];
+    let mut images = [BootImage {
+        name: "shell",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/shell.elf")),
+        max_bytes: USER_IMAGE_MAX_BYTES,
+    }; BOOT_IMAGE_COUNT];
     let mut i = 0;
     while i < PROGRAMS.len() {
         let (program, name) = PROGRAMS[i];
-        images[task_index(program)] = (name, tools[i]);
+        images[task_index(program)] = BootImage {
+            name,
+            elf: tools[i],
+            max_bytes: USER_IMAGE_MAX_BYTES,
+        };
         i += 1;
     }
-    images[NETD_IMAGE_INDEX] = (
-        "netd",
-        include_bytes!(concat!(env!("OUT_DIR"), "/netd.elf")),
-    );
+    images[NETD_IMAGE_INDEX] = BootImage {
+        name: "netd",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/netd.elf")),
+        max_bytes: NETD_IMAGE_MAX_BYTES,
+    };
     images
 };

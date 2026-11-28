@@ -56,8 +56,12 @@ when they are absent from the Cargo cache.
 A build with the `http-probe` feature sends one native HTTP request over the
 private QEMU link. [Run the HTTP probe](docs/qemu-walkthroughs.md#fetch-an-http-response-over-native-tcp)
 
+A build with `tls-probe` authenticates a fixture peer over TLS 1.3 using native
+TCP. The walkthrough uses OpenSSL 3 and Python's TLS 1.3 support.
+[Run the TLS probe](docs/qemu-walkthroughs.md#authenticate-a-tls-peer-over-native-tcp)
+
 With modern VirtIO RNG attached, the kernel reads a seed for `netd` at boot.
-The `http-probe` build also reads a separate 32-byte seed for ChaCha20.
+The `http-probe` and `tls-probe` builds read a separate 32-byte seed for ChaCha20.
 [Verify TCP seeding with VirtIO RNG](docs/qemu-walkthroughs.md#seed-tcp-with-virtio-rng)
 
 `netd` gets its Unix clock reference from the QEMU `virt` RTC at boot.
@@ -166,6 +170,7 @@ Check Rust formatting with `rustfmt` from the stable toolchain.
 ```sh
 cargo +stable fmt --manifest-path native/kernel/Cargo.toml --check
 cargo +stable fmt --manifest-path crates/clv-abi/Cargo.toml --check
+cargo +stable fmt --manifest-path userspace/netd/Cargo.toml --check
 rustfmt +stable --edition 2024 --check \
   userspace/libclv/lib.rs userspace/echo/main.rs userspace/grep/main.rs \
   userspace/hello/main.rs userspace/shell/main.rs

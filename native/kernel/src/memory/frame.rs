@@ -1,12 +1,14 @@
+use clv_abi::USER_IMAGE_MAX_BYTES;
 use core::ptr;
 
 use super::user_image::MAX_USER_IMAGE_PAGES;
 use crate::programs::{BOOT_IMAGE_COUNT, STACK_PAGE_COUNT, TASK_COUNT};
 
 pub(crate) const FRAME_SIZE: usize = 4096;
+const IMAGE_PAGES: usize =
+    (BOOT_IMAGE_COUNT - 1) * USER_IMAGE_MAX_BYTES.div_ceil(FRAME_SIZE) + MAX_USER_IMAGE_PAGES;
 // Three shared tables, three private tables per task, all stacks and one copy of each image.
-const FRAME_COUNT: usize =
-    3 + 3 * TASK_COUNT + STACK_PAGE_COUNT + BOOT_IMAGE_COUNT * MAX_USER_IMAGE_PAGES;
+const FRAME_COUNT: usize = 3 + 3 * TASK_COUNT + STACK_PAGE_COUNT + IMAGE_PAGES;
 const WORDS_PER_FRAME: usize = FRAME_SIZE / size_of::<u64>();
 
 #[repr(C, align(4096))]

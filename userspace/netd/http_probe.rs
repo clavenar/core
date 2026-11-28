@@ -1,6 +1,6 @@
 use core::ops::Range;
 use rand_chacha::ChaCha20Rng;
-use rand_chacha::rand_core::{RngCore, SeedableRng};
+use rand_chacha::rand_core::RngCore;
 use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
 use smoltcp::time::{Duration, Instant};
@@ -58,11 +58,11 @@ impl<'a> Probe<'a> {
     pub(super) fn new(
         handle: SocketHandle,
         bytes: &'a mut [u8; RESPONSE_BYTES],
-        seed: Option<[u8; clv::net::CRYPTO_SEED_BYTES]>,
+        rng: Option<&mut ChaCha20Rng>,
     ) -> Self {
-        let local_port = if let Some(seed) = seed {
+        let local_port = if let Some(rng) = rng {
             // Use the upper half of the dynamic port range for the probe.
-            let port = 0xe000 | (ChaCha20Rng::from_seed(seed).next_u32() as u16 & 0x1fff);
+            let port = 0xe000 | (rng.next_u32() as u16 & 0x1fff);
             clv::print(b"netd crypto entropy ready\r\n");
             port
         } else {

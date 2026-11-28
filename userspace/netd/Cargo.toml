@@ -11,11 +11,21 @@ test = false
 
 [features]
 http-probe = ["dep:httparse", "dep:rand_chacha"]
+tls-probe = [
+    "dep:embedded-io",
+    "dep:embedded-tls",
+    "dep:rand_chacha",
+    "dep:rustls-pki-types",
+    "dep:webpki",
+]
 
 [dependencies]
 clv = { path = "../libclv" }
+embedded-io = { version = "=0.7.1", default-features = false, optional = true }
+embedded-tls = { version = "=0.19.0", default-features = false, features = ["rustpki"], optional = true }
 httparse = { version = "=1.10.1", default-features = false, optional = true }
 rand_chacha = { version = "=0.3.1", default-features = false, optional = true }
+rustls-pki-types = { version = "=1.16.0", default-features = false, optional = true }
 smoltcp = { version = "=0.14.0", default-features = false, features = [
     "medium-ethernet",
     "proto-ipv4",
@@ -24,6 +34,7 @@ smoltcp = { version = "=0.14.0", default-features = false, features = [
     "socket-udp",
     "auto-icmp-echo-reply",
 ] }
+webpki = { package = "rustls-webpki", version = "=0.103.17", default-features = false, optional = true }
 
 [profile.release]
 opt-level = "z"

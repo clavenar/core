@@ -1,9 +1,9 @@
-use clv_abi::USER_IMAGE_MAX_BYTES;
+use crate::image_limits::NETD_IMAGE_MAX_BYTES;
 
 use super::frame::{FRAME_SIZE, Frame, FrameAllocator};
 
 pub(crate) const USER_TEXT_BASE: usize = 0x0040_0000;
-pub(super) const MAX_USER_IMAGE_PAGES: usize = USER_IMAGE_MAX_BYTES.div_ceil(FRAME_SIZE);
+pub(super) const MAX_USER_IMAGE_PAGES: usize = NETD_IMAGE_MAX_BYTES.div_ceil(FRAME_SIZE);
 
 const ELF_HEADER_SIZE: usize = 64;
 const PROGRAM_HEADER_SIZE: usize = 56;
@@ -20,7 +20,11 @@ pub(crate) struct LoadedImage<'a> {
 }
 
 /// Loads a static RV64 executable, allocating only the frames its segment uses.
-pub(crate) fn load<'a>(image: &[u8], frames: &mut FrameAllocator<'a>) -> Option<LoadedImage<'a>> {
+pub(crate) fn load<'a>(
+    image: &[u8],
+    max_bytes: usize,
+    frames: &mut FrameAllocator<'a>,
+) -> Option<LoadedImage<'a>> {
     let header = image.get(..ELF_HEADER_SIZE)?;
     // Magic, ELF64 class, little-endian data, and the identification version.
     if !header.starts_with(b"\x7fELF\x02\x01\x01")
@@ -45,7 +49,7 @@ pub(crate) fn load<'a>(image: &[u8], frames: &mut FrameAllocator<'a>) -> Option<
     for header in headers.chunks_exact(PROGRAM_HEADER_SIZE) {
         match u32_at(header, 0) {
             PT_NULL | PT_RISCV_ATTRIBUTES => {}
-            PT_LOAD if segment.is_none() => segment = Some(load_segment(image, header)?),
+            PT_LOAD if segment.is_none() => segment = Some(load_segment(image, header, max_bytes)?),
             _ => return None,
         }
     }
@@ -67,7 +71,7 @@ pub(crate) fn load<'a>(image: &[u8], frames: &mut FrameAllocator<'a>) -> Option<
     Some(LoadedImage { entry, pages })
 }
 
-fn load_segment<'a>(image: &'a [u8], header: &[u8]) -> Option<(&'a [u8], usize)> {
+fn load_segment<'a>(image: &'a [u8], header: &[u8], max_bytes: usize) -> Option<(&'a [u8], usize)> {
     let offset = usize_at(header, 8);
     let file_size = usize_at(header, 32);
     let memory_size = usize_at(header, 40);
@@ -77,7 +81,7 @@ fn load_segment<'a>(image: &'a [u8], header: &[u8]) -> Option<(&'a [u8], usize)>
         || offset % FRAME_SIZE != 0
         || file_size == 0
         || file_size > memory_size
-        || memory_size > USER_IMAGE_MAX_BYTES
+        || memory_size > max_bytes.min(NETD_IMAGE_MAX_BYTES)
     {
         return None;
     }

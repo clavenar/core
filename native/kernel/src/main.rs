@@ -6,6 +6,7 @@ mod console;
 mod drivers;
 mod fs;
 mod host_bridge;
+mod image_limits;
 mod ipc;
 mod memory;
 mod programs;
@@ -52,8 +53,7 @@ extern "C" fn kernel_main() -> ! {
     let bridge = unsafe { Console::discover() };
     // SAFETY: The single boot hart claims the frame pool here once.
     let mut frames = unsafe { FrameAllocator::from_boot_pool() };
-    let images = programs::BOOT_IMAGES
-        .map(|(name, image)| load_user_program(&mut frames, name.as_bytes(), image));
+    let images = programs::BOOT_IMAGES.map(|image| load_user_program(&mut frames, image));
     let pages = images.each_ref().map(|image| image.pages);
     let mappings = sv39::BootMappings::new(
         &mut frames,
@@ -93,7 +93,7 @@ extern "C" fn kernel_main() -> ! {
 
 fn probe_net_seeds() -> Option<rng::BootSeeds> {
     // SAFETY: The boot hart probes once before it enables paging.
-    match unsafe { rng::probe(cfg!(feature = "http-probe")) }? {
+    match unsafe { rng::probe(cfg!(any(feature = "http-probe", feature = "tls-probe"))) }? {
         Ok(seeds) => {
             uart::write(b"virtio rng ready\r\n");
             Some(seeds)
@@ -256,10 +256,10 @@ fn block_error_message(error: block::ProbeError) -> &'static [u8] {
 
 fn load_user_program<'a>(
     frames: &mut FrameAllocator<'a>,
-    name: &[u8],
-    image: &[u8],
+    image: programs::BootImage,
 ) -> user_image::LoadedImage<'a> {
-    let Some(loaded) = user_image::load(image, frames) else {
+    let name = image.name.as_bytes();
+    let Some(loaded) = user_image::load(image.elf, image.max_bytes, frames) else {
         uart::write(b"User ELF load failed for ");
         uart::write(name);
         uart::write(b"\r\n");

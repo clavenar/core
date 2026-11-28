@@ -1,5 +1,7 @@
 use clv_abi::SYSCALL_ERROR;
-use clv_abi::net::{ETHERNET_HEADER_BYTES, FrameOperation, MAX_FRAME_BYTES, NO_RECEIVE_DEADLINE};
+use clv_abi::net::{
+    ETHERNET_HEADER_BYTES, FrameOperation, MAX_FRAME_BYTES, NO_RECEIVE_DEADLINE, READ_UNIX_TIME,
+};
 
 use super::{REG_A0, REG_A1, REG_A2, REG_A3};
 use crate::arch::monotonic_nanos;
@@ -15,6 +17,11 @@ pub(super) fn frame_io(
 ) -> WaitResult<usize> {
     if !scheduler.is_netd() {
         return WaitResult::Unavailable;
+    }
+    if frame.registers[REG_A0] == READ_UNIX_TIME {
+        return scheduler
+            .netd_unix_time()
+            .map_or(WaitResult::Unavailable, WaitResult::Ready);
     }
     let Some(operation) = FrameOperation::from_register(frame.registers[REG_A0]) else {
         return WaitResult::Unavailable;

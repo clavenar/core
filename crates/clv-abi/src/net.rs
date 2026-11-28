@@ -14,6 +14,8 @@ pub const NO_RECEIVE_DEADLINE: u64 = 0;
 pub const NO_UNIX_TIME_OFFSET: i64 = i64::MIN;
 pub const CRYPTO_SEED_PRESENT: u64 = 1 << 48;
 pub const CRYPTO_SEED_BYTES: usize = 32;
+/// Operation for reading current Unix seconds through SYS_NET_FRAME.
+pub const READ_UNIX_TIME: usize = 2;
 
 pub fn crypto_seed(packed_mac: u64, words: [u64; 4]) -> Option<[u8; CRYPTO_SEED_BYTES]> {
     if packed_mac & CRYPTO_SEED_PRESENT == 0 {

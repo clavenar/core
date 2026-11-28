@@ -1,5 +1,7 @@
 #[path = "build/definition.rs"]
 mod definition;
+#[path = "src/image_limits.rs"]
+mod image_limits;
 
 use clv_abi::USER_IMAGE_MAX_BYTES;
 use clv_abi::agent::{
@@ -7,6 +9,7 @@ use clv_abi::agent::{
     FIND_GREETING_V6, FIND_GREETING_V7, FIND_GREETING_V8, SHA256_BYTES,
 };
 use clv_abi::tool::FILE_TOOLS;
+use image_limits::NETD_IMAGE_MAX_BYTES;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fmt::Write;
@@ -87,7 +90,7 @@ fn build_program(source: &Path, linker_script: &Path, output: &Path, name: &str)
     let status = target_rustc(output, &["clv_abi", "clv"])
         .arg(format!("--crate-name=clavenar_{name}"))
         .arg("-Clto=fat")
-        .args(user_linker_args(linker_script))
+        .args(user_linker_args(linker_script, USER_IMAGE_MAX_BYTES))
         .arg(source)
         .arg("-o")
         .arg(output.join(format!("{name}.elf")))
@@ -110,9 +113,22 @@ fn build_netd(source: &Path, linker_script: &Path, output: &Path) {
     if cfg!(feature = "http-probe") {
         cargo.args(["--features", "http-probe"]);
     }
+    if cfg!(feature = "tls-probe") {
+        println!("cargo:rerun-if-env-changed=CLV_TLS_CA_DER");
+        let ca = PathBuf::from(
+            env::var_os("CLV_TLS_CA_DER")
+                .expect("set CLV_TLS_CA_DER to the fixture CA certificate in DER format"),
+        );
+        println!("cargo:rerun-if-changed={}", ca.display());
+        let staged = output.join("tls-ca.der");
+        fs::copy(ca, &staged).expect("could not stage the TLS fixture CA certificate");
+        cargo
+            .args(["--features", "tls-probe"])
+            .env("CLV_TLS_CA_DER", staged);
+    }
     let status = cargo
         .arg("--")
-        .args(user_linker_args(linker_script))
+        .args(user_linker_args(linker_script, NETD_IMAGE_MAX_BYTES))
         .status()
         .expect("could not invoke Cargo for netd");
     assert!(status.success(), "could not build netd");
@@ -123,11 +139,11 @@ fn build_netd(source: &Path, linker_script: &Path, output: &Path) {
     .expect("could not stage the netd image");
 }
 
-fn user_linker_args(linker_script: &Path) -> [String; 4] {
+fn user_linker_args(linker_script: &Path, max_bytes: usize) -> [String; 4] {
     [
         "-Clink-arg=--no-relax".into(),
         "-Clink-arg=--strip-all".into(),
-        format!("-Clink-arg=--defsym=USER_IMAGE_MAX_BYTES={USER_IMAGE_MAX_BYTES}"),
+        format!("-Clink-arg=--defsym=USER_IMAGE_MAX_BYTES={max_bytes}"),
         format!("-Clink-arg=-T{}", linker_script.display()),
     ]
 }

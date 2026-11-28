@@ -319,16 +319,17 @@ an unavailable offset. `netd` adds the offset to a monotonic timestamp
 with checked arithmetic to obtain Unix nanoseconds.
 Since 0.0.91, bit 48 of the startup `a1` marks a complete 32-byte
 cryptographic seed. When the bit is set, `a4`–`a7` hold its four
-little-endian words in order. The `http-probe` build requests this seed
-separately from the transport seed.
+little-endian words in order. The `http-probe` and `tls-probe` builds
+request this seed separately from the transport seed.
 The kernel retains the MMIO and DMA mappings in supervisor memory.
 
 | Operation in `a0` | Stack buffer in `a1` | Size in `a2` | Deadline in `a3` | Result in `a0` | Result in `a1` |
 | --- | --- | --- | --- | --- | --- |
 | 0 receive | Writable destination | 1,514-byte capacity | Absolute guest monotonic nanoseconds, or 0 to wait for a frame | Actual frame length, or 0 on deadline or retry | Current guest monotonic nanoseconds |
 | 1 transmit | Readable source | Frame length from 14 through 1,514 bytes | Unused | Length accepted into the transmit queue | Unspecified |
+| 2 read Unix time | Unused | Unused | Unused | Current Unix seconds, or -1 if the clock is unavailable | Unspecified |
 
-Both operations use Ethernet bytes without a VirtIO header or FCS. An empty
+Frame operations use Ethernet bytes without a VirtIO header or FCS. An empty
 receive queue or a busy transmitter parks the service until the timer observes
 readiness or the receive deadline elapses. A ready frame takes precedence over
 an elapsed deadline. When another runnable task is unavailable, the call
@@ -336,6 +337,9 @@ returns zero and the service can retry. Each successful receive returns the
 current time, including a zero-length result. Invalid arguments, ordinary
 tasks and unavailable devices return -1. A queue failure or transmit timeout
 stops the device path and wakes a pending service call with an error.
+Since kernel 0.0.92, operation 2 reads the RTC-backed clock without accessing
+the network queues. It derives Unix seconds from the current monotonic time
+and the boot offset. Only `netd` can call it.
 [QEMU walkthrough](qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net)
 
 ## Goal and agent calls

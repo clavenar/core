@@ -1,9 +1,9 @@
 pub use clv_abi::net::{CRYPTO_SEED_BYTES, MAX_FRAME_BYTES, crypto_seed, unix_nanos};
 
 use clv_abi::SYS_NET_FRAME;
-use clv_abi::net::{FrameOperation, NO_RECEIVE_DEADLINE};
+use clv_abi::net::{FrameOperation, NO_RECEIVE_DEADLINE, READ_UNIX_TIME};
 
-use super::{ecall, write_from};
+use super::{ecall, syscall, syscall_result, write_from};
 
 /// Waits for an Ethernet frame or an optional absolute guest monotonic deadline.
 /// The result includes current guest monotonic nanoseconds. An empty slice
@@ -23,4 +23,9 @@ pub fn receive(buffer: &mut [u8; MAX_FRAME_BYTES], deadline: Option<u64>) -> Opt
 /// Queues a frame from the service's stack. A zero result asks the caller to retry.
 pub fn transmit(frame: &[u8]) -> Option<usize> {
     write_from(SYS_NET_FRAME, FrameOperation::Transmit as usize, frame)
+}
+
+/// Reads the current Unix seconds for certificate verification.
+pub fn unix_time() -> Option<u64> {
+    syscall_result(syscall(SYS_NET_FRAME, READ_UNIX_TIME, 0, 0)).map(|time| time as u64)
 }
