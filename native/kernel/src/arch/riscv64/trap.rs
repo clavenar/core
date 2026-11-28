@@ -4,6 +4,7 @@ use core::arch::{asm, global_asm};
 use super::{idle, timer};
 use crate::console::{write_hex, write_task};
 use crate::drivers::uart;
+use crate::drivers::virtio::net::{self, Nic};
 use crate::fs::ramfs::RamFs;
 use crate::memory::sv39::AddressSpace;
 use crate::memory::usercopy::SSTATUS_SUM;
@@ -55,11 +56,13 @@ impl TrapFrame {
 struct KernelState {
     scheduler: Option<Scheduler>,
     ramfs: RamFs,
+    nic: Option<Nic>,
 }
 
 static mut KERNEL_STATE: KernelState = KernelState {
     scheduler: None,
     ramfs: RamFs::new(),
+    nic: None,
 };
 
 unsafe extern "C" {
@@ -76,13 +79,16 @@ fn supervisor_status() -> usize {
 /// # Safety
 ///
 /// Only the boot hart may start the scheduler, after installing the trap
-/// vector and preparing all user address spaces.
+/// vector and preparing all user address spaces. The NIC's MMIO and DMA
+/// storage must remain mapped in supervisor mode.
 pub(crate) unsafe fn start(
     tasks: [(AddressSpace, usize); TASK_COUNT],
+    nic: Option<Nic>,
     after_paging: impl FnOnce(&mut Scheduler, &mut RamFs),
 ) -> ! {
     // SAFETY: No user task has run, and only this hart accesses the state.
     let state = unsafe { &mut *(&raw mut KERNEL_STATE) };
+    state.nic = nic;
     let scheduler = state
         .scheduler
         .insert(Scheduler::new(tasks, supervisor_status()));
@@ -123,6 +129,7 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         return;
     }
     if scause == timer::INTERRUPT_CAUSE {
+        net::poll(&mut state.nic);
         if scheduler.preempt(frame) {
             switch_task(scheduler, current, SwitchReason::Timer);
         }

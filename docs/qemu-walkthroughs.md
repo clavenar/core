@@ -72,7 +72,7 @@ its own Sv39 root and 4 KiB read/write, non-executable stack.
 The stack starts at `0x00402000` for one- and two-page images and immediately
 after the image for larger programs. The initial stack pointer is at the
 top of that page. Nonempty syscall buffers must fit within the calling
-task's stack. The kernel, UART and optional host bridge MMIO mappings are
+task's stack. The kernel, UART and attached VirtIO MMIO mappings are
 shared in supervisor mode. The 91-frame boot pool has room for four full-size
 images, six task stacks and the page tables. The pool, kernel and 64 KiB
 supervisor stack fit within one aligned 2 MiB physical region.
@@ -84,22 +84,25 @@ starts a fresh quantum when the timer fires or a stopped task is replaced.
 ### Exchange an Ethernet frame over VirtIO-net
 
 The kernel reads the MAC address from an attached modern VirtIO-net device
-and posts one receive buffer before paging. It waits up to 500 ms for a
-60-byte Ethernet frame with the local experimental EtherType `0x88b5`
-and the padded request `CLVNET01`. For that request it sends one
-`CLVNET02` reply, polls transmit completion for up to 500 ms and resets the
-device before continuing to the shell. [VirtIO network specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html) · [EtherType registry](https://www.iana.org/assignments/ieee-802-numbers/ieee-802-numbers.xhtml)
+and posts one receive buffer before paging. The NIC stays active after the
+shell starts. Each timer tick handles at most one frame and reposts its
+receive buffer after copying it. A busy transmitter leaves the next frame
+queued. If a transmit is still pending at its 500 ms deadline, the driver
+requests reset and stops polling the NIC. Its DMA buffers stay reserved.
+The responder accepts a 60-byte Ethernet frame with
+the local experimental EtherType `0x88b5` and the padded request `CLVNET01`.
+It sends one `CLVNET02` reply per request. [VirtIO network specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html) · [EtherType registry](https://www.iana.org/assignments/ieee-802-numbers/ieee-802-numbers.xhtml)
 
 After building the kernel, paste this block at the Linux prompt in `core`.
-It connects each QEMU boot to a private Unix datagram socket and stops
-the VM after seeing `clsh>`. [QEMU datagram backend options](https://www.qemu.org/docs/master/system/invocation.html)
+It connects each QEMU boot to a private Unix datagram socket, checks the
+shell and stops the VM after the checks. [QEMU datagram backend options](https://www.qemu.org/docs/master/system/invocation.html)
 
 ```sh
 python3 - <<'PY'
 import os
 from select import select
 from socket import SOCK_DGRAM, socketpair
-from subprocess import DEVNULL, PIPE, STDOUT, Popen
+from subprocess import PIPE, STDOUT, Popen
 import sys
 from time import monotonic
 
@@ -108,21 +111,30 @@ host_mac = bytes.fromhex("02 00 00 00 00 01")
 ethertype = bytes.fromhex("88 b5")
 request = (guest_mac + host_mac + ethertype + b"CLVNET01").ljust(60, b"\0")
 expected = (host_mac + guest_mac + ethertype + b"CLVNET02").ljust(60, b"\0")
+prompt = b"\x1b[32mclsh> \x1b[0m"
 
-def wait_for(guest, serial, marker):
+def wait_for_shell(guest):
+    serial = bytearray()
     deadline = monotonic() + 5
-    while marker not in serial:
+    while prompt not in serial:
         remaining = deadline - monotonic()
         if remaining <= 0 or not select([guest.stdout], [], [], remaining)[0]:
-            raise RuntimeError(f"Timed out waiting for {marker!r}")
+            raise RuntimeError("Timed out waiting for clsh>")
         chunk = os.read(guest.stdout.fileno(), 4096)
         if not chunk:
-            raise RuntimeError("QEMU stopped before reaching the shell")
+            raise RuntimeError("QEMU stopped while waiting for clsh>")
         sys.stdout.buffer.write(chunk)
         sys.stdout.buffer.flush()
         serial.extend(chunk)
+    return serial
 
-def boot(send_request):
+def check_shell(guest):
+    guest.stdin.write(b"cat /hello.txt\n")
+    guest.stdin.flush()
+    if b"Hello from RamFS" not in wait_for_shell(guest):
+        raise RuntimeError("The shell could not read /hello.txt")
+
+def boot(requests):
     host, nic = socketpair(type=SOCK_DGRAM)
     with host, nic:
         fd = nic.fileno()
@@ -134,34 +146,33 @@ def boot(send_request):
             "-global", "virtio-mmio.force-legacy=off",
             "-netdev", f"dgram,id=net0,local.type=fd,local.str={fd}",
             "-device", "virtio-net-device,netdev=net0,mac=52:54:00:12:34:56",
-        ], stdin=DEVNULL, stdout=PIPE, stderr=STDOUT, pass_fds=(fd,))
+        ], stdin=PIPE, stdout=PIPE, stderr=STDOUT, pass_fds=(fd,))
         nic.close()
         try:
-            serial = bytearray()
-            wait_for(guest, serial, b"virtio net ready mac=52:54:00:12:34:56")
-            if send_request:
+            boot_log = wait_for_shell(guest)
+            if b"virtio net ready mac=52:54:00:12:34:56" not in boot_log:
+                raise RuntimeError("VirtIO-net did not report the configured MAC")
+            host.settimeout(2)
+            check_shell(guest)
+            for _ in range(requests):
                 host.send(request)
-                host.settimeout(2)
                 if host.recv(2048) != expected:
                     raise RuntimeError("The Ethernet reply differs from the expected frame")
-                wait_for(guest, serial, b"virtio net received probe")
-                wait_for(guest, serial, b"virtio net sent probe reply")
-            else:
-                wait_for(guest, serial, b"virtio net receive timed out")
-            wait_for(guest, serial, b"\x1b[32mclsh> \x1b[0m")
+                check_shell(guest)
             print()
         finally:
             guest.terminate()
             guest.wait(timeout=5)
 
-boot(send_request=True)
-print("Host verified the 60-byte Ethernet reply", flush=True)
-boot(send_request=False)
+boot(requests=3)
+print("Host verified three 60-byte Ethernet replies after clsh>", flush=True)
+boot(requests=0)
+print("Silent peer reached clsh>", flush=True)
 PY
 ```
 
-The first boot reports receive and transmit completion. The second reports
-`virtio net receive timed out` and reaches the shell with the peer silent.
+The first boot verifies all three replies and reads `/hello.txt` between
+exchanges. The second reaches the shell and reads the file with the peer silent.
 Run the regular boot command with `-nic none` to check the shell on its
 own. [Build and boot the kernel](../README.md#build-and-run-the-rv64-kernel)
 

@@ -39,7 +39,7 @@ extern "C" fn kernel_main() -> ! {
 
     let journal = probe_block();
     // SAFETY: QEMU virt supplies the MMIO windows, and paging is still disabled.
-    unsafe { net::boot_probe() };
+    let nic = unsafe { net::Nic::attach() };
     // SAFETY: The transport windows are still accessible before paging.
     let bridge = unsafe { Console::discover() };
     // SAFETY: The single boot hart claims the frame pool here once.
@@ -54,6 +54,7 @@ extern "C" fn kernel_main() -> ! {
         [
             bridge.as_ref().map(Console::base),
             journal.as_ref().map(block::JournalDevice::base),
+            nic.as_ref().map(net::Nic::base),
         ]
         .into_iter()
         .flatten(),
@@ -79,7 +80,7 @@ extern "C" fn kernel_main() -> ! {
         scheduler.attach_host_bridge(bridge.and_then(probe_bridge));
     };
     // SAFETY: The boot hart installed the trap vector and built every task's address space.
-    unsafe { trap::start(tasks, after_paging) }
+    unsafe { trap::start(tasks, nic, after_paging) }
 }
 
 fn probe_bridge(bridge: Console) -> Option<Port> {

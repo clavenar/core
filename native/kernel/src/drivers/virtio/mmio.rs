@@ -63,7 +63,7 @@ impl Device {
     }
 
     pub(super) fn reset(&self, deadline: u64) -> bool {
-        self.write(STATUS, 0);
+        self.request_reset();
         loop {
             if self.read(STATUS) == 0 {
                 return true;
@@ -73,6 +73,10 @@ impl Device {
             }
             core::hint::spin_loop();
         }
+    }
+
+    pub(super) fn request_reset(&self) {
+        self.write(STATUS, 0);
     }
 
     pub(super) fn negotiate(&self, supported_features: u32) -> Option<u32> {
