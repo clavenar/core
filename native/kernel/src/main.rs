@@ -17,7 +17,7 @@ use console::write_hex;
 use core::panic::PanicInfo;
 use drivers::uart;
 use drivers::virtio::console::{Console, Port, ProbeError};
-use drivers::virtio::{block, net};
+use drivers::virtio::{block, net, rng};
 use fs::ramfs::{RamFs, SavedFiles};
 use memory::frame::FrameAllocator;
 use memory::sv39;
@@ -40,6 +40,10 @@ extern "C" fn kernel_main() -> ! {
     let journal = probe_block();
     // SAFETY: QEMU virt supplies the MMIO windows, and paging is still disabled.
     let nic = unsafe { net::Nic::attach() };
+    let net_seed = nic
+        .as_ref()
+        .and_then(|_| probe_net_seed())
+        .unwrap_or_default();
     // SAFETY: The transport windows are still accessible before paging.
     let bridge = unsafe { Console::discover() };
     // SAFETY: The single boot hart claims the frame pool here once.
@@ -80,7 +84,26 @@ extern "C" fn kernel_main() -> ! {
         scheduler.attach_host_bridge(bridge.and_then(probe_bridge));
     };
     // SAFETY: The boot hart installed the trap vector and built every task's address space.
-    unsafe { trap::start(tasks, nic, after_paging) }
+    unsafe { trap::start(tasks, nic, net_seed, after_paging) }
+}
+
+fn probe_net_seed() -> Option<u64> {
+    // SAFETY: The boot hart probes once before it enables paging.
+    match unsafe { rng::probe() }? {
+        Ok(seed) => {
+            uart::write(b"virtio rng ready\r\n");
+            Some(seed)
+        }
+        Err(error) => {
+            uart::write(match error {
+                rng::ProbeError::Device => b"virtio rng unavailable\r\n",
+                rng::ProbeError::Queue => b"virtio rng queue error\r\n",
+                rng::ProbeError::Timeout => b"virtio rng timed out\r\n",
+                rng::ProbeError::ResetTimeout => b"virtio rng reset timed out\r\n",
+            });
+            None
+        }
+    }
 }
 
 fn probe_bridge(bridge: Console) -> Option<Port> {

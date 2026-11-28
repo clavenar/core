@@ -34,13 +34,14 @@ const PROBE_REPLY: &[u8; 8] = b"CLVNET02";
 // SAFETY: The kernel enters this unique symbol with an aligned user stack.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
-extern "C" fn _start(_task: usize, packed_mac: usize) -> ! {
+extern "C" fn _start(_task: usize, packed_mac: usize, seed: u64) -> ! {
     let [a, b, c, d, e, f, _, _] = (packed_mac as u64).to_le_bytes();
     let mac = [a, b, c, d, e, f];
     let request = probe_frame(mac, PROBE_PEER, PROBE_REQUEST);
     let reply = probe_frame(PROBE_PEER, mac, PROBE_REPLY);
     let mut buffer = [0; net::MAX_FRAME_BYTES];
-    let config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
+    let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
+    config.random_seed = seed;
     let mut interface = Interface::new(config, &mut EthernetDevice(None), Instant::ZERO);
     interface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(GUEST_ADDRESS, 24)).unwrap());
 

@@ -3,6 +3,7 @@ pub(crate) mod console;
 mod mmio;
 pub(crate) mod net;
 mod queue;
+pub(crate) mod rng;
 
 use core::arch::asm;
 

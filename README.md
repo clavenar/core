@@ -56,6 +56,9 @@ when they are absent from the Cargo cache.
 A build with the `http-probe` feature sends one native HTTP request over the
 private QEMU link. [Run the HTTP probe](docs/qemu-walkthroughs.md#fetch-an-http-response-over-native-tcp)
 
+With modern VirtIO RNG attached, the kernel reads a seed for `netd` at boot.
+[Verify TCP seeding with VirtIO RNG](docs/qemu-walkthroughs.md#seed-tcp-with-virtio-rng)
+
 ## Run the QEMU host broker
 
 After building the kernel, use Python 3.10 or later with its standard

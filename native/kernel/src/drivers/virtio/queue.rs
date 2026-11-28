@@ -227,7 +227,14 @@ impl<const BUFFER_BYTES: usize> Queue<BUFFER_BYTES> {
     }
 
     pub(super) fn offer_receive(&mut self) -> Result<(), QueueError> {
-        self.submit(BUFFER_BYTES, DEVICE_WRITES)
+        self.offer_receive_bytes(BUFFER_BYTES)
+    }
+
+    pub(super) fn offer_receive_bytes(&mut self, length: usize) -> Result<(), QueueError> {
+        if !(1..=BUFFER_BYTES).contains(&length) {
+            return Err(QueueError);
+        }
+        self.submit(length, DEVICE_WRITES)
     }
 
     pub(super) fn offer_send(&mut self, bytes: &[u8]) -> Result<(), QueueError> {

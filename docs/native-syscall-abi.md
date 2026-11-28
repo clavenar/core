@@ -310,7 +310,10 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 The kernel authorizes call 77, `net_frame`, by the current task's boot slot.
 When a modern VirtIO-net device initializes successfully, that slot starts
 `netd` with the six MAC octets in the low 48 bits of `a1`, in little-endian
-order. The kernel retains the MMIO and DMA mappings in supervisor memory.
+order. Since kernel 0.0.89 it also passes the 64-bit smoltcp seed in
+`a2`, assembled in little-endian order from VirtIO RNG bytes. Zero is the
+prototype fallback when the entropy device is absent or the read fails.
+The kernel retains the MMIO and DMA mappings in supervisor memory.
 
 | Operation in `a0` | Stack buffer in `a1` | Size in `a2` | Deadline in `a3` | Result in `a0` | Result in `a1` |
 | --- | --- | --- | --- | --- | --- |
