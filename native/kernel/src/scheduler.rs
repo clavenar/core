@@ -9,6 +9,7 @@ use self::pipe::LaunchPipes;
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
 use clv_abi::goal::GoalMonitorKind;
+use clv_abi::net::FrameOperation;
 use clv_abi::{
     ChildEvent, CompletionKind, GrantKind, LaunchParent, Program, ReplyKind, RequestKind,
     TaskCompletion,
@@ -23,7 +24,8 @@ use crate::ipc::pipe::Pipe;
 use crate::ipc::{Message, MessageKind};
 use crate::memory::sv39::AddressSpace;
 use crate::programs::{
-    ECHO_REPORT_TASK_INDEX, GOAL_MONITOR_TASK_INDEX, SHELL_TASK_INDEX, TASK_COUNT, task_index,
+    ECHO_REPORT_TASK_INDEX, GOAL_MONITOR_TASK_INDEX, NETD_TASK_INDEX, SHELL_TASK_INDEX, TASK_COUNT,
+    task_index,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,7 @@ enum TaskState {
     WaitingForMessage(usize),
     WaitingForPipeData(usize),
     WaitingForPipeSpace(usize),
+    WaitingForNetwork(FrameOperation),
     Stopped,
 }
 
@@ -228,6 +231,41 @@ impl Scheduler {
 
     pub(crate) fn attach_host_bridge(&mut self, port: Option<Port>) {
         self.host_bridge = port.map(HostBridge::new);
+    }
+
+    pub(crate) fn start_netd(&mut self, mac: [u8; 6]) {
+        let [a, b, c, d, e, f] = mac;
+        let mac = u64::from_le_bytes([a, b, c, d, e, f, 0, 0]) as usize;
+        let task = &mut self.tasks[NETD_TASK_INDEX];
+        task.frame.set_startup_args(mac, 0, 0);
+        task.state = TaskState::Runnable;
+    }
+
+    pub(crate) fn is_netd(&self) -> bool {
+        self.current == NETD_TASK_INDEX
+    }
+
+    pub(crate) fn wake_netd(&mut self, receive: bool, transmit: bool) {
+        let state = &mut self.tasks[NETD_TASK_INDEX].state;
+        if receive {
+            state.wake_from(TaskState::WaitingForNetwork(FrameOperation::Receive));
+        }
+        if transmit {
+            state.wake_from(TaskState::WaitingForNetwork(FrameOperation::Transmit));
+        }
+    }
+
+    pub(crate) fn wait_for_network(
+        &mut self,
+        frame: &mut TrapFrame,
+        operation: FrameOperation,
+    ) -> WaitResult<usize> {
+        if self.block_current(frame, TaskState::WaitingForNetwork(operation)) {
+            WaitResult::Blocked
+        } else {
+            // The service can retry when no other task can run in its place.
+            WaitResult::Ready(0)
+        }
     }
 
     pub(crate) fn attach_durable_disk(&mut self, disk: Option<JournalDisk>) {

@@ -7,6 +7,7 @@ pub mod audit;
 pub mod bridge;
 pub mod budget;
 pub mod goal;
+pub mod net;
 mod program;
 pub mod tool;
 pub use program::{PROGRAMS, Program};
@@ -88,6 +89,7 @@ pub const SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER: usize = 73;
 pub const SYS_GOAL_RENAME_DIFF: usize = 74;
 pub const SYS_GOAL_REVIEW_BATCH_GRANTED: usize = 75;
 pub const SYS_HOST_BRIDGE: usize = 76;
+pub const SYS_NET_FRAME: usize = 77;
 
 /// Call 15 starts the child with stdin and stdout pipes when `a1` has this value.
 pub const SPAWN_STDIO: usize = 1;

@@ -8,6 +8,7 @@ pub mod bridge;
 pub mod fs;
 pub mod goal;
 pub mod mcp;
+pub mod net;
 pub mod pipe;
 
 use clv_abi::{

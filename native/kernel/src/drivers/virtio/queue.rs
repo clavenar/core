@@ -153,9 +153,17 @@ impl<const SIZE: usize> Ring<SIZE> {
         self.pending.is_some()
     }
 
-    pub(super) fn complete(&mut self) -> Result<Option<usize>, QueueError> {
+    fn used_index(&self) -> u16 {
         // SAFETY: The used index is an aligned device-owned field.
-        let index = u16::from_le(unsafe { (&raw const (*self.memory).used.index).read_volatile() });
+        u16::from_le(unsafe { (&raw const (*self.memory).used.index).read_volatile() })
+    }
+
+    fn has_completion(&self) -> bool {
+        self.used_index() != self.completed
+    }
+
+    pub(super) fn complete(&mut self) -> Result<Option<usize>, QueueError> {
+        let index = self.used_index();
         if index == self.completed {
             return Ok(None);
         }
@@ -248,6 +256,10 @@ impl<const BUFFER_BYTES: usize> Queue<BUFFER_BYTES> {
 
     pub(super) fn is_pending(&self) -> bool {
         self.ring.is_pending()
+    }
+
+    pub(super) fn has_completion(&self) -> bool {
+        self.ring.has_completion()
     }
 
     pub(super) fn complete(&mut self) -> Result<Option<usize>, QueueError> {

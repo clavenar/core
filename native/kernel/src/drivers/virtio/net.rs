@@ -1,3 +1,5 @@
+use clv_abi::net::{ETHERNET_HEADER_BYTES, MAX_FRAME_BYTES};
+
 use super::mmio::Device;
 use super::queue::{Queue, QueueError, QueueMemory};
 use crate::arch::monotonic_nanos;
@@ -11,20 +13,13 @@ const TIMEOUT_NS: u64 = 500_000_000;
 
 // The modern header and a standard Ethernet frame without its FCS.
 const NETWORK_HEADER_BYTES: usize = 12;
-const ETHERNET_HEADER_BYTES: usize = 14;
-const MAX_FRAME_BYTES: usize = ETHERNET_HEADER_BYTES + 1500;
-const BUFFER_BYTES: usize = NETWORK_HEADER_BYTES + MAX_FRAME_BYTES;
-const FRAME_BYTES: usize = 60;
-const PROBE_ETHERTYPE: [u8; 2] = 0x88b5_u16.to_be_bytes();
-const PROBE_PEER: [u8; 6] = [0x02, 0, 0, 0, 0, 1];
-const PROBE_REQUEST: &[u8; 8] = b"CLVNET01";
-const PROBE_REPLY: &[u8; 8] = b"CLVNET02";
+pub(crate) const BUFFER_BYTES: usize = NETWORK_HEADER_BYTES + MAX_FRAME_BYTES;
 
 // Keep both buffers reserved even if the device does not acknowledge reset.
 static mut RECEIVE: QueueMemory<BUFFER_BYTES> = QueueMemory::empty();
 static mut TRANSMIT: QueueMemory<BUFFER_BYTES> = QueueMemory::empty();
 
-enum NetError {
+pub(crate) enum NetError {
     Device,
     ResetTimeout,
     ConfigTimeout,
@@ -94,6 +89,10 @@ impl Nic {
         self.device.base()
     }
 
+    pub(crate) fn mac(&self) -> [u8; 6] {
+        self.mac
+    }
+
     fn start(&mut self) -> Result<(), NetError> {
         if self.device.negotiate(MAC_FEATURE) != Some(MAC_FEATURE) {
             return Err(NetError::Device);
@@ -112,7 +111,7 @@ impl Nic {
         Ok(())
     }
 
-    fn transmit_ready(&mut self) -> Result<bool, NetError> {
+    pub(crate) fn transmit_ready(&mut self) -> Result<bool, NetError> {
         if !self.device.operational() {
             return Err(NetError::Device);
         }
@@ -126,10 +125,13 @@ impl Nic {
         Ok(false)
     }
 
-    fn receive_frame<'a>(
+    pub(crate) fn receive_frame<'a>(
         &mut self,
         packet: &'a mut [u8; BUFFER_BYTES],
     ) -> Result<Option<&'a [u8]>, NetError> {
+        if !self.device.operational() {
+            return Err(NetError::Device);
+        }
         let Some(length) = self.receive.receive(packet)? else {
             return Ok(None);
         };
@@ -140,7 +142,7 @@ impl Nic {
             .filter(|frame| frame.len() >= ETHERNET_HEADER_BYTES))
     }
 
-    fn send_frame(&mut self, frame: &[u8]) -> Result<(), NetError> {
+    pub(crate) fn send_frame(&mut self, frame: &[u8]) -> Result<(), NetError> {
         if !(ETHERNET_HEADER_BYTES..=MAX_FRAME_BYTES).contains(&frame.len()) {
             return Err(NetError::FrameLength);
         }
@@ -155,40 +157,40 @@ impl Nic {
     }
 }
 
-/// Service at most one frame on the boot hart's timer tick.
-pub(crate) fn poll(interface: &mut Option<Nic>) {
-    if let Some(nic) = interface.as_mut()
-        && let Err(error) = poll_probe(nic)
-    {
-        // Leave the reserved DMA memory untouched while reset takes effect.
+pub(crate) struct Readiness {
+    pub(crate) receive: bool,
+    pub(crate) transmit: bool,
+}
+
+/// Check queue readiness for the service without consuming a received frame.
+pub(crate) fn poll(interface: &mut Option<Nic>) -> Option<Readiness> {
+    let nic = interface.as_mut()?;
+    match nic.transmit_ready() {
+        Ok(transmit) => Some(Readiness {
+            receive: nic.receive.has_completion(),
+            transmit,
+        }),
+        Err(error) => {
+            retire(interface, error);
+            // Wake the service so its pending call can return an error.
+            Some(Readiness {
+                receive: true,
+                transmit: true,
+            })
+        }
+    }
+}
+
+pub(crate) fn retire(interface: &mut Option<Nic>, error: NetError) {
+    shutdown(interface);
+    error.report();
+}
+
+pub(crate) fn shutdown(interface: &mut Option<Nic>) {
+    if let Some(nic) = interface.take() {
+        // Keep the DMA buffers reserved while reset takes effect.
         nic.device.request_reset();
-        error.report();
-        *interface = None;
     }
-}
-
-fn poll_probe(nic: &mut Nic) -> Result<(), NetError> {
-    // A busy transmitter leaves the receive descriptor available for the next tick.
-    if !nic.transmit_ready()? {
-        return Ok(());
-    }
-    let mac = nic.mac;
-    let mut packet = [0; BUFFER_BYTES];
-    if let Some(frame) = nic.receive_frame(&mut packet)?
-        && frame == probe_frame(mac, PROBE_PEER, PROBE_REQUEST)
-    {
-        nic.send_frame(&probe_frame(PROBE_PEER, mac, PROBE_REPLY))?;
-    }
-    Ok(())
-}
-
-fn probe_frame(destination: [u8; 6], source: [u8; 6], marker: &[u8; 8]) -> [u8; FRAME_BYTES] {
-    let mut frame = [0; FRAME_BYTES];
-    frame[..6].copy_from_slice(&destination);
-    frame[6..12].copy_from_slice(&source);
-    frame[12..14].copy_from_slice(&PROBE_ETHERTYPE);
-    frame[14..22].copy_from_slice(marker);
-    frame
 }
 
 fn report_mac(mac: [u8; 6]) {

@@ -40,7 +40,10 @@ fn main() {
     }
     images.push(']');
     fs::write(output.join("program-images.rs"), images).unwrap();
-    for name in std::iter::once("shell").chain(clv_abi::PROGRAMS.iter().map(|&(_, name)| name)) {
+    for name in ["shell", "netd"]
+        .into_iter()
+        .chain(clv_abi::PROGRAMS.iter().map(|&(_, name)| name))
+    {
         let program = userspace.join(name);
         println!("cargo:rerun-if-changed={}", program.display());
         build_program(&program.join("main.rs"), &linker_script, &output, name);

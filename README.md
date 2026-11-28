@@ -39,7 +39,7 @@ qemu-system-riscv64 -machine virt -smp 1 -m 128M -bios default -nographic -nic n
 ```
 
 After OpenSBI, look for `Clavenar kernel booted` with the package version,
-ELF entry addresses for `hello`, `shell`, `echo` and `grep`, then
+ELF entry addresses for `hello`, `shell`, `echo`, `grep` and `netd`, then
 `Sv39 paging enabled` and the green `clsh>` prompt. Type `help` for the
 command reference. Press `Ctrl+a`, then `x`, to quit QEMU.
 

@@ -1,7 +1,7 @@
 # Native syscall ABI
 
-The RV64 prototype implements 77 calls numbered from 0 through 76.
-Kernel 0.0.80 adds guarded restart of the goal-finish monitor.
+The RV64 prototype implements 78 calls numbered from 0 through 77.
+Kernel 0.0.83 adds Ethernet frame I/O for the dedicated `netd` boot service.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
 [Shared call numbers](../crates/clv-abi/src/lib.rs) · [User-space wrappers](../userspace/libclv/lib.rs)
@@ -10,6 +10,7 @@ The caller places the call number in `a7`, passes up to six arguments in
 - [Process lifecycle and launch messages](#process-lifecycle-and-launch-messages)
 - [Typed requests and replies](#typed-requests-and-replies)
 - [Pipes and completion events](#pipes-and-completion-events)
+- [Network frame I/O](#network-frame-io)
 - [Goal and agent calls](#goal-and-agent-calls)
   - [Goal creation](#goal-creation)
   - [Goal deadlines](#goal-deadlines)
@@ -302,6 +303,26 @@ The shell can resume an agent, drain or close a pipe, and retry. Reading an
 event preserves the child's reply, buffered pipe data and wait result.
 Collecting any of those first also leaves the event available. A successful
 relaunch discards the previous handle's unread event. A failed launch preserves it.
+
+## Network frame I/O
+
+The kernel authorizes call 77, `net_frame`, by the current task's boot slot.
+When a modern VirtIO-net device initializes successfully, that slot starts
+`netd` with the six MAC octets in the low 48 bits of `a1`, in little-endian
+order. The kernel retains the MMIO and DMA mappings in supervisor memory.
+
+| Operation in `a0` | Stack buffer in `a1` | Size in `a2` | Result in `a0` |
+| --- | --- | --- | --- |
+| 0 receive | Writable destination | 1,514-byte capacity | Actual frame length |
+| 1 transmit | Readable source | Frame length from 14 through 1,514 bytes | Length accepted into the transmit queue |
+
+Both operations use Ethernet bytes without a VirtIO header or FCS. An empty
+receive queue or a busy transmitter parks the service until the timer
+observes readiness. When another runnable task is unavailable, the call
+returns zero and the service can retry. Invalid arguments, ordinary tasks
+and unavailable devices return -1. A queue failure or transmit timeout
+stops the device path and wakes a pending service call with an error.
+[QEMU walkthrough](qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net)
 
 ## Goal and agent calls
 

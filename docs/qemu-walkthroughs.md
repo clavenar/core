@@ -47,12 +47,12 @@ Type `help` for the full command reference. It groups commands by task, shows
 their arguments beside short descriptions, and lists options under the command
 that accepts them. Type `goal` or `agent` on its own to see just that section.
 
-The build links the shell and each registered program as separate RV64 ELFs
-and embeds them in the kernel. To add a boot program, put its entry point in
-`userspace/<name>/main.rs` and append its name to the program registry. The
-build, shell and kernel use that registry for names and stable launch
-selectors. A versioned file tool maps an exact tool ID to one of those
-programs. [Program registry](../crates/clv-abi/src/program.rs) · [File tool registry](../crates/clv-abi/src/tool.rs)
+The build links the shell, the `netd` service and each registered program
+as separate RV64 ELFs and embeds them in the kernel. To add a shell program,
+put its entry point in `userspace/<name>/main.rs` and append its name to the
+program registry. The build, shell and kernel use that registry for names
+and stable launch selectors. A versioned file tool maps an exact tool ID
+to one of those programs. [Program registry](../crates/clv-abi/src/program.rs) · [File tool registry](../crates/clv-abi/src/tool.rs)
 The loader accepts static, little-endian ELF64 executables with one
 read/execute segment of at most 64 KiB at `0x00400000`. The kernel build
 supplies this limit from `clv-abi`. When linking a program directly with
@@ -66,15 +66,16 @@ The kernel activates paging, prints `Sv39 paging enabled`, and starts `hello`
 as task 1 and the shell as task 2. Task 3 runs ordinary `echo` launches,
 including agents and helpers. Task 4 runs `grep`. Task 5 runs `echo` for
 immediate goal observations, delegated resumes and rename reviews. Task 6
-runs `echo` for a background goal monitor. Tasks 3, 5 and 6 share the
+runs `echo` for a background goal monitor. When a NIC initializes, task 7
+runs `netd` with its MAC address. Tasks 3, 5 and 6 share the
 read/execute pages of one ELF. Each task receives its ID in `a0` and has
 its own Sv39 root and 4 KiB read/write, non-executable stack.
 The stack starts at `0x00402000` for one- and two-page images and immediately
 after the image for larger programs. The initial stack pointer is at the
 top of that page. Nonempty syscall buffers must fit within the calling
 task's stack. The kernel, UART and attached VirtIO MMIO mappings are
-shared in supervisor mode. The 91-frame boot pool has room for four full-size
-images, six task stacks and the page tables. The pool, kernel and 64 KiB
+shared in supervisor mode. The 111-frame boot pool has room for five full-size
+images, seven task stacks and the page tables. The pool, kernel and 64 KiB
 supervisor stack fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
@@ -83,15 +84,17 @@ starts a fresh quantum when the timer fires or a stopped task is replaced.
 
 ### Exchange an Ethernet frame over VirtIO-net
 
-The kernel reads the MAC address from an attached modern VirtIO-net device
-and posts one receive buffer before paging. The NIC stays active after the
-shell starts. Each timer tick handles at most one frame and reposts its
-receive buffer after copying it. A busy transmitter leaves the next frame
-queued. If a transmit is still pending at its 500 ms deadline, the driver
-requests reset and stops polling the NIC. Its DMA buffers stay reserved.
-The responder accepts a 60-byte Ethernet frame with
-the local experimental EtherType `0x88b5` and the padded request `CLVNET01`.
-It sends one `CLVNET02` reply per request. [VirtIO network specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html) · [EtherType registry](https://www.iana.org/assignments/ieee-802-numbers/ieee-802-numbers.xhtml)
+The kernel reads the MAC address from an attached modern VirtIO-net device,
+posts a receive buffer and starts the dedicated `netd` task. The timer wakes
+the service on receive or transmit readiness. Each receive copies one frame
+to the service's stack and reposts the buffer. A transmit still pending at its
+500 ms deadline causes the driver to request reset and wake `netd` so its
+call can fail. DMA buffers remain in supervisor memory.
+
+`netd` accepts a 60-byte Ethernet frame with the local experimental
+EtherType `0x88b5` and the padded request `CLVNET01`.
+It sends one `CLVNET02` reply per request after printing `netd ready`.
+[Frame I/O syscall](native-syscall-abi.md#network-frame-io) · [VirtIO network specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html) · [EtherType registry](https://www.iana.org/assignments/ieee-802-numbers/ieee-802-numbers.xhtml)
 
 After building the kernel, paste this block at the Linux prompt in `core`.
 It connects each QEMU boot to a private Unix datagram socket, checks the

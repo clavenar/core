@@ -1,3 +1,5 @@
+mod network;
+
 use clv_abi::agent::{
     AgentLaunch, CURRENT_AGENT, NO_DEFINITION, RECV_CHECKPOINT, RUN_CHECKPOINT,
     RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR,
@@ -29,8 +31,8 @@ use clv_abi::{
     SYS_GOAL_PUBLICATION_DECISIONS_WITH_REVIEWER, SYS_GOAL_READ_AUDIT, SYS_GOAL_RENAME_AUDIT,
     SYS_GOAL_RENAME_DIFF, SYS_GOAL_REPLY_AUDIT, SYS_GOAL_REVIEW_BATCH_GRANTED,
     SYS_GOAL_REVOKE_FILE, SYS_GOAL_RUN, SYS_GOAL_RUN_WITH_REPLY_BUDGET, SYS_GOAL_STAGE_RENAME,
-    SYS_GOAL_STATUS, SYS_HOST_BRIDGE, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_OPEN,
-    SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ,
+    SYS_GOAL_STATUS, SYS_HOST_BRIDGE, SYS_MESSAGE_RECV, SYS_MESSAGE_SEND, SYS_MKDIR, SYS_NET_FRAME,
+    SYS_OPEN, SYS_OPEN_AT, SYS_PIPE_CLOSE, SYS_PIPE_READ, SYS_PIPE_WRITE, SYS_PROBE, SYS_READ,
     SYS_READ_CONSOLE, SYS_READDIR, SYS_REPLY_RECV, SYS_REPLY_SEND, SYS_REQUEST_RECV, SYS_RMDIR,
     SYS_SPAWN, SYS_SPAWN_AT, SYS_SPAWN_AT_WITH_MESSAGE, SYS_SPAWN_REQUEST, SYS_SPAWN_WITH_FILE,
     SYS_SPAWN_WITH_FILE_ARG, SYS_SPAWN_WITH_FILE_PIPE, SYS_SPAWN_WITH_MESSAGE, SYS_TIMER_FIRED,
@@ -40,6 +42,7 @@ use clv_abi::{
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::console::write_task;
 use crate::drivers::uart;
+use crate::drivers::virtio::net::Nic;
 use crate::fs::ramfs::{
     FileGrantMode, GrantArgument, RamFs, StagedRename, StagedRenames, TaskFs,
     WRITABLE_FILE_CAPACITY,
@@ -69,6 +72,7 @@ pub(crate) enum Outcome {
 pub(crate) fn dispatch(
     scheduler: &mut Scheduler,
     fs: &mut RamFs,
+    nic: &mut Option<Nic>,
     frame: &mut TrapFrame,
 ) -> Outcome {
     let a0 = frame.registers[REG_A0];
@@ -86,6 +90,11 @@ pub(crate) fn dispatch(
         SYS_EXIT => return Outcome::Exit(a0),
         SYS_WRITE_CONSOLE => write_console(stack, a0, a1),
         SYS_TIMER_FIRED => usize::from(scheduler.timer_fired()),
+        SYS_NET_FRAME => match network::frame_io(scheduler, nic, frame) {
+            WaitResult::Blocked => return Outcome::Wait,
+            WaitResult::Ready(length) => length,
+            WaitResult::Unavailable => SYSCALL_ERROR,
+        },
         SYS_READ_CONSOLE => uart::read_byte().map_or(SYSCALL_ERROR, usize::from),
         SYS_OPEN => open_file(scheduler.task_fs(), fs, stack, a0, a1, a2).unwrap_or(SYSCALL_ERROR),
         SYS_OPEN_AT => with_user_path(stack, a1, a2, |path| {

@@ -8,7 +8,7 @@ use crate::drivers::virtio::net::{self, Nic};
 use crate::fs::ramfs::RamFs;
 use crate::memory::sv39::AddressSpace;
 use crate::memory::usercopy::SSTATUS_SUM;
-use crate::programs::TASK_COUNT;
+use crate::programs::{NETD_TASK_INDEX, TASK_COUNT};
 use crate::scheduler::Scheduler;
 use crate::syscall;
 
@@ -92,6 +92,9 @@ pub(crate) unsafe fn start(
     let scheduler = state
         .scheduler
         .insert(Scheduler::new(tasks, supervisor_status()));
+    if let Some(nic) = &state.nic {
+        scheduler.start_netd(nic.mac());
+    }
     let space = scheduler.address_space();
     uart::write(b"boot frame=");
     write_hex(space.root_address());
@@ -129,7 +132,9 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         return;
     }
     if scause == timer::INTERRUPT_CAUSE {
-        net::poll(&mut state.nic);
+        if let Some(ready) = net::poll(&mut state.nic) {
+            scheduler.wake_netd(ready.receive, ready.transmit);
+        }
         if scheduler.preempt(frame) {
             switch_task(scheduler, current, SwitchReason::Timer);
         }
@@ -141,14 +146,20 @@ extern "C" fn supervisor_user_trap(frame: &mut TrapFrame, scause: usize, stval: 
         write_task(current);
         uart::write(b" fault");
         write_trap_registers(scause, frame.sepc, stval);
+        if scheduler.is_netd() {
+            net::shutdown(&mut state.nic);
+        }
         scheduler.stop_current(fs, TaskCompletion::Faulted(scause));
         resume_after_stop(scheduler, frame, SwitchReason::Fault);
         return;
     }
 
-    match syscall::dispatch(scheduler, fs, frame) {
+    match syscall::dispatch(scheduler, fs, &mut state.nic, frame) {
         syscall::Outcome::Resume => {}
         syscall::Outcome::Exit(status) => {
+            if scheduler.is_netd() {
+                net::shutdown(&mut state.nic);
+            }
             if !scheduler.has_active_pipe_reader() {
                 write_task(current);
                 uart::write(b" user exit status=");
@@ -188,11 +199,17 @@ fn switch_task(scheduler: &Scheduler, previous: usize, reason: SwitchReason) {
         uart::write(b"Sv39 task switch failed\r\n");
         idle();
     }
-    // Keep routine switch traces off the UART during pipe I/O and host polling.
+    // Keep routine switch traces off the UART for I/O and network service wakeups.
     let trace: &[u8] = match reason {
         SwitchReason::Fault => b"fault switch ",
         SwitchReason::Expiry => return,
-        _ if scheduler.has_active_pipe_reader() || scheduler.host_request_pending() => return,
+        _ if previous == NETD_TASK_INDEX + 1
+            || scheduler.is_netd()
+            || scheduler.has_active_pipe_reader()
+            || scheduler.host_request_pending() =>
+        {
+            return;
+        }
         SwitchReason::Timer => b"timer switch ",
         SwitchReason::Wait => b"wait switch ",
         SwitchReason::Exit => b"exit switch ",
