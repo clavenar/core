@@ -19,18 +19,19 @@ checkpoint image and SQLite journal across boots.
 
 ## Build and run the RV64 kernel
 
-With stable Rust installed via `rustup`, add the bare-metal target. On Debian 13,
+Install `rustup` to build Core. The repository selects Rust 1.100.1,
+`rustfmt` and the `riscv64gc-unknown-none-elf` target. On Debian 13,
 `qemu-system-riscv` provides the emulator and pulls in OpenSBI.
+[Toolchain configuration](rust-toolchain.toml)
 
 ```sh
-rustup target add --toolchain stable riscv64gc-unknown-none-elf
 sudo apt-get install --no-install-recommends qemu-system-riscv
 ```
 
 Run these commands from the `core` repository root.
 
 ```sh
-cargo +stable rustc --locked --manifest-path native/kernel/Cargo.toml \
+cargo rustc --locked --manifest-path native/kernel/Cargo.toml \
   --target riscv64gc-unknown-none-elf --target-dir target --release \
   -- -C "link-arg=-T${PWD}/native/linker/riscv64.ld" -C link-arg=--no-relax
 
@@ -162,13 +163,13 @@ through [libclv](userspace/libclv/).
 
 ## Formatting
 
-Check Rust formatting with `rustfmt` from the stable toolchain.
+Run the formatting checks from the Core repository root.
 
 ```sh
-cargo +stable fmt --manifest-path native/kernel/Cargo.toml --check
-cargo +stable fmt --manifest-path crates/clv-abi/Cargo.toml --check
-cargo +stable fmt --manifest-path userspace/netd/Cargo.toml --check
-rustfmt +stable --edition 2024 --check \
+cargo fmt --manifest-path native/kernel/Cargo.toml --check
+cargo fmt --manifest-path crates/clv-abi/Cargo.toml --check
+cargo fmt --manifest-path userspace/netd/Cargo.toml --check
+rustfmt --edition 2024 --check \
   userspace/libclv/lib.rs userspace/echo/main.rs userspace/grep/main.rs \
   userspace/hello/main.rs userspace/shell/main.rs
 ```

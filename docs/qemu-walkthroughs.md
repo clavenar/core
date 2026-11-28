@@ -795,7 +795,7 @@ def check_tls():
         valid = leaf("valid", "probe.clavenar.test", "fixture", 1)
         wrong_name = leaf("wrong-name", "other.clavenar.test", "fixture", 2)
         other_ca = leaf("other-ca", "probe.clavenar.test", "other", 1)
-        run(["cargo", "+stable", "rustc", "--locked", "--manifest-path", "native/kernel/Cargo.toml",
+        run(["cargo", "rustc", "--locked", "--manifest-path", "native/kernel/Cargo.toml",
              "--features", "tls-probe", "--target", "riscv64gc-unknown-none-elf",
              "--target-dir", target, "--release", "--",
              "-C", f"link-arg=-T{Path('native/linker/riscv64.ld').resolve()}",
@@ -880,7 +880,7 @@ HTTP cases in the private QEMU fixture.
 ```bash
 (
   set -o pipefail
-  cargo +stable rustc --locked --manifest-path native/kernel/Cargo.toml \
+  cargo rustc --locked --manifest-path native/kernel/Cargo.toml \
     --features http-probe --target riscv64gc-unknown-none-elf \
     --target-dir target/http-probe --release \
     -- -C "link-arg=-T$PWD/native/linker/riscv64.ld" -C link-arg=--no-relax &&
@@ -926,7 +926,7 @@ Each boot checks the native HTTP response and reads `/hello.txt`.
 ```bash
 (
   set -o pipefail
-  cargo +stable rustc --locked --manifest-path native/kernel/Cargo.toml \
+  cargo rustc --locked --manifest-path native/kernel/Cargo.toml \
     --features http-probe --target riscv64gc-unknown-none-elf \
     --target-dir target/http-probe --release \
     -- -C "link-arg=-T$PWD/native/linker/riscv64.ld" -C link-arg=--no-relax &&
@@ -955,7 +955,7 @@ checks the reported time and `cat /hello.txt` during the wait.
 ```bash
 (
   set -o pipefail
-  cargo +stable rustc --locked --manifest-path native/kernel/Cargo.toml \
+  cargo rustc --locked --manifest-path native/kernel/Cargo.toml \
     --features http-probe --target riscv64gc-unknown-none-elf \
     --target-dir target/http-probe --release \
     -- -C "link-arg=-T$PWD/native/linker/riscv64.ld" -C link-arg=--no-relax &&
@@ -1032,7 +1032,7 @@ cancels a stalled request and delivers its old response before running
 a fresh goal in the same VM. Each boot reads `/hello.txt` before the
 fixture stops QEMU.
 
-On Rust 1.100, the `netd` image is about 155 KiB with TLS and 162.4 KiB
+On Rust 1.100.1, the `netd` image is about 155 KiB with TLS and 162.5 KiB
 with both probe features. The lowest nonzero stack bytes after success
 were about 61 KiB and 65 KiB below the stack top, respectively. The
 image limit is 164 KiB and the stack reserves 96 KiB.
