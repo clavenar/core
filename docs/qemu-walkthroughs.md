@@ -60,7 +60,7 @@ and stable launch selectors. A versioned file tool maps an exact tool ID
 to one of those programs. [Program registry](../crates/clv-abi/src/program.rs) · [File tool registry](../crates/clv-abi/src/tool.rs)
 The loader accepts static, little-endian ELF64 executables with one
 read/execute segment at `0x00400000`. The kernel build takes the 64 KiB limit
-from `clv-abi` and allows up to 160 KiB for `netd` with `tls-probe`. When
+from `clv-abi` and allows up to 164 KiB for `netd` with `tls-probe`. When
 linking a shell program directly with `userspace/user.ld`, pass
 `--defsym=USER_IMAGE_MAX_BYTES=65536` to the linker. The loader allocates
 frames based on the segment's memory size (`p_memsz`) and zero-fills any
@@ -84,7 +84,7 @@ top of the stack. Nonempty syscall buffers must fit within the calling
 task's stack. The kernel, UART and attached VirtIO MMIO mappings are
 shared in supervisor mode. The boot pool has room for five full-size images,
 seven task stacks and the page tables. It holds 114 frames in the standard
-build, 116 with `http-probe` and 158 with `tls-probe`. The pool, kernel and
+build, 116 with `http-probe` and 159 with `tls-probe`. The pool, kernel and
 64 KiB supervisor stack fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
@@ -126,7 +126,7 @@ import os
 from pathlib import Path
 import re
 from select import select
-from socket import SOCK_DGRAM, SOCK_STREAM, inet_aton, socketpair
+from socket import SOCK_DGRAM, SOCK_STREAM, inet_aton, inet_ntoa, socketpair
 import ssl
 from struct import iter_unpack, pack, unpack
 from subprocess import PIPE, STDOUT, Popen, run
@@ -138,9 +138,11 @@ guest_mac = bytes.fromhex("52 54 00 12 34 56")
 host_mac = bytes.fromhex("02 00 00 00 00 01")
 guest_ip = inet_aton("192.0.2.2")
 host_ip = inet_aton("192.0.2.1")
+https_ip = inet_aton("192.0.2.3")
 udp_echo_port = 49152
 tcp_echo_port = 49153
 fallback_probe_port = 49154
+dns_port = 53
 http_port = 8080
 tcp_fin, tcp_syn, tcp_rst, tcp_ack = 0x01, 0x02, 0x04, 0x10
 prompt = b"\x1b[32mclsh> \x1b[0m"
@@ -167,12 +169,12 @@ def check_arp(host):
     if host.recv(2048) != ethernet_frame(host_mac, guest_mac, 0x0806, reply):
         raise RuntimeError("ARP did not resolve 192.0.2.2 to the guest MAC")
 
-def send_ipv4(host, protocol, identifier, payload):
+def send_ipv4(host, protocol, identifier, payload, *, peer_ip=host_ip):
     header = pack("!BBHHHBBH4s4s",
-                  0x45, 0, 20 + len(payload), identifier, 0, 64, protocol, 0, host_ip, guest_ip)
+                  0x45, 0, 20 + len(payload), identifier, 0, 64, protocol, 0, peer_ip, guest_ip)
     host.send(ethernet_frame(guest_mac, host_mac, 0x0800, with_checksum(header, 10) + payload))
 
-def receive_ipv4(host, protocol, payload_length=None):
+def receive_ipv4(host, protocol, payload_length=None, *, peer_ip=host_ip):
     frame = host.recv(2048)
     if frame[:14] != host_mac + guest_mac + pack("!H", 0x0800):
         raise RuntimeError("Expected a guest Ethernet frame carrying IPv4")
@@ -180,9 +182,9 @@ def receive_ipv4(host, protocol, payload_length=None):
     total_length = int.from_bytes(ip[2:4], "big")
     if (not 20 <= total_length <= len(ip) or
             (payload_length is not None and total_length != 20 + payload_length) or
-            ip[0] != 0x45 or ip[9] != protocol or ip[12:20] != guest_ip + host_ip or
+            ip[0] != 0x45 or ip[9] != protocol or ip[12:20] != guest_ip + peer_ip or
             checksum(ip[:20]) != 0):
-        raise RuntimeError("Invalid IPv4 echo reply header")
+        raise RuntimeError("Invalid guest IPv4 header")
     return ip[20:total_length]
 
 def check_echo(host, sequence, payload):
@@ -198,12 +200,16 @@ def transport_checksum(protocol, source, destination, segment):
     header = source + destination + pack("!BBH", 0, protocol, len(segment))
     return checksum(header + segment)
 
-def check_udp(host, port, payload):
+def send_udp(host, source, destination, payload):
     length = 8 + len(payload)
-    request = pack("!HHHH", port, udp_echo_port, length, 0) + payload
+    datagram = pack("!HHHH", source, destination, length, 0) + payload
     # UDP encodes a computed zero checksum as all ones.
-    request_checksum = transport_checksum(17, host_ip, guest_ip, request) or 0xffff
-    send_ipv4(host, 17, port, request[:6] + pack("!H", request_checksum) + payload)
+    value = transport_checksum(17, host_ip, guest_ip, datagram) or 0xffff
+    send_ipv4(host, 17, source, datagram[:6] + pack("!H", value) + payload)
+
+def check_udp(host, port, payload):
+    send_udp(host, port, udp_echo_port, payload)
+    length = 8 + len(payload)
     reply = receive_ipv4(host, 17, length)
     source, destination, reply_length, reply_checksum = unpack("!HHHH", reply[:8])
     if ((source, destination, reply_length) != (udp_echo_port, port, length) or
@@ -212,15 +218,16 @@ def check_udp(host, port, payload):
         raise RuntimeError(f"Invalid UDP echo reply for port {port}")
 
 def send_tcp(host, port, sequence, acknowledgement, flags, payload=b"", window=4096,
-             *, guest_port=tcp_echo_port):
+             *, guest_port=tcp_echo_port, peer_ip=host_ip):
     segment = pack("!HHIIBBHHH", port, guest_port, sequence, acknowledgement,
                    5 << 4, flags, window, 0, 0) + payload
-    value = transport_checksum(6, host_ip, guest_ip, segment)
-    send_ipv4(host, 6, sequence & 0xffff, segment[:16] + pack("!H", value) + segment[18:])
+    value = transport_checksum(6, peer_ip, guest_ip, segment)
+    send_ipv4(host, 6, sequence & 0xffff, segment[:16] + pack("!H", value) + segment[18:],
+              peer_ip=peer_ip)
 
-def read_tcp_segment(host, port):
-    segment = receive_ipv4(host, 6)
-    if len(segment) < 20 or transport_checksum(6, guest_ip, host_ip, segment) != 0:
+def read_tcp_segment(host, port, *, peer_ip=host_ip):
+    segment = receive_ipv4(host, 6, peer_ip=peer_ip)
+    if len(segment) < 20 or transport_checksum(6, guest_ip, peer_ip, segment) != 0:
         raise RuntimeError("Invalid TCP segment or checksum")
     source, destination, sequence, acknowledgement, offset, flags, _, _, _ = unpack(
         "!HHIIBBHHH", segment[:20])
@@ -230,8 +237,8 @@ def read_tcp_segment(host, port):
     control = flags & (tcp_syn | tcp_ack | tcp_fin | tcp_rst)
     return source, (sequence, acknowledgement, control, segment[header_length:])
 
-def receive_tcp(host, port, *, guest_port=tcp_echo_port):
-    source, segment = read_tcp_segment(host, port)
+def receive_tcp(host, port, *, guest_port=tcp_echo_port, peer_ip=host_ip):
+    source, segment = read_tcp_segment(host, port, peer_ip=peer_ip)
     if source != guest_port:
         raise RuntimeError("Unexpected TCP source port")
     return segment
@@ -270,14 +277,14 @@ def check_tcp(host, guest):
     send_tcp(host, port, client_sequence, (server_sequence + 1) & 0xffffffff, tcp_ack)
     check_shell(guest)
 
-def answer_guest_arp(host):
+def answer_guest_arp(host, peer_ip=host_ip):
     format_fields = pack("!HHBB", 1, 0x0800, 6, 4)
     request = host.recv(2048)
     expected = b"\xff" * 6 + guest_mac + pack("!H", 0x0806)
     expected += format_fields + pack("!H", 1) + guest_mac + guest_ip
-    if request[:32] != expected or request[38:42] != host_ip:
-        raise RuntimeError("Expected the guest to resolve 192.0.2.1 by ARP")
-    reply = format_fields + pack("!H", 2) + host_mac + host_ip + guest_mac + guest_ip
+    if request[:32] != expected or request[38:42] != peer_ip:
+        raise RuntimeError(f"Expected the guest to resolve {inet_ntoa(peer_ip)} by ARP")
+    reply = format_fields + pack("!H", 2) + host_mac + peer_ip + guest_mac + guest_ip
     host.send(ethernet_frame(guest_mac, host_mac, 0x0806, reply))
 
 def check_http(host, guest, case, response_delay):
@@ -511,6 +518,56 @@ def check_rtc():
             raise RuntimeError(f"Unexpected guest elapsed time {done - start} ns")
         print(f"Host verified RTC base {base} UTC and clock progression", flush=True)
 
+def read_dns_query(host):
+    datagram = receive_ipv4(host, 17)
+    if len(datagram) < 20:
+        raise RuntimeError("Expected a UDP datagram with a DNS header")
+    source, destination, length, value = unpack("!HHHH", datagram[:8])
+    if (not source or destination != dns_port or length != len(datagram) or
+            not value or transport_checksum(17, guest_ip, host_ip, datagram) != 0):
+        raise RuntimeError("Invalid DNS query ports, length or checksum")
+
+    transaction, flags, questions, answers, authority, additional = unpack("!6H", datagram[8:20])
+    question = datagram[20:]
+    if ((flags, questions, answers, authority, additional) != (0x0100, 1, 0, 0, 0) or
+            question != b"\x05probe\x08clavenar\x04test\x00" + pack("!HH", 1, 1)):
+        raise RuntimeError("Expected a single DNS A question for probe.clavenar.test")
+    return source, transaction, question
+
+def send_dns_answer(host, query, address):
+    port, transaction, question = query
+    if address is None:
+        header = pack("!6H", transaction, 0x8183, 1, 0, 0, 0)
+        record = b""
+    else:
+        header = pack("!6H", transaction, 0x8180, 1, 1, 0, 0)
+        # The answer name points back to the question at offset 12.
+        record = b"\xc0\x0c" + pack("!HHIH", 1, 1, 60, 4) + address
+    send_udp(host, dns_port, port, header + question + record)
+
+def check_dns_failure(host, guest, log, *, case):
+    expected = {
+        "nxdomain": b"netd DNS lookup failed",
+        "unusable": b"netd DNS address rejected",
+        "silent": b"netd DNS lookup timed out",
+    }[case]
+    answer_guest_arp(host)
+    query = read_dns_query(host)
+    if case != "silent":
+        send_dns_answer(host, query, None if case == "nxdomain" else guest_ip)
+
+    deadline = monotonic() + 7
+    while expected not in log:
+        ready = select([host, guest.stdout], [], [], max(0, deadline - monotonic()))[0]
+        if not ready or monotonic() >= deadline:
+            raise RuntimeError(f"Timed out waiting for {expected!r}")
+        if host in ready and (case != "silent" or read_dns_query(host) != query):
+            raise RuntimeError("Unexpected traffic during a failed DNS lookup")
+        if guest.stdout in ready:
+            log.extend(read_serial(guest))
+    if select([host], [], [], 0.1)[0]:
+        raise RuntimeError("Expected the guest to stop sending traffic after DNS failure")
+
 def check_tls_peer(host, guest, log, *, credentials, case):
     name = "probe.clavenar.test"
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -553,12 +610,16 @@ def check_tls_peer(host, guest, log, *, credentials, case):
 
     port = 8443
     answer_guest_arp(host)
-    guest_port, (initial_sequence, _, flags, data) = read_tcp_segment(host, port)
+    send_dns_answer(host, read_dns_query(host), https_ip)
+    answer_guest_arp(host, https_ip)
+    guest_port, (initial_sequence, _, flags, data) = read_tcp_segment(host, port, peer_ip=https_ip)
     if guest_port < 57344 or flags != tcp_syn or data:
         raise RuntimeError("Expected a TLS probe SYN from a seeded source port")
     guest_next = (initial_sequence + 1) & 0xffffffff
     server_next = 0x23456789
-    send_tcp(host, port, server_next, guest_next, tcp_syn | tcp_ack, guest_port=guest_port)
+    send = partial(send_tcp, host, port, guest_port=guest_port, peer_ip=https_ip)
+    receive = partial(receive_tcp, host, port, guest_port=guest_port, peer_ip=https_ip)
+    send(server_next, guest_next, tcp_syn | tcp_ack)
     server_next += 1
     pending = b""
     request = bytearray()
@@ -571,7 +632,7 @@ def check_tls_peer(host, guest, log, *, credentials, case):
         if not ready or monotonic() >= deadline:
             raise RuntimeError(f"Timed out waiting for {expected!r}")
         if host in ready:
-            sequence, acknowledged, flags, data = receive_tcp(host, port, guest_port=guest_port)
+            sequence, acknowledged, flags, data = receive()
             if flags & tcp_syn or (case == "complete" and flags & tcp_rst) or acknowledged > server_next:
                 raise RuntimeError("Unexpected TCP control or acknowledgement during TLS")
             if data or flags & tcp_fin:
@@ -579,8 +640,7 @@ def check_tls_peer(host, guest, log, *, credentials, case):
                     raise RuntimeError("Unexpected TCP stream sequence during TLS")
                 finished = bool(flags & tcp_fin)
                 guest_next = (guest_next + len(data) + finished) & 0xffffffff
-                send_tcp(host, port, server_next, guest_next, tcp_ack | (flags & tcp_fin),
-                         guest_port=guest_port)
+                send(server_next, guest_next, tcp_ack | (flags & tcp_fin))
                 server_next += int(finished)
             if data:
                 incoming.write(data)
@@ -607,7 +667,7 @@ def check_tls_peer(host, guest, log, *, credentials, case):
                 pending += outgoing.read()
             if pending and acknowledged == server_next:
                 chunk, pending = pending[:512], pending[512:]
-                send_tcp(host, port, server_next, guest_next, tcp_ack, chunk, guest_port=guest_port)
+                send(server_next, guest_next, tcp_ack, chunk)
                 server_next += len(chunk)
         if guest.stdout in ready:
             log.extend(read_serial(guest))
@@ -684,6 +744,12 @@ def check_tls():
             boot(target=target, extra_args=system_rng + rtc(now),
                  verify=partial(check_tls_peer, credentials=valid, case=case))
             print(f"Host verified HTTPS response case {case}", flush=True)
+        print("Host verified HTTPS connects to the DNS answer at 192.0.2.3", flush=True)
+
+        for case in ("nxdomain", "unusable", "silent"):
+            boot(target=target, extra_args=system_rng + rtc(now),
+                 verify=partial(check_dns_failure, case=case))
+            print(f"Host verified DNS failure case {case}", flush=True)
 
         for reason, args in (
             ("entropy", rtc(now)),
@@ -818,18 +884,24 @@ checks the reported time and `cat /hello.txt` during the wait.
 
 ### Fetch an HTTPS response over native TCP
 
-With `tls-probe`, `netd` connects once to `192.0.2.1:8443` using
-`probe.clavenar.test` for SNI and hostname verification. The RV64 client uses
-`embedded-tls` with `rustpki`, TLS 1.3 and `TLS_AES_128_GCM_SHA256`. It checks
-one P-256 leaf against the configured fixture CA, checks its validity dates
-and DNS subject alternative name, and verifies the peer's TLS signature.
-A complete VirtIO RNG seed and usable Unix time are required before
-connecting. After authenticating the peer, `netd` sends `GET /probe` with
-`Host: probe.clavenar.test:8443` over TLS. It accepts an HTTP/1.1 `200` response
+With `tls-probe`, `netd` uses one smoltcp DNS query slot to ask
+`192.0.2.1:53` over UDP for an IPv4 `A` record for `probe.clavenar.test`.
+It connects on port `8443` to the first usable address on the private
+`192.0.2.0/24` subnet. The fixture returns `192.0.2.3` and serves HTTPS
+there. The guest requires a complete VirtIO RNG seed and usable Unix time
+before sending the query.
+
+The RV64 client keeps `probe.clavenar.test` for SNI and hostname
+verification. It uses `embedded-tls` with `rustpki`, TLS 1.3 and
+`TLS_AES_128_GCM_SHA256`. It checks one P-256 leaf against the fixture CA,
+checks its validity dates and DNS subject alternative name, and verifies
+the peer's TLS signature. After authenticating the peer, `netd` sends
+`GET /probe` with `Host: probe.clavenar.test:8443` over TLS.
+It accepts an HTTP/1.1 `200` response
 with one `Content-Length`, up to 32 headers and up to 1 KiB each for the
 headers and body. The response parser also serves the plain HTTP probe.
-The five-second deadline covers TCP connection setup, TLS authentication,
-the request and response, and the TLS `close_notify` sent on success.
+One five-second deadline covers DNS resolution, TCP connection setup, TLS
+authentication, the HTTPS exchange, and the TLS `close_notify` sent on success.
 [WebPKI name verification](https://docs.rs/rustls-webpki/latest/webpki/struct.EndEntityCert.html#method.verify_is_valid_for_subject_name)
 
 Run this block at the Linux prompt in `core` with OpenSSL 3 and Python 3
@@ -849,19 +921,23 @@ into `target/tls-probe`. The build takes the DER-encoded CA certificate from
 )
 ```
 
-The host decrypts and checks the exact GET, then splits the response
-across TLS records. The guest prints `netd HTTPS probe received Hello from native HTTPS`
-after validating the body. A duplicate content length, a short closed
+The fixture checks the DNS question at `192.0.2.1`, the TCP connection at
+`192.0.2.3` and the decrypted GET. It splits the response across TLS records.
+The guest prints `netd DNS resolved probe.clavenar.test` after the lookup
+and `netd HTTPS probe received Hello from native HTTPS` after validating
+the body. An `NXDOMAIN` reply, an unusable address and a silent resolver
+stop the probe at DNS. A duplicate content length, a short closed
 response, a stalled partial response and the wrong body produce distinct
 errors. An expired leaf, a different DNS SAN with a matching common name,
 and an untrusted CA each produce `netd TLS probe certificate rejected`
 before any GET. Missing entropy or clock causes rejection before the guest
 sends a frame. Each boot reads `/hello.txt` before the fixture stops QEMU.
 
-On Rust 1.100, the read/execute segment is about 145 KiB with `tls-probe`
-and 152 KiB with both probe features, within the 160 KiB limit. The lowest
-nonzero byte in the initially zeroed stack was about 63 KiB below its top
-after a successful exchange in either build. The stack reserves 96 KiB.
+On Rust 1.100, the read/execute segment is about 155 KiB with `tls-probe`
+and 161.5 KiB with both probe features, within the 164 KiB limit. After
+successful HTTPS exchanges, the lowest nonzero byte in the initially
+zeroed stack was about 61 KiB below its top with `tls-probe` and 65 KiB
+below its top with both features. The stack reserves 96 KiB.
 
 ### Probe a VirtIO block device
 

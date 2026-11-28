@@ -8,15 +8,19 @@ use embedded_tls::pki::CertVerifier;
 use rand_chacha::{ChaCha20Rng, rand_core::RngCore};
 use rustls_pki_types::{CertificateDer, ServerName};
 use smoltcp::iface::SocketHandle;
-use smoltcp::socket::tcp;
+use smoltcp::socket::{dns, tcp};
 use smoltcp::time::{Duration, Instant};
-use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
+use smoltcp::wire::{
+    DnsQueryType, EthernetFrame, EthernetProtocol, IpAddress, IpEndpoint, IpProtocol, Ipv4Address,
+    Ipv4Packet, UdpPacket,
+};
 use webpki::EndEntityCert;
 
-use super::Network;
 use super::http_response::{RESPONSE_BYTES, body_range};
+use super::{GUEST_ADDRESS, GUEST_SUBNET, Network, UDP_ECHO_ENDPOINT};
 
-const PEER: IpEndpoint = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1)), 8443);
+const RESOLVER: IpAddress = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
+const HTTPS_PORT: u16 = 8443;
 const SERVER_NAME: &str = "probe.clavenar.test";
 const REQUEST: &[u8] =
     b"GET /probe HTTP/1.1\r\nHost: probe.clavenar.test:8443\r\nConnection: close\r\n\r\n";
@@ -28,6 +32,9 @@ const READ_RECORD_BYTES: usize = 4096;
 const WRITE_RECORD_BYTES: usize = 2048;
 
 enum Failure {
+    DnsLookup,
+    DnsTimeout,
+    DnsAddress,
     Tls(TlsError),
     InvalidResponse,
     TruncatedResponse,
@@ -40,7 +47,12 @@ impl From<TlsError> for Failure {
     }
 }
 
-pub(super) fn run(network: &mut Network<'_>, handle: SocketHandle, rng: Option<ChaCha20Rng>) {
+pub(super) fn run<'a>(
+    network: &mut Network<'a>,
+    handle: SocketHandle,
+    queries: &'a mut [Option<dns::DnsQuery>],
+    rng: Option<ChaCha20Rng>,
+) {
     let Some(rng) = rng else {
         clv::print(b"netd TLS probe entropy unavailable\r\n");
         return;
@@ -49,13 +61,16 @@ pub(super) fn run(network: &mut Network<'_>, handle: SocketHandle, rng: Option<C
         clv::print(b"netd TLS probe clock unavailable\r\n");
         return;
     }
-    let result = exchange(network, handle, rng);
+    let result = exchange(network, handle, queries, rng);
     if result.is_err() {
         network.sockets.get_mut::<tcp::Socket>(handle).abort();
         network.flush();
     }
     let message: &[u8] = match result {
         Ok(()) => b"netd HTTPS probe received Hello from native HTTPS\r\n",
+        Err(Failure::DnsLookup) => b"netd DNS lookup failed\r\n",
+        Err(Failure::DnsTimeout) => b"netd DNS lookup timed out\r\n",
+        Err(Failure::DnsAddress) => b"netd DNS address rejected\r\n",
         Err(Failure::Tls(
             TlsError::InvalidCertificate
             | TlsError::InvalidCertificateEntry
@@ -73,20 +88,29 @@ pub(super) fn run(network: &mut Network<'_>, handle: SocketHandle, rng: Option<C
     clv::print(message);
 }
 
-fn exchange(
-    network: &mut Network<'_>,
+fn exchange<'a>(
+    network: &mut Network<'a>,
     handle: SocketHandle,
+    queries: &'a mut [Option<dns::DnsQuery>],
     mut rng: ChaCha20Rng,
 ) -> Result<(), Failure> {
     network
         .receive(Some(Instant::ZERO))
         .ok_or(TlsError::IoError)?;
     let deadline = network.timestamp() + TIMEOUT;
+    let dns_handle = network.sockets.add(dns::Socket::new(&[RESOLVER], queries));
+    network.resolving_dns = true;
+    let peer = resolve_peer(network, dns_handle, deadline);
+    network.resolving_dns = false;
+    network.sockets.remove(dns_handle);
+    let peer = peer?;
+    clv::print(b"netd DNS resolved probe.clavenar.test\r\n");
+
     let port = 0xe000 | (rng.next_u32() as u16 & 0x1fff);
     network
         .sockets
         .get_mut::<tcp::Socket>(handle)
-        .connect(network.interface.context(), PEER, port)
+        .connect(network.interface.context(), peer, port)
         .map_err(|_| TlsError::ConnectionClosed)?;
 
     let mut stream = TcpStream {
@@ -125,6 +149,62 @@ fn exchange(
     stream.socket().close();
     stream.network.flush();
     Ok(())
+}
+
+fn resolve_peer(
+    network: &mut Network<'_>,
+    handle: SocketHandle,
+    deadline: Instant,
+) -> Result<IpEndpoint, Failure> {
+    let query = network
+        .sockets
+        .get_mut::<dns::Socket>(handle)
+        .start_query(network.interface.context(), SERVER_NAME, DnsQueryType::A)
+        .map_err(|_| Failure::DnsLookup)?;
+    let addresses = loop {
+        network.flush();
+        match network
+            .sockets
+            .get_mut::<dns::Socket>(handle)
+            .get_query_result(query)
+        {
+            Ok(addresses) => break addresses,
+            Err(dns::GetQueryResultError::Pending) => {}
+            Err(dns::GetQueryResultError::Failed) => return Err(Failure::DnsLookup),
+        }
+        network.receive(Some(deadline)).ok_or(Failure::DnsLookup)?;
+        if network.timestamp() >= deadline {
+            return Err(Failure::DnsTimeout);
+        }
+    };
+    let peer = addresses
+        .into_iter()
+        .find(|address| {
+            let IpAddress::Ipv4(address) = address;
+            GUEST_SUBNET.contains_addr(address)
+                && *address != GUEST_SUBNET.address()
+                && *address != GUEST_SUBNET.network().address()
+                && Some(*address) != GUEST_SUBNET.broadcast()
+        })
+        .ok_or(Failure::DnsAddress)?;
+    Ok(IpEndpoint::new(peer, HTTPS_PORT))
+}
+
+pub(super) fn reply_uses_echo_port(frame: &[u8]) -> bool {
+    let Ok(ethernet) = EthernetFrame::new_checked(frame) else {
+        return false;
+    };
+    if ethernet.ethertype() != EthernetProtocol::Ipv4 {
+        return false;
+    }
+    let Ok(ip) = Ipv4Packet::new_checked(ethernet.payload()) else {
+        return false;
+    };
+    ip.next_header() == IpProtocol::Udp
+        && IpAddress::Ipv4(ip.src_addr()) == RESOLVER
+        && IpAddress::Ipv4(ip.dst_addr()) == GUEST_ADDRESS
+        && UdpPacket::new_checked(ip.payload())
+            .is_ok_and(|udp| udp.src_port() == 53 && udp.dst_port() == UDP_ECHO_ENDPOINT.port)
 }
 
 fn read_response(

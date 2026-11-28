@@ -18,13 +18,14 @@ use smoltcp::socket::{Socket, tcp, udp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{
     ETHERNET_HEADER_LEN, EthernetAddress, HardwareAddress, IPV4_HEADER_LEN, IpAddress, IpCidr,
-    IpEndpoint, Ipv4Address, UDP_HEADER_LEN,
+    IpEndpoint, Ipv4Address, Ipv4Cidr, UDP_HEADER_LEN,
 };
 
 // Relink the service when the boot user linker script changes.
 const _: &str = include_str!("../user.ld");
 
-const GUEST_ADDRESS: IpAddress = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 2));
+const GUEST_SUBNET: Ipv4Cidr = Ipv4Cidr::new(Ipv4Address::new(192, 0, 2, 2), 24);
+const GUEST_ADDRESS: IpAddress = IpAddress::Ipv4(GUEST_SUBNET.address());
 const UDP_ECHO_ENDPOINT: IpEndpoint = IpEndpoint::new(GUEST_ADDRESS, 49152);
 const TCP_ECHO_ENDPOINT: IpEndpoint = IpEndpoint::new(GUEST_ADDRESS, 49153);
 const TCP_BUFFER_BYTES: usize = 1024;
@@ -55,7 +56,7 @@ extern "C" fn _start(
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
     config.random_seed = seed;
     let mut interface = Interface::new(config, &mut EthernetDevice(None), Instant::ZERO);
-    interface.update_ip_addrs(|addrs| addrs.push(IpCidr::new(GUEST_ADDRESS, 24)).unwrap());
+    interface.update_ip_addrs(|addrs| addrs.push(IpCidr::Ipv4(GUEST_SUBNET)).unwrap());
 
     let mut rx_packets = [udp::PacketMetadata::EMPTY];
     let mut rx_payload = [0; MAX_UDP_PAYLOAD_BYTES];
@@ -75,8 +76,9 @@ extern "C" fn _start(
     );
     tcp_socket.listen(TCP_ECHO_ENDPOINT).unwrap();
 
+    // The HTTPS probe needs a TCP socket and one temporary DNS socket.
     let mut storage = [SocketStorage::EMPTY;
-        2 + cfg!(feature = "http-probe") as usize + cfg!(feature = "tls-probe") as usize];
+        2 + cfg!(feature = "http-probe") as usize + 2 * cfg!(feature = "tls-probe") as usize];
     let mut sockets = SocketSet::new(&mut storage[..]);
     let udp_handle = sockets.add(udp_socket);
     let tcp_handle = sockets.add(tcp_socket);
@@ -107,6 +109,8 @@ extern "C" fn _start(
     #[cfg(feature = "tls-probe")]
     let (mut tls_rx, mut tls_tx) = ([0; TCP_BUFFER_BYTES], [0; TCP_BUFFER_BYTES]);
     #[cfg(feature = "tls-probe")]
+    let mut dns_queries = [None];
+    #[cfg(feature = "tls-probe")]
     let tls_handle = sockets.add(tcp::Socket::new(
         tcp::SocketBuffer::new(&mut tls_rx[..]),
         tcp::SocketBuffer::new(&mut tls_tx[..]),
@@ -121,10 +125,12 @@ extern "C" fn _start(
         buffer: [0; net::MAX_FRAME_BYTES],
         request: probe_frame(mac, PROBE_PEER, PROBE_REQUEST),
         reply: probe_frame(PROBE_PEER, mac, PROBE_REPLY),
+        #[cfg(feature = "tls-probe")]
+        resolving_dns: false,
     };
     clv::print(b"netd ready\r\n");
     #[cfg(feature = "tls-probe")]
-    tls_probe::run(&mut network, tls_handle, probe_rng);
+    tls_probe::run(&mut network, tls_handle, &mut dns_queries, probe_rng);
     // An expired deadline supplies the probe's initial clock on a silent link.
     #[cfg(feature = "http-probe")]
     let mut deadline = Some(Instant::ZERO);
@@ -157,6 +163,8 @@ struct Network<'a> {
     buffer: [u8; net::MAX_FRAME_BYTES],
     request: [u8; MIN_FRAME_BYTES],
     reply: [u8; MIN_FRAME_BYTES],
+    #[cfg(feature = "tls-probe")]
+    resolving_dns: bool,
 }
 
 impl Network<'_> {
@@ -180,11 +188,20 @@ impl Network<'_> {
         if frame == self.request {
             send_frame(&self.reply);
         } else if !frame.is_empty() {
+            // smoltcp dispatches UDP sockets before DNS sockets. Give the resolver's
+            // reply to DNS if its randomly chosen port matches the echo port.
+            #[cfg(feature = "tls-probe")]
+            let echo_socket = (self.resolving_dns && tls_probe::reply_uses_echo_port(frame))
+                .then(|| self.sockets.remove(self.udp_handle));
             self.interface.poll_ingress_single(
                 timestamp,
                 &mut EthernetDevice(Some(frame)),
                 &mut self.sockets,
             );
+            #[cfg(feature = "tls-probe")]
+            if let Some(socket) = echo_socket {
+                self.udp_handle = self.sockets.add(socket);
+            }
             // Ingress has copied the datagram into the socket queue, freeing the frame buffer.
             self.udp_handle = queue_udp_echo(
                 &mut self.sockets,

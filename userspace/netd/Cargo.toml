@@ -18,6 +18,7 @@ tls-probe = [
     "dep:rand_chacha",
     "dep:rustls-pki-types",
     "dep:webpki",
+    "smoltcp/socket-dns",
 ]
 
 [dependencies]
