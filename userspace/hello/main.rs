@@ -5,6 +5,7 @@ mod mcp_client;
 
 use clv::{ChildReply, ChildStatus, LaunchRequest, agent, bridge, fs, pipe};
 use clv_abi::agent::{LAUNCH_REQUEST_MAX_BYTES, decode_rename_pair};
+use clv_abi::net::{HTTPS_PROBE_BODY, HttpsStatus};
 use clv_abi::{
     GrantKind, MESSAGE_MAX_BYTES, PROBE_VALUE, ReplyKind, RequestKind, SYS_EXIT, SYS_PROBE,
     SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
@@ -57,6 +58,18 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, extra: usi
             bytes,
             ..
         }) => run_plan(kind, bytes),
+        Some(LaunchRequest::Received {
+            kind: RequestKind::HttpsProbe,
+            ..
+        }) => {
+            let result = clv::net::https_probe();
+            if result == HttpsStatus::Complete {
+                usize::from(!clv::send_reply(ReplyKind::Matches, HTTPS_PROBE_BODY))
+            } else {
+                clv::send_reply(ReplyKind::HttpsFailed, &[result as u8]);
+                1
+            }
+        }
         _ if grant_kind == GrantKind::File as usize && extra != 0 => {
             let status = copy_file(handle, |bytes| pipe::write(extra, bytes));
             pipe::close(extra);

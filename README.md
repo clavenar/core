@@ -55,7 +55,7 @@ service. It uses smoltcp at `192.0.2.2/24` on a private link to the fixture.
 | --- | --- |
 | Default | The guest answers ARP and IPv4 pings, echoes UDP on port `49152`, and echoes a TCP stream on port `49153`. [Ethernet and IP walkthrough](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net) |
 | `http-probe` | The guest sends `GET /probe` to the peer on port `8080` and checks the HTTP response. [HTTP walkthrough](docs/qemu-walkthroughs.md#fetch-an-http-response-over-native-tcp) |
-| `tls-probe` | The guest resolves `probe.clavenar.test` over DNS, authenticates the peer on port `8443` and validates the response to `GET /probe` over TLS 1.3. The fixture requires OpenSSL 3 and Python with TLS 1.3 support. [DNS and HTTPS walkthrough](docs/qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) |
+| `tls-probe` | A goal with `--allow-https-probe` can make one verified HTTPS request through `netd`. The fixture uses OpenSSL 3 and Python with TLS 1.3 support. [Goal-authorized HTTPS walkthrough](docs/qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) |
 
 The HTTPS probe uses a separate 32-byte seed from VirtIO RNG for TLS. `netd`
 uses the RTC-backed Unix clock to check certificate validity dates.

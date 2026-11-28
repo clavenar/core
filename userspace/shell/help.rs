@@ -71,6 +71,7 @@ entries! {
         "  --durable" => "Save one or two root files to a matching journal after echo review",
         "  --allow-helper <program> | --allow-tool <name@rev>" =>
             "Allow one helper or up to two exact tools (repeat --allow-tool)",
+        "  --allow-https-probe" => "Authorize one GET to the native HTTPS fixture",
     },
     GrantFile {
         "goal grant-file [mode] <path>" => "Grant a read-only file. Choose at most one mode",
@@ -120,6 +121,7 @@ entries! {
         "  --plan find-greeting@6" => "Use the host model to choose the pinned search",
         "  --plan find-greeting@7" => "Call host.text.search@1 with an explicit goal grant",
         "  --plan find-greeting@8" => "Use the host model and both granted MCP searches",
+        "  --https-probe" => "Fetch the granted native HTTPS fixture",
         "  --delegate --with-file --reply-bytes N grep -F <pattern>" =>
             "Ask grep to search the file",
     },

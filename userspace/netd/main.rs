@@ -14,6 +14,8 @@ use core::panic::PanicInfo;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+#[cfg(feature = "tls-probe")]
+use smoltcp::socket::dns;
 use smoltcp::socket::{Socket, tcp, udp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{
@@ -55,7 +57,7 @@ extern "C" fn _start(
     let mac = [a, b, c, d, e, f];
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
     config.random_seed = seed;
-    let mut interface = Interface::new(config, &mut EthernetDevice(None), Instant::ZERO);
+    let mut interface = Interface::new(config, &mut EthernetDevice(None, 0), Instant::ZERO);
     interface.update_ip_addrs(|addrs| addrs.push(IpCidr::Ipv4(GUEST_SUBNET)).unwrap());
 
     let mut rx_packets = [udp::PacketMetadata::EMPTY];
@@ -84,13 +86,11 @@ extern "C" fn _start(
     let tcp_handle = sockets.add(tcp_socket);
 
     #[cfg(any(feature = "http-probe", feature = "tls-probe"))]
-    let probe_rng = net::crypto_seed(
+    let mut probe_rng = net::crypto_seed(
         packed_mac as u64,
         [_crypto_word0, _crypto_word1, _crypto_word2, _crypto_word3],
     )
     .map(ChaCha20Rng::from_seed);
-    #[cfg(feature = "http-probe")]
-    let mut probe_rng = probe_rng;
 
     #[cfg(feature = "http-probe")]
     let (mut probe_rx, mut probe_tx) =
@@ -111,6 +111,11 @@ extern "C" fn _start(
     #[cfg(feature = "tls-probe")]
     let mut dns_queries = [None];
     #[cfg(feature = "tls-probe")]
+    let dns_handle = sockets.add(dns::Socket::new(
+        &[tls_probe::RESOLVER],
+        &mut dns_queries[..],
+    ));
+    #[cfg(feature = "tls-probe")]
     let tls_handle = sockets.add(tcp::Socket::new(
         tcp::SocketBuffer::new(&mut tls_rx[..]),
         tcp::SocketBuffer::new(&mut tls_tx[..]),
@@ -121,6 +126,7 @@ extern "C" fn _start(
         sockets,
         udp_handle,
         tcp_handle,
+        https_request: 0,
         now: 0,
         buffer: [0; net::MAX_FRAME_BYTES],
         request: probe_frame(mac, PROBE_PEER, PROBE_REQUEST),
@@ -129,14 +135,22 @@ extern "C" fn _start(
         resolving_dns: false,
     };
     clv::print(b"netd ready\r\n");
-    #[cfg(feature = "tls-probe")]
-    tls_probe::run(&mut network, tls_handle, &mut dns_queries, probe_rng);
     // An expired deadline supplies the probe's initial clock on a silent link.
     #[cfg(feature = "http-probe")]
     let mut deadline = Some(Instant::ZERO);
     #[cfg(not(feature = "http-probe"))]
     let deadline = None;
     loop {
+        #[cfg(feature = "tls-probe")]
+        if let Some(probe) = net::take_https_probe() {
+            tls_probe::run(
+                &mut network,
+                tls_handle,
+                dns_handle,
+                probe,
+                probe_rng.as_mut(),
+            );
+        }
         if network.receive(deadline).is_none() {
             clv::exit(1);
         }
@@ -159,6 +173,7 @@ struct Network<'a> {
     sockets: SocketSet<'a>,
     udp_handle: SocketHandle,
     tcp_handle: SocketHandle,
+    https_request: usize,
     now: u64,
     buffer: [u8; net::MAX_FRAME_BYTES],
     request: [u8; MIN_FRAME_BYTES],
@@ -181,12 +196,12 @@ impl Network<'_> {
                 .saturating_mul(NANOS_PER_MICROSECOND)
                 .max(1)
         });
-        let (frame, now) = net::receive(&mut self.buffer, deadline)?;
+        let (frame, now) = net::receive(&mut self.buffer, deadline, self.https_request)?;
         self.now = now;
         let timestamp = Instant::from_micros((now / NANOS_PER_MICROSECOND) as i64);
         self.interface.poll_maintenance(timestamp);
         if frame == self.request {
-            send_frame(&self.reply);
+            send_frame(&self.reply, self.https_request);
         } else if !frame.is_empty() {
             // smoltcp dispatches UDP sockets before DNS sockets. Give the resolver's
             // reply to DNS if its randomly chosen port matches the echo port.
@@ -195,7 +210,7 @@ impl Network<'_> {
                 .then(|| self.sockets.remove(self.udp_handle));
             self.interface.poll_ingress_single(
                 timestamp,
-                &mut EthernetDevice(Some(frame)),
+                &mut EthernetDevice(Some(frame), self.https_request),
                 &mut self.sockets,
             );
             #[cfg(feature = "tls-probe")]
@@ -218,8 +233,11 @@ impl Network<'_> {
 
     fn flush(&mut self) {
         let timestamp = self.timestamp();
-        self.interface
-            .poll_egress(timestamp, &mut EthernetDevice(None), &mut self.sockets);
+        self.interface.poll_egress(
+            timestamp,
+            &mut EthernetDevice(None, self.https_request),
+            &mut self.sockets,
+        );
         let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp_handle);
         if socket.state() == tcp::State::Closed {
             socket.listen(TCP_ECHO_ENDPOINT).unwrap();
@@ -271,7 +289,7 @@ fn queue_tcp_echo(socket: &mut tcp::Socket<'_>, buffer: &mut [u8]) {
     }
 }
 
-struct EthernetDevice<'a>(Option<&'a [u8]>);
+struct EthernetDevice<'a>(Option<&'a [u8]>, usize);
 
 impl Device for EthernetDevice<'_> {
     type RxToken<'a>
@@ -286,11 +304,11 @@ impl Device for EthernetDevice<'_> {
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         self.0
             .take()
-            .map(|frame| (ReceiveToken(frame), TransmitToken))
+            .map(|frame| (ReceiveToken(frame), TransmitToken(self.1)))
     }
 
     fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        Some(TransmitToken)
+        Some(TransmitToken(self.1))
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -310,23 +328,25 @@ impl RxToken for ReceiveToken<'_> {
     }
 }
 
-struct TransmitToken;
+struct TransmitToken(usize);
 
 impl TxToken for TransmitToken {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, length: usize, write: F) -> R {
         let mut buffer = [0; net::MAX_FRAME_BYTES];
         let result = write(&mut buffer[..length]);
-        send_frame(&buffer[..length.max(MIN_FRAME_BYTES)]);
+        send_frame(&buffer[..length.max(MIN_FRAME_BYTES)], self.0);
         result
     }
 }
 
-fn send_frame(frame: &[u8]) {
+fn send_frame(frame: &[u8], request: usize) {
     loop {
-        match net::transmit(frame) {
+        match net::transmit(frame, request) {
             Some(0) => core::hint::spin_loop(),
             Some(_) => return,
-            None => clv::exit(1),
+            // The scoped request can be revoked while its sender is parked.
+            None if request == 0 => clv::exit(1),
+            None => return,
         }
     }
 }

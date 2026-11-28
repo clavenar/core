@@ -1,4 +1,4 @@
-use clv::net;
+use clv::net::{self, HTTPS_PROBE_BODY, HttpsStatus};
 use embedded_io::{ErrorKind, ErrorType, Read, Write};
 use embedded_tls::blocking::{
     Aes128GcmSha256, Certificate, CertificateEntryRef, CertificateRef, CertificateVerifyRef,
@@ -9,7 +9,7 @@ use rand_chacha::{ChaCha20Rng, rand_core::RngCore};
 use rustls_pki_types::{CertificateDer, ServerName};
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::{dns, tcp};
-use smoltcp::time::{Duration, Instant};
+use smoltcp::time::Instant;
 use smoltcp::wire::{
     DnsQueryType, EthernetFrame, EthernetProtocol, IpAddress, IpEndpoint, IpProtocol, Ipv4Address,
     Ipv4Packet, UdpPacket,
@@ -17,16 +17,14 @@ use smoltcp::wire::{
 use webpki::EndEntityCert;
 
 use super::http_response::{RESPONSE_BYTES, body_range};
-use super::{GUEST_ADDRESS, GUEST_SUBNET, Network, UDP_ECHO_ENDPOINT};
+use super::{GUEST_ADDRESS, Network, UDP_ECHO_ENDPOINT};
 
-const RESOLVER: IpAddress = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
+pub(super) const RESOLVER: IpAddress = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
 const HTTPS_PORT: u16 = 8443;
 const SERVER_NAME: &str = "probe.clavenar.test";
 const REQUEST: &[u8] =
     b"GET /probe HTTP/1.1\r\nHost: probe.clavenar.test:8443\r\nConnection: close\r\n\r\n";
-const BODY: &[u8] = b"Hello from native HTTPS\n";
 const TRUST_ANCHOR: &[u8] = include_bytes!(env!("CLV_TLS_CA_DER"));
-const TIMEOUT: Duration = Duration::from_secs(5);
 const CERTIFICATE_BYTES: usize = 1024;
 const READ_RECORD_BYTES: usize = 4096;
 const WRITE_RECORD_BYTES: usize = 2048;
@@ -47,62 +45,96 @@ impl From<TlsError> for Failure {
     }
 }
 
-pub(super) fn run<'a>(
-    network: &mut Network<'a>,
+pub(super) fn run(
+    network: &mut Network<'_>,
     handle: SocketHandle,
-    queries: &'a mut [Option<dns::DnsQuery>],
-    rng: Option<ChaCha20Rng>,
+    dns_handle: SocketHandle,
+    probe: net::HttpsProbe,
+    rng: Option<&mut ChaCha20Rng>,
 ) {
-    let Some(rng) = rng else {
-        clv::print(b"netd TLS probe entropy unavailable\r\n");
-        return;
+    network.https_request = probe.request;
+    let (status, message): (HttpsStatus, &[u8]) = match rng {
+        None => (
+            HttpsStatus::Unavailable,
+            b"netd TLS probe entropy unavailable\r\n",
+        ),
+        Some(_) if net::unix_time().is_none() => (
+            HttpsStatus::Unavailable,
+            b"netd TLS probe clock unavailable\r\n",
+        ),
+        Some(rng) => {
+            let result = exchange(network, handle, dns_handle, &probe, rng);
+            let socket = network.sockets.get_mut::<tcp::Socket>(handle);
+            // Reuse the buffers with a clean socket and no queued traffic from this request.
+            socket.abort();
+            socket.listen(HTTPS_PORT).unwrap();
+            socket.close();
+            report(result)
+        }
     };
-    if net::unix_time().is_none() {
-        clv::print(b"netd TLS probe clock unavailable\r\n");
-        return;
+    network.https_request = 0;
+    if net::complete_https_probe(probe.request, status) {
+        clv::print(message);
+    } else {
+        clv::print(b"netd HTTPS probe cancelled\r\n");
     }
-    let result = exchange(network, handle, queries, rng);
-    if result.is_err() {
-        network.sockets.get_mut::<tcp::Socket>(handle).abort();
-        network.flush();
-    }
-    let message: &[u8] = match result {
-        Ok(()) => b"netd HTTPS probe received Hello from native HTTPS\r\n",
-        Err(Failure::DnsLookup) => b"netd DNS lookup failed\r\n",
-        Err(Failure::DnsTimeout) => b"netd DNS lookup timed out\r\n",
-        Err(Failure::DnsAddress) => b"netd DNS address rejected\r\n",
+}
+
+fn report(result: Result<(), Failure>) -> (HttpsStatus, &'static [u8]) {
+    match result {
+        Ok(()) => (
+            HttpsStatus::Complete,
+            b"netd HTTPS probe received Hello from native HTTPS\r\n",
+        ),
+        Err(Failure::DnsLookup) => (HttpsStatus::DnsFailed, b"netd DNS lookup failed\r\n"),
+        Err(Failure::DnsTimeout) => (HttpsStatus::TimedOut, b"netd DNS lookup timed out\r\n"),
+        Err(Failure::DnsAddress) => (HttpsStatus::AddressDenied, b"netd DNS address rejected\r\n"),
         Err(Failure::Tls(
             TlsError::InvalidCertificate
             | TlsError::InvalidCertificateEntry
             | TlsError::InvalidSignature,
-        )) => b"netd TLS probe certificate rejected\r\n",
-        Err(Failure::Tls(TlsError::Io(ErrorKind::TimedOut))) => b"netd HTTPS probe timed out\r\n",
-        Err(Failure::Tls(TlsError::Io(_) | TlsError::IoError | TlsError::ConnectionClosed)) => {
-            b"netd TLS probe transport failed\r\n"
+        )) => (
+            HttpsStatus::TlsFailed,
+            b"netd TLS probe certificate rejected\r\n",
+        ),
+        Err(Failure::Tls(TlsError::Io(ErrorKind::TimedOut))) => {
+            (HttpsStatus::TimedOut, b"netd HTTPS probe timed out\r\n")
         }
-        Err(Failure::Tls(_)) => b"netd TLS probe failed\r\n",
-        Err(Failure::InvalidResponse) => b"netd HTTPS probe invalid response\r\n",
-        Err(Failure::TruncatedResponse) => b"netd HTTPS probe truncated response\r\n",
-        Err(Failure::UnexpectedBody) => b"netd HTTPS probe unexpected body\r\n",
-    };
-    clv::print(message);
+        Err(Failure::Tls(TlsError::Io(_) | TlsError::IoError | TlsError::ConnectionClosed)) => (
+            HttpsStatus::TlsFailed,
+            b"netd TLS probe transport failed\r\n",
+        ),
+        Err(Failure::Tls(_)) => (HttpsStatus::TlsFailed, b"netd TLS probe failed\r\n"),
+        Err(Failure::InvalidResponse) => (
+            HttpsStatus::InvalidResponse,
+            b"netd HTTPS probe invalid response\r\n",
+        ),
+        Err(Failure::TruncatedResponse) => (
+            HttpsStatus::InvalidResponse,
+            b"netd HTTPS probe truncated response\r\n",
+        ),
+        Err(Failure::UnexpectedBody) => (
+            HttpsStatus::InvalidResponse,
+            b"netd HTTPS probe unexpected body\r\n",
+        ),
+    }
 }
 
-fn exchange<'a>(
-    network: &mut Network<'a>,
+fn exchange(
+    network: &mut Network<'_>,
     handle: SocketHandle,
-    queries: &'a mut [Option<dns::DnsQuery>],
-    mut rng: ChaCha20Rng,
+    dns_handle: SocketHandle,
+    probe: &net::HttpsProbe,
+    rng: &mut ChaCha20Rng,
 ) -> Result<(), Failure> {
     network
         .receive(Some(Instant::ZERO))
         .ok_or(TlsError::IoError)?;
-    let deadline = network.timestamp() + TIMEOUT;
-    let dns_handle = network.sockets.add(dns::Socket::new(&[RESOLVER], queries));
+    let deadline = Instant::from_micros((probe.deadline / 1_000) as i64);
+    let allowed = IpAddress::Ipv4(Ipv4Address::from(probe.ipv4));
     network.resolving_dns = true;
-    let peer = resolve_peer(network, dns_handle, deadline);
+    let peer = resolve_peer(network, dns_handle, allowed, deadline);
     network.resolving_dns = false;
-    network.sockets.remove(dns_handle);
     let peer = peer?;
     clv::print(b"netd DNS resolved probe.clavenar.test\r\n");
 
@@ -147,13 +179,19 @@ fn exchange<'a>(
 
     let mut stream = tls.close().map_err(|(_, error)| error)?;
     stream.socket().close();
-    stream.network.flush();
+    while !matches!(
+        stream.socket().state(),
+        tcp::State::Closed | tcp::State::TimeWait
+    ) {
+        stream.wait().map_err(TlsError::Io)?;
+    }
     Ok(())
 }
 
 fn resolve_peer(
     network: &mut Network<'_>,
     handle: SocketHandle,
+    allowed: IpAddress,
     deadline: Instant,
 ) -> Result<IpEndpoint, Failure> {
     let query = network
@@ -161,33 +199,34 @@ fn resolve_peer(
         .get_mut::<dns::Socket>(handle)
         .start_query(network.interface.context(), SERVER_NAME, DnsQueryType::A)
         .map_err(|_| Failure::DnsLookup)?;
-    let addresses = loop {
+    let failure = loop {
         network.flush();
         match network
             .sockets
             .get_mut::<dns::Socket>(handle)
             .get_query_result(query)
         {
-            Ok(addresses) => break addresses,
+            Ok(addresses) => {
+                return addresses
+                    .contains(&allowed)
+                    .then_some(IpEndpoint::new(allowed, HTTPS_PORT))
+                    .ok_or(Failure::DnsAddress);
+            }
             Err(dns::GetQueryResultError::Pending) => {}
             Err(dns::GetQueryResultError::Failed) => return Err(Failure::DnsLookup),
         }
-        network.receive(Some(deadline)).ok_or(Failure::DnsLookup)?;
+        if network.receive(Some(deadline)).is_none() {
+            break Failure::DnsLookup;
+        }
         if network.timestamp() >= deadline {
-            return Err(Failure::DnsTimeout);
+            break Failure::DnsTimeout;
         }
     };
-    let peer = addresses
-        .into_iter()
-        .find(|address| {
-            let IpAddress::Ipv4(address) = address;
-            GUEST_SUBNET.contains_addr(address)
-                && *address != GUEST_SUBNET.address()
-                && *address != GUEST_SUBNET.network().address()
-                && Some(*address) != GUEST_SUBNET.broadcast()
-        })
-        .ok_or(Failure::DnsAddress)?;
-    Ok(IpEndpoint::new(peer, HTTPS_PORT))
+    network
+        .sockets
+        .get_mut::<dns::Socket>(handle)
+        .cancel_query(query);
+    Err(failure)
 }
 
 pub(super) fn reply_uses_echo_port(frame: &[u8]) -> bool {
@@ -238,7 +277,7 @@ fn read_response(
             if received != range.end {
                 return Err(Failure::InvalidResponse);
             }
-            if &bytes[range.clone()] != BODY {
+            if &bytes[range.clone()] != HTTPS_PROBE_BODY {
                 return Err(Failure::UnexpectedBody);
             }
             return Ok(());
@@ -256,17 +295,17 @@ impl TlsClock for Clock {
     }
 }
 
-struct Provider {
-    rng: ChaCha20Rng,
+struct Provider<'a> {
+    rng: &'a mut ChaCha20Rng,
     peer: PeerVerifier,
 }
 
-impl CryptoProvider for Provider {
+impl CryptoProvider for Provider<'_> {
     type CipherSuite = Aes128GcmSha256;
     type Signature = [u8; 0];
 
     fn rng(&mut self) -> impl embedded_tls::CryptoRngCore {
-        &mut self.rng
+        &mut *self.rng
     }
 
     fn verifier(&mut self) -> Result<&mut impl TlsVerifier<Self::CipherSuite>, TlsError> {

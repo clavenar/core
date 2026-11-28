@@ -4,7 +4,9 @@ mod pipe;
 
 use self::definition::AgentBinding;
 pub(crate) use self::goal::DelegationTarget;
-use self::goal::{CheckpointJournal, CheckpointLaunch, Goal, MonitorReport, ReadDenialWatch};
+use self::goal::{
+    CheckpointJournal, CheckpointLaunch, Goal, HttpsExchange, MonitorReport, ReadDenialWatch,
+};
 use self::pipe::LaunchPipes;
 use clv_abi::agent::AgentLaunch;
 use clv_abi::audit::DelegationDenial;
@@ -202,6 +204,7 @@ pub(crate) struct Scheduler {
     durable_disk: Option<JournalDisk>,
     checkpoint_disk: Option<CheckpointJournal>,
     host_bridge: Option<HostBridge>,
+    https: Option<HttpsExchange>,
     netd_time_offset: i64,
     /// The dedicated monitor owns this snapshot from wakeup until its grant is used or revoked.
     monitor_report: Option<MonitorReport>,
@@ -224,6 +227,7 @@ impl Scheduler {
             durable_disk: None,
             checkpoint_disk: None,
             host_bridge: None,
+            https: None,
             netd_time_offset: NO_UNIX_TIME_OFFSET,
             monitor_report: None,
             read_denial_watch: None,
@@ -738,6 +742,7 @@ impl Scheduler {
     }
 
     fn stop_task(&mut self, index: usize, fs: &mut RamFs, completion: TaskCompletion) {
+        self.stop_https_task(index);
         if index == GOAL_MONITOR_TASK_INDEX {
             self.monitor_report = None;
             // A sent alert keeps its suppression count until the owner collects it.

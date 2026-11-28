@@ -140,6 +140,7 @@ pub fn create_with_timeout(
             require_rename_review: false,
             rename_limit: 1,
             durable: false,
+            allow_https_probe: false,
         },
         files,
         timeout_ms,

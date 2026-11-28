@@ -1,29 +1,64 @@
 use clv_abi::SYSCALL_ERROR;
 use clv_abi::net::{
-    ETHERNET_HEADER_BYTES, FrameOperation, MAX_FRAME_BYTES, NO_RECEIVE_DEADLINE, READ_UNIX_TIME,
+    COMPLETE_HTTPS_PROBE, ETHERNET_HEADER_BYTES, FrameOperation, HTTPS_PROBE_IPV4, HttpsStatus,
+    MAX_FRAME_BYTES, NO_RECEIVE_DEADLINE, POLL_HTTPS_PROBE, READ_UNIX_TIME, SUBMIT_HTTPS_PROBE,
+    TAKE_HTTPS_PROBE,
 };
 
-use super::{REG_A0, REG_A1, REG_A2, REG_A3};
+use super::{REG_A0, REG_A1, REG_A2, REG_A3, REG_A4};
 use crate::arch::monotonic_nanos;
 use crate::arch::riscv64::trap::TrapFrame;
 use crate::drivers::virtio::net::{self, BUFFER_BYTES, NetError, Nic};
 use crate::memory::usercopy::UserStack;
 use crate::scheduler::{Scheduler, WaitResult};
 
-pub(super) fn frame_io(
+pub(super) fn dispatch(
     scheduler: &mut Scheduler,
     interface: &mut Option<Nic>,
     frame: &mut TrapFrame,
 ) -> WaitResult<usize> {
+    let operation = frame.registers[REG_A0];
+    let argument = frame.registers[REG_A1];
+    match operation {
+        SUBMIT_HTTPS_PROBE => {
+            let result = scheduler.submit_https(interface.is_some());
+            return WaitResult::Ready(result.unwrap_or_else(|status| {
+                frame.registers[REG_A1] = status as usize;
+                SYSCALL_ERROR
+            }));
+        }
+        POLL_HTTPS_PROBE => {
+            return scheduler
+                .poll_https(argument)
+                .map_or(WaitResult::Unavailable, WaitResult::Ready);
+        }
+        _ => {}
+    }
     if !scheduler.is_netd() {
         return WaitResult::Unavailable;
     }
-    if frame.registers[REG_A0] == READ_UNIX_TIME {
-        return scheduler
-            .netd_unix_time()
-            .map_or(WaitResult::Unavailable, WaitResult::Ready);
+    match operation {
+        READ_UNIX_TIME => {
+            return scheduler
+                .netd_unix_time()
+                .map_or(WaitResult::Unavailable, WaitResult::Ready);
+        }
+        TAKE_HTTPS_PROBE => {
+            let Some((request, deadline)) = scheduler.take_https() else {
+                return WaitResult::Ready(0);
+            };
+            frame.registers[REG_A1] = u32::from_le_bytes(HTTPS_PROBE_IPV4) as usize;
+            frame.registers[REG_A2] = deadline as usize;
+            return WaitResult::Ready(request);
+        }
+        COMPLETE_HTTPS_PROBE => {
+            return HttpsStatus::from_raw(frame.registers[REG_A2])
+                .and_then(|status| scheduler.complete_https(argument, status))
+                .map_or(WaitResult::Unavailable, |()| WaitResult::Ready(0));
+        }
+        _ => {}
     }
-    let Some(operation) = FrameOperation::from_register(frame.registers[REG_A0]) else {
+    let Some(operation) = FrameOperation::from_register(operation) else {
         return WaitResult::Unavailable;
     };
     let address = frame.registers[REG_A1];
@@ -39,10 +74,25 @@ pub(super) fn frame_io(
     let Some(nic) = interface.as_mut() else {
         return WaitResult::Unavailable;
     };
-    let deadline = frame.registers[REG_A3] as u64;
-    let deadline = (operation == FrameOperation::Receive && deadline != NO_RECEIVE_DEADLINE)
-        .then_some(deadline);
+    let requested = frame.registers[REG_A3] as u64;
+    let requested = (operation == FrameOperation::Receive && requested != NO_RECEIVE_DEADLINE)
+        .then_some(requested);
+    let request = frame.registers[REG_A4];
+    let scoped = if request == 0 {
+        None
+    } else {
+        let Some(deadline) = scheduler.https_deadline(request) else {
+            return WaitResult::Unavailable;
+        };
+        Some(deadline)
+    };
+    let deadline = requested.into_iter().chain(scoped).min();
+    let expired = scoped.is_some_and(|at| monotonic_nanos() >= at);
     let result = match operation {
+        FrameOperation::Receive if expired || (request == 0 && scheduler.https_queued()) => {
+            Ok(Some(0))
+        }
+        FrameOperation::Transmit if expired => return WaitResult::Unavailable,
         FrameOperation::Receive => receive(nic, stack, address),
         FrameOperation::Transmit => transmit(nic, stack, address, length),
     };

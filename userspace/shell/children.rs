@@ -546,6 +546,7 @@ fn agent_run_args(
                     agent::RunRequest::StageRenamePair([first, second])
                 }
             }
+            GoalFlag::HttpsProbe if args.is_empty() => agent::RunRequest::HttpsProbe,
             _ => return None,
         })
     };
@@ -660,6 +661,21 @@ pub(super) fn display_reply(handle: usize, kind: ReplyKind, bytes: &[u8]) {
         ReplyKind::ReadFailed => print(b"cannot read requested file\r\n"),
         ReplyKind::ResultTooLarge => print(b"grep result exceeds 64 bytes\r\n"),
         ReplyKind::DelegationFailed => print(b"cannot delegate child\r\n"),
+        ReplyKind::HttpsFailed => {
+            use clv_abi::net::HttpsStatus::{self, *};
+            let status = bytes
+                .first()
+                .and_then(|&byte| HttpsStatus::from_raw(byte.into()));
+            print(match status {
+                Some(Denied) => b"HTTPS probe grant required\r\n",
+                Some(Unavailable) => b"HTTPS probe unavailable\r\n",
+                Some(TimedOut) => b"HTTPS probe timed out\r\n",
+                Some(DnsFailed) => b"HTTPS probe DNS lookup failed\r\n",
+                Some(AddressDenied) => b"HTTPS probe destination denied\r\n",
+                Some(TlsFailed) => b"HTTPS probe TLS failed\r\n",
+                _ => b"HTTPS probe invalid response\r\n",
+            });
+        }
         ReplyKind::HostPlanFailed | ReplyKind::HostToolFailed => {
             use BridgeFailure::*;
             use ReplyKind::HostToolFailed;

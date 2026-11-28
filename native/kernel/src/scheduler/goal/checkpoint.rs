@@ -585,6 +585,7 @@ impl Scheduler {
             durable: false,
             require_rename_review: false,
             rename_limit: 1,
+            allow_https_probe: false,
         };
         let rename_policy = RenamePolicy::capture(
             &self.tasks[self.current].fs,

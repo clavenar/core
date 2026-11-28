@@ -141,6 +141,7 @@ pub enum RequestKind {
     ObservePublication = 14,
     /// The denial threshold for the bound read-scope watch.
     WatchReadDenials = 15,
+    HttpsProbe = 16,
 }
 
 impl RequestKind {
@@ -161,6 +162,7 @@ impl RequestKind {
             value if value == Self::FileToolMcp as usize => Some(Self::FileToolMcp),
             value if value == Self::ObservePublication as usize => Some(Self::ObservePublication),
             value if value == Self::WatchReadDenials as usize => Some(Self::WatchReadDenials),
+            value if value == Self::HttpsProbe as usize => Some(Self::HttpsProbe),
             _ => None,
         }
     }
@@ -191,6 +193,8 @@ pub enum ReplyKind {
     PublicationObserved = 13,
     /// The read-denial monitor's alert carrying the original event.
     ReadDenialAlert = 14,
+    /// One byte explaining why the agent could not fetch the approved HTTPS fixture.
+    HttpsFailed = 15,
 }
 
 impl ReplyKind {
@@ -210,6 +214,7 @@ impl ReplyKind {
             value if value == Self::HostToolFailed as usize => Some(Self::HostToolFailed),
             value if value == Self::PublicationObserved as usize => Some(Self::PublicationObserved),
             value if value == Self::ReadDenialAlert as usize => Some(Self::ReadDenialAlert),
+            value if value == Self::HttpsFailed as usize => Some(Self::HttpsFailed),
             _ => None,
         }
     }

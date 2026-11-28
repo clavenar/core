@@ -214,7 +214,8 @@ fn switch_task(scheduler: &Scheduler, previous: usize, reason: SwitchReason) {
         _ if previous == NETD_TASK_INDEX + 1
             || scheduler.is_netd()
             || scheduler.has_active_pipe_reader()
-            || scheduler.host_request_pending() =>
+            || scheduler.host_request_pending()
+            || scheduler.https_pending() =>
         {
             return;
         }

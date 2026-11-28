@@ -20,6 +20,7 @@ pub(crate) struct GoalOptions<'a> {
     pub read_under: Option<&'a [u8]>,
     pub allowed_helper: Option<Program>,
     pub allowed_tools: [Option<ToolId>; 2],
+    pub allow_https_probe: bool,
     pub preserve_files: [Option<&'a [u8]>; MAX_GOAL_RENAMES],
     pub rename_under: Option<&'a [u8]>,
     pub rename_limit: Option<usize>,
@@ -86,6 +87,12 @@ impl<'a> GoalOptions<'a> {
                         .iter_mut()
                         .find(|slot| slot.is_none())?;
                     parse_path(rest, slot)?
+                }
+                GoalFlag::AllowHttpsProbe
+                    if matches!(command, GoalCommand::Create) && !options.allow_https_probe =>
+                {
+                    options.allow_https_probe = true;
+                    rest
                 }
                 GoalFlag::RenameUnder if matches!(command, GoalCommand::Create) => {
                     parse_path(rest, &mut options.rename_under)?

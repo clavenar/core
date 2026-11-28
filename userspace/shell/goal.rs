@@ -361,6 +361,7 @@ fn create_goal(options: &GoalOptions<'_>) -> Option<usize> {
         require_rename_review: options.require_rename_review,
         rename_limit: options.rename_limit.unwrap_or(1),
         durable: options.durable,
+        allow_https_probe: options.allow_https_probe,
     };
     // Keep the policy descriptors open through goal creation.
     let read_directory = open_policy_handle(options.read_under)?;

@@ -373,10 +373,13 @@ def wait_for_serial(guest, expected, timeout=5):
 def wait_for_shell(guest):
     return wait_for_serial(guest, prompt)
 
-def check_shell(guest):
-    guest.stdin.write(b"cat /hello.txt\n")
+def guest_command(guest, command):
+    guest.stdin.write(command.encode() + b"\n")
     guest.stdin.flush()
-    log = wait_for_shell(guest)
+    return wait_for_shell(guest)
+
+def check_shell(guest):
+    log = guest_command(guest, "cat /hello.txt")
     if b"Hello from RamFS" not in log:
         raise RuntimeError("The shell could not read /hello.txt")
     return log
@@ -545,16 +548,44 @@ def send_dns_answer(host, query, address):
         record = b"\xc0\x0c" + pack("!HHIH", 1, 1, 60, 4) + address
     send_udp(host, dns_port, port, header + question + record)
 
+def start_https_goal(guest, log, *, grant=True, timeout_ms=None):
+    command = "goal create --reply-bytes 24"
+    if grant:
+        command += " --allow-https-probe"
+    if timeout_ms is not None:
+        command += f" --timeout-ms {timeout_ms}"
+    created = guest_command(guest, command)
+    launched = guest_command(guest, "agent run hello --https-probe")
+    if b"goal created" not in created or b"child=0x" not in launched:
+        raise RuntimeError("Could not launch the HTTPS goal")
+    log.extend(created + launched)
+
+def finish_https_goal(guest, expected, *, spent=1):
+    status = guest_command(guest, "wait hello")
+    reply = guest_command(guest, "recv hello")
+    budget = guest_command(guest, "goal budget")
+    closed = guest_command(guest, "goal close")
+    outcome = (b"hello exited 0x0000000000000000" if spent == 24 else
+               b"hello exited 0x0000000000000001" if spent == 1 else b"hello cancelled")
+    if (outcome not in status or expected not in reply or
+            f"available={24 - spent} reserved=0 spent={spent}".encode() not in budget or
+            b"goal closed" not in closed):
+        raise RuntimeError("Unexpected goal result, reply budget or close")
+
 def check_dns_failure(host, guest, log, *, case):
-    expected = {
-        "nxdomain": b"netd DNS lookup failed",
-        "unusable": b"netd DNS address rejected",
-        "silent": b"netd DNS lookup timed out",
+    expected, reply = {
+        "nxdomain": (b"netd DNS lookup failed", b"HTTPS probe DNS lookup failed"),
+        "unusable": (b"netd DNS address rejected", b"HTTPS probe destination denied"),
+        "outside-grant": (b"netd DNS address rejected", b"HTTPS probe destination denied"),
+        "silent": (b"netd DNS lookup timed out", b"HTTPS probe timed out"),
     }[case]
+    start_https_goal(guest, log)
     answer_guest_arp(host)
     query = read_dns_query(host)
     if case != "silent":
-        send_dns_answer(host, query, None if case == "nxdomain" else guest_ip)
+        address = {"nxdomain": None, "unusable": guest_ip,
+                   "outside-grant": inet_aton("192.0.2.4")}[case]
+        send_dns_answer(host, query, address)
 
     deadline = monotonic() + 7
     while expected not in log:
@@ -567,8 +598,9 @@ def check_dns_failure(host, guest, log, *, case):
             log.extend(read_serial(guest))
     if select([host], [], [], 0.1)[0]:
         raise RuntimeError("Expected the guest to stop sending traffic after DNS failure")
+    finish_https_goal(guest, reply)
 
-def check_tls_peer(host, guest, log, *, credentials, case):
+def check_tls_peer(host, guest, log, *, credentials, case, cached=False):
     name = "probe.clavenar.test"
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_3
@@ -589,6 +621,7 @@ def check_tls_peer(host, guest, log, *, credentials, case):
         "stalled": b"netd HTTPS probe timed out",
         "wrong-body": b"netd HTTPS probe unexpected body",
         "rejected": b"netd TLS probe certificate rejected",
+        "cancelled": b"netd HTTPS probe cancelled",
     }[case]
     expected_request = (
         b"GET /probe HTTP/1.1\r\n"
@@ -609,9 +642,12 @@ def check_tls_peer(host, guest, log, *, credentials, case):
         chunks = chunks[:-1] + (body[5:].upper(),)
 
     port = 8443
-    answer_guest_arp(host)
+    start_https_goal(guest, log)
+    if not cached:
+        answer_guest_arp(host)
     send_dns_answer(host, read_dns_query(host), https_ip)
-    answer_guest_arp(host, https_ip)
+    if not cached:
+        answer_guest_arp(host, https_ip)
     guest_port, (initial_sequence, _, flags, data) = read_tcp_segment(host, port, peer_ip=https_ip)
     if guest_port < 57344 or flags != tcp_syn or data:
         raise RuntimeError("Expected a TLS probe SYN from a seeded source port")
@@ -656,10 +692,16 @@ def check_tls_peer(host, guest, log, *, credentials, case):
                         if not expected_request.startswith(request):
                             raise RuntimeError(f"Unexpected HTTPS request {request!r}")
                         if request == expected_request:
-                            for chunk in chunks:
-                                server.write(chunk)
-                            if case == "truncated":
-                                server.unwrap()
+                            if case == "cancelled":
+                                cancelled = guest_command(guest, "goal cancel")
+                                if b"goal cancelled" not in cancelled:
+                                    raise RuntimeError("Could not cancel the stalled HTTPS goal")
+                                log.extend(cancelled)
+                            else:
+                                for chunk in chunks:
+                                    server.write(chunk)
+                                if case == "truncated":
+                                    server.unwrap()
                     else:
                         close_notify = True
                 except ssl.SSLWantReadError:
@@ -680,12 +722,47 @@ def check_tls_peer(host, guest, log, *, credentials, case):
     if case == "complete" and not close_notify:
         raise RuntimeError("Expected the guest to send TLS close_notify before TCP FIN")
 
+    if case == "cancelled":
+        finish_https_goal(guest, b"no message", spent=0)
+        # Deliver the old connection's result after its goal closes.
+        server.write(b"".join(chunks))
+        send(server_next, guest_next, tcp_ack, outgoing.read())
+        deadline = monotonic() + 1
+        while select([host], [], [], 0.1)[0]:
+            if monotonic() >= deadline or not receive()[2] & tcp_rst:
+                raise RuntimeError("Unexpected traffic after the cancelled connection's late response")
+        check_tls_peer(host, guest, bytearray(), credentials=credentials, case="complete", cached=True)
+        return
+
+    reply = {
+        "complete": b"Hello from native HTTPS",
+        "stalled": b"HTTPS probe timed out",
+        "rejected": b"HTTPS probe TLS failed",
+    }.get(case, b"HTTPS probe invalid response")
+    finish_https_goal(guest, reply, spent=24 if case == "complete" else 1)
+
 def check_tls_prerequisite(host, guest, log, *, reason):
+    start_https_goal(guest, log)
     expected = f"netd TLS probe {reason} unavailable".encode()
     if expected not in log:
         wait_for_serial(guest, expected)
     if select([host], [], [], 0.1)[0]:
         raise RuntimeError(f"Unexpected guest traffic without {reason}")
+    finish_https_goal(guest, b"HTTPS probe unavailable")
+
+def check_https_authority(host, guest, log, *, grant):
+    start_https_goal(guest, log, grant=grant, timeout_ms=600 if grant else None)
+    if grant:
+        answer_guest_arp(host)
+        read_dns_query(host)
+        start = monotonic()
+        finish_https_goal(guest, b"no message", spent=0)
+        if monotonic() - start > 2:
+            raise RuntimeError("The probe did not stop at the earlier goal deadline")
+    else:
+        finish_https_goal(guest, b"HTTPS probe grant required")
+    if select([host], [], [], 0.1)[0]:
+        raise RuntimeError("An ungranted or expired goal sent network traffic")
 
 def check_tls():
     def openssl(*args):
@@ -746,10 +823,19 @@ def check_tls():
             print(f"Host verified HTTPS response case {case}", flush=True)
         print("Host verified HTTPS connects to the DNS answer at 192.0.2.3", flush=True)
 
-        for case in ("nxdomain", "unusable", "silent"):
+        for case in ("nxdomain", "unusable", "outside-grant", "silent"):
             boot(target=target, extra_args=system_rng + rtc(now),
                  verify=partial(check_dns_failure, case=case))
             print(f"Host verified DNS failure case {case}", flush=True)
+
+        for grant in (False, True):
+            boot(target=target, extra_args=system_rng + rtc(now),
+                 verify=partial(check_https_authority, grant=grant))
+        print("Host verified HTTPS grant denial and the earlier goal deadline", flush=True)
+
+        boot(target=target, extra_args=system_rng + rtc(now),
+             verify=partial(check_tls_peer, credentials=valid, case="cancelled"))
+        print("Host verified cancellation, stale reply rejection and a fresh HTTPS goal", flush=True)
 
         for reason, args in (
             ("entropy", rtc(now)),
@@ -884,12 +970,24 @@ checks the reported time and `cat /hello.txt` during the wait.
 
 ### Fetch an HTTPS response over native TCP
 
-With `tls-probe`, `netd` uses one smoltcp DNS query slot to ask
-`192.0.2.1:53` over UDP for an IPv4 `A` record for `probe.clavenar.test`.
-It connects on port `8443` to the first usable address on the private
-`192.0.2.0/24` subnet. The fixture returns `192.0.2.3` and serves HTTPS
-there. The guest requires a complete VirtIO RNG seed and usable Unix time
-before sending the query.
+With `tls-probe`, the shell can grant a goal one HTTPS request. The
+kernel admits it for the live agent and gives the launch ID, allowed
+IPv4 address and deadline to `netd`. The fixture issues this sequence
+at `clsh>`.
+
+```text
+goal create --reply-bytes 24 --allow-https-probe
+agent run hello --https-probe
+wait hello
+recv hello
+goal budget
+goal close
+```
+
+`netd` uses one smoltcp DNS query slot to ask `192.0.2.1:53` for an IPv4
+`A` record for `probe.clavenar.test`. It connects to `192.0.2.3:8443`
+only if DNS returns the granted address. The guest needs a complete
+VirtIO RNG seed and usable Unix time to start the query.
 
 The RV64 client keeps `probe.clavenar.test` for SNI and hostname
 verification. It uses `embedded-tls` with `rustpki`, TLS 1.3 and
@@ -900,8 +998,9 @@ the peer's TLS signature. After authenticating the peer, `netd` sends
 It accepts an HTTP/1.1 `200` response
 with one `Content-Length`, up to 32 headers and up to 1 KiB each for the
 headers and body. The response parser also serves the plain HTTP probe.
-One five-second deadline covers DNS resolution, TCP connection setup, TLS
-authentication, the HTTPS exchange, and the TLS `close_notify` sent on success.
+One deadline covers DNS resolution, TCP, TLS, the HTTP exchange and
+shutdown. It is five seconds from admission or the goal deadline,
+whichever comes first.
 [WebPKI name verification](https://docs.rs/rustls-webpki/latest/webpki/struct.EndEntityCert.html#method.verify_is_valid_for_subject_name)
 
 Run this block at the Linux prompt in `core` with OpenSSL 3 and Python 3
@@ -923,21 +1022,20 @@ into `target/tls-probe`. The build takes the DER-encoded CA certificate from
 
 The fixture checks the DNS question at `192.0.2.1`, the TCP connection at
 `192.0.2.3` and the decrypted GET. It splits the response across TLS records.
-The guest prints `netd DNS resolved probe.clavenar.test` after the lookup
-and `netd HTTPS probe received Hello from native HTTPS` after validating
-the body. An `NXDOMAIN` reply, an unusable address and a silent resolver
-stop the probe at DNS. A duplicate content length, a short closed
-response, a stalled partial response and the wrong body produce distinct
-errors. An expired leaf, a different DNS SAN with a matching common name,
-and an untrusted CA each produce `netd TLS probe certificate rejected`
-before any GET. Missing entropy or clock causes rejection before the guest
-sends a frame. Each boot reads `/hello.txt` before the fixture stops QEMU.
+On success, `recv hello` prints `Hello from native HTTPS` and
+`goal budget` reports `available=0 reserved=0 spent=24`.
+Omitting the grant returns `HTTPS probe grant required` before DNS.
+An `NXDOMAIN` reply, a DNS answer of `192.0.2.4`, and a silent resolver
+stop at DNS. The fixture tests certificate and HTTP errors as well as
+missing entropy and clock. It also tests a shorter goal deadline,
+cancels a stalled request and delivers its old response before running
+a fresh goal in the same VM. Each boot reads `/hello.txt` before the
+fixture stops QEMU.
 
-On Rust 1.100, the read/execute segment is about 155 KiB with `tls-probe`
-and 161.5 KiB with both probe features, within the 164 KiB limit. After
-successful HTTPS exchanges, the lowest nonzero byte in the initially
-zeroed stack was about 61 KiB below its top with `tls-probe` and 65 KiB
-below its top with both features. The stack reserves 96 KiB.
+On Rust 1.100, the `netd` image is about 155 KiB with TLS and 162.4 KiB
+with both probe features. The lowest nonzero stack bytes after success
+were about 61 KiB and 65 KiB below the stack top, respectively. The
+image limit is 164 KiB and the stack reserves 96 KiB.
 
 ### Probe a VirtIO block device
 

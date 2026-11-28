@@ -2,6 +2,7 @@ mod audit;
 mod budget;
 mod checkpoint;
 mod delegation;
+mod https;
 mod monitor;
 mod reads;
 mod rename;
@@ -9,6 +10,7 @@ mod rename;
 use self::audit::{AuditHistory, PublicationHistory};
 use self::budget::ReplyReservation;
 pub(super) use self::checkpoint::{CheckpointJournal, CheckpointLaunch};
+pub(super) use self::https::HttpsExchange;
 pub(super) use self::monitor::{MonitorReport, ReadDenialWatch};
 use self::reads::GoalReads;
 use self::rename::PendingRenames;
@@ -92,6 +94,7 @@ pub(super) struct Goal {
     options: CreateOptions,
     deadline: GoalDeadline,
     allowed_tools: [Option<ToolId>; 2],
+    https_available: bool,
     reads: GoalReads,
     members: [Option<Member>; MAX_CHILDREN],
     checkpoint_child: Option<usize>,
@@ -121,6 +124,7 @@ impl Goal {
             options: policy.options,
             deadline,
             allowed_tools: policy.allowed_tools,
+            https_available: policy.allow_https_probe,
             reads,
             members: [const { None }; MAX_CHILDREN],
             checkpoint_child: None,

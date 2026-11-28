@@ -72,6 +72,8 @@ keywords!(GoalFlag {
     HelperReadBytes => "--helper-read-bytes",
     AllowHelper => "--allow-helper",
     AllowTool => "--allow-tool",
+    AllowHttpsProbe => "--allow-https-probe",
+    HttpsProbe => "--https-probe",
     PreserveFile => "--preserve-file",
     RenameUnder => "--rename-under",
     RenameLimit => "--rename-limit",

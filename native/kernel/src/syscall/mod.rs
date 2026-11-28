@@ -1,7 +1,7 @@
 mod network;
 
 use clv_abi::agent::{
-    AgentLaunch, CURRENT_AGENT, NO_DEFINITION, RECV_CHECKPOINT, RUN_CHECKPOINT,
+    AgentLaunch, CURRENT_AGENT, NO_DEFINITION, RECV_CHECKPOINT, RUN_CHECKPOINT, RUN_HTTPS_PROBE,
     RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR,
     RUN_SUSPENDED, decode_rename_pair,
 };
@@ -90,7 +90,7 @@ pub(crate) fn dispatch(
         SYS_EXIT => return Outcome::Exit(a0),
         SYS_WRITE_CONSOLE => write_console(stack, a0, a1),
         SYS_TIMER_FIRED => usize::from(scheduler.timer_fired()),
-        SYS_NET_FRAME => match network::frame_io(scheduler, nic, frame) {
+        SYS_NET_FRAME => match network::dispatch(scheduler, nic, frame) {
             WaitResult::Blocked => return Outcome::Wait,
             WaitResult::Ready(length) => length,
             WaitResult::Unavailable => SYSCALL_ERROR,
@@ -358,6 +358,9 @@ pub(crate) fn dispatch(
                 RUN_PLAN_DEFINITION => Some(RequestKind::PlanDefinition),
                 RUN_STAGE_RENAME => Some(RequestKind::StageRename),
                 RUN_STAGE_RENAME_PAIR => Some(RequestKind::StageRenamePair),
+                RUN_HTTPS_PROBE if a1 == PROGRAM_HELLO && frame.registers[REG_A5] == 0 => {
+                    Some(RequestKind::HttpsProbe)
+                }
                 _ => None,
             };
             let launch = kind

@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements the 78 calls defined by `clv-abi` 0.0.14,
+The RV64 prototype implements the 78 calls defined by `clv-abi` 0.0.15,
 numbered from 0 through 77.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
@@ -12,6 +12,7 @@ The caller places the call number in `a7`, passes up to six arguments in
 - [Typed requests and replies](#typed-requests-and-replies)
 - [Pipes and completion events](#pipes-and-completion-events)
 - [Network frame I/O](#network-frame-io)
+  - [Goal-authorized HTTPS](#goal-authorized-https)
 - [Goal and agent calls](#goal-and-agent-calls)
   - [Goal creation](#goal-creation)
   - [Goal deadlines](#goal-deadlines)
@@ -216,6 +217,7 @@ queued reply.
 | 12 `HostToolFailed` | 1 byte | Reason the agent could not obtain a host tool result. |
 | 13 `PublicationObserved` | 64 bytes | Kernel publication snapshot requested by the monitor through call 68. Call 26 rejects this tag. |
 | 14 `ReadDenialAlert` | 24 bytes | First [read-scope denial](#read-denial-watch) from the bound `echo` monitor. Call 26 requires the exact kernel-supplied event. |
+| 15 `HttpsFailed` | 1 byte | Failure status for the [goal-authorized HTTPS probe](#goal-authorized-https). |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -307,7 +309,8 @@ relaunch discards the previous handle's unread event. A failed launch preserves 
 
 ## Network frame I/O
 
-The kernel authorizes call 77, `net_frame`, by the current task's boot slot.
+Call 77, `net_frame`, restricts frame I/O and the Unix clock to the
+dedicated `netd` boot slot.
 When a modern VirtIO-net device initializes successfully, that slot starts
 `netd` with the six MAC octets in the low 48 bits of `a1`, in little-endian
 order. Since kernel 0.0.89 it also passes the 64-bit smoltcp seed in
@@ -341,6 +344,40 @@ Since kernel 0.0.92, operation 2 reads the RTC-backed clock without accessing
 the network queues. It derives Unix seconds from the current monotonic time
 and the boot offset. Only `netd` can call it.
 [QEMU walkthrough](qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net)
+
+### Goal-authorized HTTPS
+
+On a `tls-probe` build, a goal created with policy bit 8 can admit one native
+request. The grant fixes the operation to `GET /probe` for
+`probe.clavenar.test:8443` at `192.0.2.3`. The kernel binds the request to
+the calling agent's live goal and boot-unique child launch. The launch handle
+serves as the request ID. The deadline is the earlier of five seconds after
+submission and the goal deadline.
+
+| Operation in `a0` | Caller and arguments | Result |
+| --- | --- | --- |
+| 3 submit | Live goal agent | Request ID in `a0`, or -1 with the denial, timeout or availability status in `a1` |
+| 4 poll | The submitting agent, request ID in `a1` | 0 while pending, a final status consumed once, or -1 for an unrelated or invalid request |
+| 5 take | `netd` | 0 while idle, or request ID in `a0`, permitted IPv4 as four little-endian octets in `a1` and absolute deadline in nanoseconds in `a2` |
+| 6 complete | `netd`, request ID in `a1` and final status in `a2` | 0 after recording the result, or -1 for an invalid status or stale request |
+
+Final status values are 1 complete, 2 grant denied, 3 unavailable, 4 timed
+out, 5 DNS failure, 6 destination denied, 7 TLS failure and 8 invalid
+response. The kernel rejects late completion after revocation and records
+timeout if an otherwise live request completes after its deadline.
+
+For frame I/O during the exchange, `netd` puts the request ID in `a4`.
+The kernel checks it before accessing the device, including when a parked
+call retries. Set `a4` to zero for ordinary `netd` traffic. A queued
+request wakes an ordinary receive with a zero-length result. Cancelling
+or stopping the submitting launch releases the request and wakes `netd`
+to discard its DNS and TCP state.
+
+`netd` checks the resolved address before connecting and verifies TLS
+against the original hostname. After validating the fixed HTTPS response,
+the agent returns its 24-byte body as `Matches`. Failures use `HttpsFailed`.
+Both consume the agent's existing reply-byte allowance.
+[Walkthrough](qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp)
 
 ## Goal and agent calls
 
@@ -503,6 +540,8 @@ rename batch durable and requires supervisor review. A durable goal requires
 a writable journal with flush support. Use the single-file format
 (`CLVRNM01`) for bit 7 alone or the pair format (`CLVRNM02`) for bits 6 and 7.
 A supplied rename directory must be the root for either format.
+Bit 8 grants one [native HTTPS probe](#goal-authorized-https) to a live
+agent in this goal.
 
 An omitted descriptor is `NO_RAMFS_HANDLE` (all ones). Zero is a valid
 descriptor. A read or rename directory must be open in the owner's handle
@@ -848,8 +887,8 @@ The kernel binds the child to the goal before its first instruction.
 The agent run calls also create and bind the agent in that operation.
 Call 56 queues a typed request before the agent starts. Bit 0 starts it
 suspended. Bit 1 selects the explicit agent reply allowance in `a3`.
-Otherwise the agent inherits the available balance. Bits 2–5 select the
-request format. Bit 6 requests a durable checkpoint for the revision 2 or 7
+Otherwise the agent inherits the available balance. Bits 2–5 and 7 select
+the request format. Bit 6 requests a durable checkpoint for the revision 2 or 7
 `PlanDefinition` request.
 
 | Format flags | Request kind | Payload |
@@ -859,6 +898,7 @@ request format. Bit 6 requests a durable checkpoint for the revision 2 or 7
 | Bit 3 only | `PlanDefinition` (tag 6) | Two unsigned bytes for the intent and revision. Intent 1 with revision 1–8 selects the corresponding `find-greeting` definition for `hello`. |
 | Bit 4 only | `StageRename` (tag 7) | 1–64 bytes for the proposed basename. `hello` presents the name and its startup file descriptor to call 64. |
 | Bit 5 only | `StageRenamePair` (tag 11) | One byte with the first basename's length, followed by both basenames in grant order. Each basename is 1–64 bytes. The request length determines the second length. |
+| Bit 7 only | `HttpsProbe` (tag 16) | Empty request for `hello`. It asks call 77 to admit the [goal's HTTPS operation](#goal-authorized-https). |
 
 Unknown flag bits, multiple format bits set, an unreadable buffer or the wrong
 length fail before admission. For tag 6 the kernel also verifies that the

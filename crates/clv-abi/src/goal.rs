@@ -443,12 +443,15 @@ pub struct CreatePolicy {
     pub rename_limit: usize,
     /// Flush the root-level batch to a journal that supports the requested rename count.
     pub durable: bool,
+    /// Authorize one native HTTPS probe for a live agent in this goal.
+    pub allow_https_probe: bool,
 }
 
 impl CreatePolicy {
     const REQUIRE_RENAME_REVIEW: usize = 1 << 5;
     const ALLOW_TWO_RENAMES: usize = 1 << 6;
     const DURABLE: usize = 1 << 7;
+    const ALLOW_HTTPS_PROBE: usize = 1 << 8;
 
     pub fn registers(&self) -> Option<[usize; 6]> {
         if let [first, Some(second)] = self.allowed_tools
@@ -470,18 +473,25 @@ impl CreatePolicy {
         if self.durable {
             words[1] |= Self::DURABLE;
         }
+        if self.allow_https_probe {
+            words[1] |= Self::ALLOW_HTTPS_PROBE;
+        }
         Some(words)
     }
 
     pub fn from_registers(mut words: [usize; 6], second_tool: Option<ToolId>) -> Option<Self> {
         let require_rename_review = words[1] & Self::REQUIRE_RENAME_REVIEW != 0;
         let durable = words[1] & Self::DURABLE != 0;
+        let allow_https_probe = words[1] & Self::ALLOW_HTTPS_PROBE != 0;
         let rename_limit = if words[1] & Self::ALLOW_TWO_RENAMES != 0 {
             MAX_GOAL_RENAMES
         } else {
             1
         };
-        words[1] &= !(Self::REQUIRE_RENAME_REVIEW | Self::ALLOW_TWO_RENAMES | Self::DURABLE);
+        words[1] &= !(Self::REQUIRE_RENAME_REVIEW
+            | Self::ALLOW_TWO_RENAMES
+            | Self::DURABLE
+            | Self::ALLOW_HTTPS_PROBE);
         let (options, read_limits, allowed_tool) =
             CreateOptions::from_registers_with_allowed_tool(words)?;
         if second_tool.is_some() && (allowed_tool.is_none() || allowed_tool == second_tool) {
@@ -494,6 +504,7 @@ impl CreatePolicy {
             require_rename_review,
             rename_limit,
             durable,
+            allow_https_probe,
         })
     }
 }
