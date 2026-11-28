@@ -80,12 +80,13 @@ pub(super) fn run(
 
 fn report(result: Result<(), Failure>, kind: HttpsRequest) -> (HttpsStatus, &'static [u8]) {
     match result {
-        Ok(()) if kind == HttpsRequest::McpInit => {
-            (HttpsStatus::Complete, b"netd MCP initialized\r\n")
-        }
         Ok(()) => (
             HttpsStatus::Complete,
-            b"netd HTTPS probe received Hello from native HTTPS\r\n",
+            match kind {
+                HttpsRequest::Probe => b"netd HTTPS probe received Hello from native HTTPS\r\n",
+                HttpsRequest::McpInit => b"netd MCP initialized\r\n",
+                HttpsRequest::McpList => b"netd MCP discovered text.search\r\n",
+            },
         ),
         Err(Failure::DnsLookup) => (HttpsStatus::DnsFailed, b"netd DNS lookup failed\r\n"),
         Err(Failure::DnsTimeout) => (HttpsStatus::TimedOut, b"netd DNS lookup timed out\r\n"),
@@ -145,7 +146,7 @@ fn exchange(
         peer,
         deadline,
         rng,
-        last_port: 0,
+        recent_ports: [0; 2],
     };
     let mut response = [0; RESPONSE_BYTES];
     match probe.kind {
@@ -153,6 +154,10 @@ fn exchange(
             .request(PROBE_REQUEST, b"", ExpectedResponse::Ok, &mut response)
             .map(|_| ()),
         HttpsRequest::McpInit => mcp_initialize(&mut https, &mut response),
+        HttpsRequest::McpList => {
+            mcp_initialize(&mut https, &mut response)?;
+            mcp_list(&mut https, &mut response)
+        }
     }
 }
 
@@ -171,16 +176,37 @@ fn mcp_initialize(
         mcp::VERSION
     )
     .map_err(|_| Failure::InvalidResponse)?;
-    let result = https.post(initialize.into_bytes(), ExpectedResponse::McpJson, response)?;
+    let result = https.post(
+        initialize.into_bytes(),
+        None,
+        ExpectedResponse::McpJson,
+        response,
+    )?;
     if !mcp::result(result, "1").is_some_and(mcp::accepts_initialize) {
         return Err(Failure::InvalidResponse);
     }
     https.post(
         br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        Some(mcp::VERSION),
         ExpectedResponse::McpAccepted,
         response,
     )?;
     Ok(())
+}
+
+fn mcp_list(
+    https: &mut HttpsConnection<'_, '_>,
+    response: &mut [u8; RESPONSE_BYTES],
+) -> Result<(), Failure> {
+    let body = https.post(
+        br#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        Some(mcp::VERSION),
+        ExpectedResponse::McpJson,
+        response,
+    )?;
+    mcp::result(body, "2")
+        .and_then(mcp::validate_search_list)
+        .ok_or(Failure::InvalidResponse)
 }
 
 struct HttpsConnection<'a, 's> {
@@ -189,13 +215,14 @@ struct HttpsConnection<'a, 's> {
     peer: IpEndpoint,
     deadline: Instant,
     rng: &'a mut ChaCha20Rng,
-    last_port: u16,
+    recent_ports: [u16; 2],
 }
 
 impl HttpsConnection<'_, '_> {
     fn post<'a>(
         &mut self,
         body: &[u8],
+        protocol_version: Option<&str>,
         expected: ExpectedResponse,
         response: &'a mut [u8; RESPONSE_BYTES],
     ) -> Result<&'a [u8], Failure> {
@@ -207,8 +234,8 @@ impl HttpsConnection<'_, '_> {
                 "Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n",
                 "Connection: close\r\n"
             ))?;
-            if expected == ExpectedResponse::McpAccepted {
-                write!(header, "MCP-Protocol-Version: {}\r\n", mcp::VERSION)?;
+            if let Some(version) = protocol_version {
+                write!(header, "MCP-Protocol-Version: {version}\r\n")?;
             }
             write!(header, "Content-Length: {}\r\n\r\n", body.len())
         };
@@ -239,13 +266,14 @@ impl HttpsConnection<'_, '_> {
         expected: ExpectedResponse,
         response: &mut [u8; RESPONSE_BYTES],
     ) -> Result<Range<usize>, Failure> {
+        // Give each of the up to three POSTs a distinct TCP source port.
         let port = loop {
             let port = 0xe000 | (self.rng.next_u32() as u16 & 0x1fff);
-            if port != self.last_port {
+            if !self.recent_ports.contains(&port) {
                 break port;
             }
         };
-        self.last_port = port;
+        self.recent_ports = [self.recent_ports[1], port];
         self.network
             .sockets
             .get_mut::<tcp::Socket>(self.handle)

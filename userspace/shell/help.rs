@@ -73,6 +73,7 @@ entries! {
             "Allow one helper or up to two exact tools (repeat --allow-tool)",
         "  --allow-https-probe" => "Authorize one GET to the native HTTPS fixture",
         "  --allow-mcp-init" => "Authorize one native MCP initialization",
+        "  --allow-mcp-list" => "Authorize one native MCP tool discovery",
     },
     GrantFile {
         "goal grant-file [mode] <path>" => "Grant a read-only file. Choose at most one mode",
@@ -124,6 +125,7 @@ entries! {
         "  --plan find-greeting@8" => "Use the host model and both granted MCP searches",
         "  --https-probe" => "Fetch the granted native HTTPS fixture",
         "  --mcp-init" => "Initialize the granted native MCP fixture",
+        "  --mcp-list" => "Discover the search tool at the granted native MCP fixture",
         "  --delegate --with-file --reply-bytes N grep -F <pattern>" =>
             "Ask grep to search the file",
     },

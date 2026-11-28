@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements the 78 calls defined by `clv-abi` 0.0.16,
+The RV64 prototype implements the 78 calls defined by `clv-abi` 0.0.17,
 numbered from 0 through 77.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
@@ -219,6 +219,7 @@ queued reply.
 | 14 `ReadDenialAlert` | 24 bytes | First [read-scope denial](#read-denial-watch) from the bound `echo` monitor. Call 26 requires the exact kernel-supplied event. |
 | 15 `HttpsFailed` | 1 byte | Failure status for the [goal-authorized HTTPS probe](#goal-authorized-https). |
 | 16 `McpInitFailed` | 1 byte | Failure status for [native MCP initialization](#goal-authorized-https). |
+| 17 `McpListFailed` | 1 byte | Failure status for [native MCP tool discovery](#goal-authorized-https). |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -348,18 +349,19 @@ and the boot offset. Only `netd` can call it.
 
 ### Goal-authorized HTTPS
 
-On a `tls-probe` build, policy bit 8 grants a goal one `GET /probe` and
-policy bit 9 independently grants one MCP initialization at `/mcp`.
-Both fix the destination to `probe.clavenar.test:8443` at `192.0.2.3`.
+On a `tls-probe` build, policy bit 8 grants one `GET /probe`, bit 9 grants
+one MCP initialization, and bit 10 grants one MCP tool discovery. Both MCP
+operations use `/mcp`. All three operations fix the destination to
+`probe.clavenar.test:8443` at `192.0.2.3`.
 Admission consumes the selected grant and binds the operation to the calling
 agent's live goal and boot-unique child launch. The GET uses the launch handle
-as its request ID. MCP initialization receives a fresh request ID for the
-whole operation. Both operations use the earlier of five seconds after
-submission and the goal deadline.
+as its request ID. Each MCP operation receives a fresh request ID for the
+whole exchange. The deadline is the earlier of five seconds after submission
+and the goal deadline.
 
 | Operation in `a0` | Caller and arguments | Result |
 | --- | --- | --- |
-| 3 submit | Live goal agent, operation selector in `a1` (0 for GET, 1 for MCP initialization) | Request ID in `a0`, or -1 with the denial, timeout or availability status in `a1` |
+| 3 submit | Live goal agent, operation selector in `a1` (0 for GET, 1 for MCP initialization, 2 for MCP tool discovery) | Request ID in `a0`, or -1 with the denial, timeout or availability status in `a1` |
 | 4 poll | The submitting agent, request ID in `a1` | 0 while pending, a final status consumed once, or -1 for an unrelated or invalid request |
 | 5 take | `netd` | 0 while idle, or request ID in `a0`, permitted IPv4 as four little-endian octets in `a1`, absolute deadline in nanoseconds in `a2` and operation selector in `a3` |
 | 6 complete | `netd`, request ID in `a1` and final status in `a2` | 0 after recording the result, or -1 for an invalid status or stale request |
@@ -377,13 +379,15 @@ or stopping the submitting launch releases the request and wakes `netd`
 to discard its DNS and TCP state.
 
 `netd` checks the resolved address before connecting and verifies TLS
-against the original hostname. After validation, the agent returns the GET's
-24-byte body or the 16-byte MCP acknowledgment as `Matches`. MCP
-initialization uses one scoped request ID and deadline across the
-`initialize` and `notifications/initialized` POSTs. Failed operations send
-`HttpsFailed` or `McpInitFailed` with the status byte. All these replies
-consume the agent's existing reply-byte allowance.
-[HTTPS GET walkthrough](qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) · [MCP initialization walkthrough](qemu-walkthroughs.md#initialize-mcp-over-native-https)
+against the original hostname. MCP initialization covers the `initialize`
+and `notifications/initialized` POSTs. Tool discovery continues with
+`tools/list` under the same request ID and deadline.
+After validation, the agent returns the GET's 24-byte body, the 16-byte
+MCP acknowledgment, or the 12-byte tool name including its newline as
+`Matches`. Failed operations send `HttpsFailed`, `McpInitFailed`, or
+`McpListFailed` with the status byte. All replies consume the agent's
+existing reply-byte allowance.
+[HTTPS GET](qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) · [MCP initialization](qemu-walkthroughs.md#initialize-mcp-over-native-https) · [MCP tool discovery](qemu-walkthroughs.md#discover-the-mcp-search-tool-over-native-https)
 
 ## Goal and agent calls
 
@@ -547,7 +551,8 @@ a writable journal with flush support. Use the single-file format
 (`CLVRNM01`) for bit 7 alone or the pair format (`CLVRNM02`) for bits 6 and 7.
 A supplied rename directory must be the root for either format.
 Bit 8 grants one [native HTTPS probe](#goal-authorized-https) to a live
-agent in this goal. Bit 9 independently grants one native MCP initialization.
+agent in this goal. Bits 9 and 10 independently grant one native MCP
+initialization and one native MCP tool discovery, respectively.
 
 An omitted descriptor is `NO_RAMFS_HANDLE` (all ones). Zero is a valid
 descriptor. A read or rename directory must be open in the owner's handle
@@ -893,7 +898,7 @@ The kernel binds the child to the goal before its first instruction.
 The agent run calls also create and bind the agent in that operation.
 Call 56 queues a typed request before the agent starts. Bit 0 starts it
 suspended. Bit 1 selects the explicit agent reply allowance in `a3`.
-Otherwise the agent inherits the available balance. Bits 2–5, 7 and 8 select
+Otherwise the agent inherits the available balance. Bits 2–5 and 7–9 select
 the request format. Bit 6 requests a durable checkpoint for the revision 2 or 7
 `PlanDefinition` request.
 
@@ -906,6 +911,7 @@ the request format. Bit 6 requests a durable checkpoint for the revision 2 or 7
 | Bit 5 only | `StageRenamePair` (tag 11) | One byte with the first basename's length, followed by both basenames in grant order. Each basename is 1–64 bytes. The request length determines the second length. |
 | Bit 7 only | `HttpsProbe` (tag 16) | Empty request for `hello`. It asks call 77 to admit the [goal's HTTPS operation](#goal-authorized-https). |
 | Bit 8 only | `McpInit` (tag 17) | Empty request for `hello`. It asks call 77 to admit the [goal's MCP initialization](#goal-authorized-https). |
+| Bit 9 only | `McpList` (tag 18) | Empty request for `hello`. It asks call 77 to admit the [goal's MCP tool discovery](#goal-authorized-https). |
 
 Unknown flag bits, multiple format bits set, an unreadable buffer or the wrong
 length fail before admission. For tag 6 the kernel also verifies that the

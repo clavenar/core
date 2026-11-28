@@ -22,6 +22,7 @@ pub(crate) struct GoalOptions<'a> {
     pub allowed_tools: [Option<ToolId>; 2],
     pub allow_https_probe: bool,
     pub allow_mcp_init: bool,
+    pub allow_mcp_list: bool,
     pub preserve_files: [Option<&'a [u8]>; MAX_GOAL_RENAMES],
     pub rename_under: Option<&'a [u8]>,
     pub rename_limit: Option<usize>,
@@ -99,6 +100,12 @@ impl<'a> GoalOptions<'a> {
                     if matches!(command, GoalCommand::Create) && !options.allow_mcp_init =>
                 {
                     options.allow_mcp_init = true;
+                    rest
+                }
+                GoalFlag::AllowMcpList
+                    if matches!(command, GoalCommand::Create) && !options.allow_mcp_list =>
+                {
+                    options.allow_mcp_list = true;
                     rest
                 }
                 GoalFlag::RenameUnder if matches!(command, GoalCommand::Create) => {

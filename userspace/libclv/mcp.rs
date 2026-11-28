@@ -257,3 +257,31 @@ pub fn accepts_initialize(result: Value<'_>) -> bool {
             .is_some_and(|tools| tools.is_object())
         && is_implementation(server)
 }
+
+/// Finds the search tool's schema in a complete, single-tool list.
+pub fn search_tool_schema(list: Value<'_>) -> Option<Value<'_>> {
+    let [tools, None] = list.fields([b"tools", b"nextCursor"])? else {
+        return None;
+    };
+    let [name, schema] = tools?.sole_item()?.fields([b"name", b"inputSchema"])?;
+    name?.string_is(SEARCH_TOOL.as_bytes()).then_some(schema?)
+}
+
+/// Checks the input contract of the pinned HTTPS fixture.
+pub fn validate_search_list(list: Value<'_>) -> Option<()> {
+    let [kind, properties, required, additional, _] = search_tool_schema(list)?.fields_only([
+        b"type",
+        b"properties",
+        b"required",
+        b"additionalProperties",
+        b"title",
+    ])?;
+    let [pattern, _] = properties?
+        .sole_field(b"pattern")?
+        .fields_only([b"type", b"title"])?;
+    (kind?.string_is(b"object")
+        && pattern?.string_is(b"string")
+        && required?.sole_item()?.string_is(b"pattern")
+        && additional.is_none_or(|value| value.boolean() == Some(false)))
+    .then_some(())
+}

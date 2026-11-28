@@ -5,7 +5,7 @@ mod mcp_client;
 
 use clv::{ChildReply, ChildStatus, LaunchRequest, agent, bridge, fs, pipe};
 use clv_abi::agent::{LAUNCH_REQUEST_MAX_BYTES, decode_rename_pair};
-use clv_abi::net::{HTTPS_PROBE_BODY, HttpsRequest, HttpsStatus, MCP_INIT_REPLY};
+use clv_abi::net::{HTTPS_PROBE_BODY, HttpsRequest, HttpsStatus, MCP_INIT_REPLY, MCP_LIST_REPLY};
 use clv_abi::{
     GrantKind, MESSAGE_MAX_BYTES, PROBE_VALUE, ReplyKind, RequestKind, SYS_EXIT, SYS_PROBE,
     SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
@@ -59,30 +59,17 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, extra: usi
             ..
         }) => run_plan(kind, bytes),
         Some(LaunchRequest::Received {
-            kind: kind @ (RequestKind::HttpsProbe | RequestKind::McpInit),
+            kind: RequestKind::HttpsProbe,
             ..
-        }) => {
-            let (request, body, failure) = if kind == RequestKind::McpInit {
-                (
-                    HttpsRequest::McpInit,
-                    MCP_INIT_REPLY,
-                    ReplyKind::McpInitFailed,
-                )
-            } else {
-                (
-                    HttpsRequest::Probe,
-                    HTTPS_PROBE_BODY,
-                    ReplyKind::HttpsFailed,
-                )
-            };
-            let result = clv::net::request_https(request);
-            if result == HttpsStatus::Complete {
-                usize::from(!clv::send_reply(ReplyKind::Matches, body))
-            } else {
-                clv::send_reply(failure, &[result as u8]);
-                1
-            }
-        }
+        }) => run_https(HttpsRequest::Probe),
+        Some(LaunchRequest::Received {
+            kind: RequestKind::McpInit,
+            ..
+        }) => run_https(HttpsRequest::McpInit),
+        Some(LaunchRequest::Received {
+            kind: RequestKind::McpList,
+            ..
+        }) => run_https(HttpsRequest::McpList),
         _ if grant_kind == GrantKind::File as usize && extra != 0 => {
             let status = copy_file(handle, |bytes| pipe::write(extra, bytes));
             pipe::close(extra);
@@ -117,6 +104,21 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, extra: usi
             clv::send_reply(ReplyKind::Echo, b"hello ready");
             // The assembly entry continues with the ordinary greeting or granted file.
             SYSCALL_ERROR
+        }
+    }
+}
+
+fn run_https(request: HttpsRequest) -> usize {
+    let (body, failure) = match request {
+        HttpsRequest::Probe => (HTTPS_PROBE_BODY, ReplyKind::HttpsFailed),
+        HttpsRequest::McpInit => (MCP_INIT_REPLY, ReplyKind::McpInitFailed),
+        HttpsRequest::McpList => (MCP_LIST_REPLY, ReplyKind::McpListFailed),
+    };
+    match clv::net::request_https(request) {
+        HttpsStatus::Complete => usize::from(!clv::send_reply(ReplyKind::Matches, body)),
+        status => {
+            clv::send_reply(failure, &[status as u8]);
+            1
         }
     }
 }

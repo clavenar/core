@@ -15,6 +15,19 @@ pub(super) fn parse(frame: &[u8]) -> Option<Value<'_>> {
 
 impl<'a> Value<'a> {
     pub fn fields<const N: usize>(self, keys: [&[u8]; N]) -> Option<[Option<Self>; N]> {
+        self.object_fields(keys, false)
+    }
+
+    /// Reads the allowed fields and rejects any other member.
+    pub fn fields_only<const N: usize>(self, keys: [&[u8]; N]) -> Option<[Option<Self>; N]> {
+        self.object_fields(keys, true)
+    }
+
+    fn object_fields<const N: usize>(
+        self,
+        keys: [&[u8]; N],
+        reject_unknown: bool,
+    ) -> Option<[Option<Self>; N]> {
         let mut fields = [None; N];
         let mut input = Cursor { rest: self.0 };
         if !input.take(b'{') {
@@ -28,6 +41,8 @@ impl<'a> Value<'a> {
                 if fields[index].replace(value).is_some() {
                     return None;
                 }
+            } else if reject_unknown {
+                return None;
             }
             input.whitespace();
             if !input.take(b',') {

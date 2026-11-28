@@ -13,6 +13,7 @@ continues the previous one. Goal handles and ordinary RamFS changes live for one
   - [Check the guest Unix clock](#check-the-guest-unix-clock)
   - [Fetch an HTTPS response over native TCP](#fetch-an-https-response-over-native-tcp)
   - [Initialize MCP over native HTTPS](#initialize-mcp-over-native-https)
+  - [Discover the MCP search tool over native HTTPS](#discover-the-mcp-search-tool-over-native-https)
   - [Probe a VirtIO block device](#probe-a-virtio-block-device)
   - [Recover a VirtIO block marker after reboot](#recover-a-virtio-block-marker-after-reboot)
   - [Recover a previous journal record](#recover-a-previous-journal-record)
@@ -61,7 +62,7 @@ and stable launch selectors. A versioned file tool maps an exact tool ID
 to one of those programs. [Program registry](../crates/clv-abi/src/program.rs) · [File tool registry](../crates/clv-abi/src/tool.rs)
 The loader accepts static, little-endian ELF64 executables with one
 read/execute segment at `0x00400000`. The kernel build takes the 64 KiB limit
-from `clv-abi` and allows up to 172 KiB for `netd` with `tls-probe`. When
+from `clv-abi` and allows up to 176 KiB for `netd` with `tls-probe`. When
 linking a shell program directly with `userspace/user.ld`, pass
 `--defsym=USER_IMAGE_MAX_BYTES=65536` to the linker. The loader allocates
 frames based on the segment's memory size (`p_memsz`) and zero-fills any
@@ -85,7 +86,7 @@ top of the stack. Nonempty syscall buffers must fit within the calling
 task's stack. The kernel, UART and attached VirtIO MMIO mappings are
 shared in supervisor mode. The boot pool has room for five full-size images,
 seven task stacks and the page tables. It holds 114 frames in the standard
-build, 116 with `http-probe` and 161 with `tls-probe`. The pool, kernel and
+build, 116 with `http-probe` and 162 with `tls-probe`. The pool, kernel and
 64 KiB supervisor stack fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
@@ -552,13 +553,13 @@ def send_dns_answer(host, query, address):
         record = b"\xc0\x0c" + pack("!HHIH", 1, 1, 60, 4) + address
     send_udp(host, dns_port, port, header + question + record)
 
-def start_https_goal(guest, log, *, grant=True, timeout_ms=None, mcp=False):
-    operation = "mcp-init" if mcp else "https-probe"
-    command = f"goal create --reply-bytes {16 if mcp else 24}"
-    if grant:
-        command += f" --allow-{operation}"
-    elif mcp:
-        command += " --allow-https-probe"
+def start_https_goal(guest, log, *, operation="https-probe", grant=True, timeout_ms=None):
+    allowance = {"https-probe": 24, "mcp-init": 16, "mcp-list": 12}[operation]
+    command = f"goal create --reply-bytes {allowance}"
+    other_grant = {"mcp-init": "https-probe", "mcp-list": "mcp-init"}
+    granted_operation = operation if grant else other_grant.get(operation)
+    if granted_operation:
+        command += f" --allow-{granted_operation}"
     if timeout_ms is not None:
         command += f" --timeout-ms {timeout_ms}"
     created = guest_command(guest, command)
@@ -566,6 +567,7 @@ def start_https_goal(guest, log, *, grant=True, timeout_ms=None, mcp=False):
     if b"goal created" not in created or b"child=0x" not in launched:
         raise RuntimeError("Could not launch the HTTPS goal")
     log.extend(created + launched)
+    return allowance
 
 def finish_https_goal(guest, expected, *, spent=1, allowance=24):
     status = guest_command(guest, "wait hello")
@@ -574,7 +576,7 @@ def finish_https_goal(guest, expected, *, spent=1, allowance=24):
     closed = guest_command(guest, "goal close")
     outcome = (b"hello exited 0x0000000000000000" if spent == allowance else
                b"hello exited 0x0000000000000001" if spent == 1 else b"hello cancelled")
-    if (outcome not in status or expected not in reply or
+    if (outcome not in status or expected not in reply.splitlines() or
             f"available={allowance - spent} reserved=0 spent={spent}".encode() not in budget or
             b"goal closed" not in closed):
         raise RuntimeError("Unexpected goal result, reply budget or close")
@@ -809,7 +811,7 @@ def check_https_authority(host, guest, log, *, grant):
     if select([host], [], [], 0.1)[0]:
         raise RuntimeError("An ungranted or expired goal sent network traffic")
 
-def relay_mcp(server, request, *, notification, case):
+def relay_mcp(server, request, *, method, case):
     head, separator, body = request.partition(b"\r\n\r\n")
     if len(head) > 1024 or len(body) > 1024:
         raise RuntimeError("The HTTP request exceeded the fixture bounds")
@@ -818,7 +820,7 @@ def relay_mcp(server, request, *, notification, case):
     line, _, headers = head.partition(b"\r\n")
     headers = parse_headers(BytesIO(headers + b"\r\n\r\n"))
     version = "2025-11-25"
-    protocol_header = version if notification else None
+    protocol_header = None if method == "initialize" else version
     if (line != b"POST /mcp HTTP/1.1" or headers.get("Host") != "probe.clavenar.test:8443" or
             headers.get("Connection") != "close" or headers.get("Content-Type") != "application/json" or
             headers.get("Accept") != "application/json, text/event-stream" or
@@ -830,17 +832,20 @@ def relay_mcp(server, request, *, notification, case):
     if len(body) != int(length):
         raise RuntimeError("Unexpected MCP request length")
 
-    message = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-    if not notification:
-        message = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    message = {"jsonrpc": "2.0", "method": method}
+    if method == "initialize":
+        message.update(id=1, params={
             "protocolVersion": version, "capabilities": {},
             "clientInfo": {"name": "clavenar-netd", "version": "1"},
-        }}
+        })
+    elif method == "tools/list":
+        message.update(id=2, params={})
     if json.loads(body) != message:
         raise RuntimeError(f"Unexpected MCP message {body!r}")
 
     forwarded = {name: headers[name] for name in ("Accept", "Content-Type", "MCP-Protocol-Version")
                  if name in headers}
+    notification = method == "notifications/initialized"
     connection = HTTPConnection("127.0.0.1", 8765, timeout=2)
     try:
         connection.request("POST", "/mcp", body, forwarded)
@@ -854,7 +859,7 @@ def relay_mcp(server, request, *, notification, case):
     finally:
         connection.close()
 
-    if case in ("wrong-id", "wrong-version"):
+    if method == "initialize" and case in ("wrong-id", "wrong-version"):
         result = json.loads(reply)
         if case == "wrong-id":
             result["id"] = 2
@@ -863,49 +868,71 @@ def relay_mcp(server, request, *, notification, case):
         reply = json.dumps(result).encode()
     elif notification and case == "nonempty-accepted":
         reply = b"{}"
+    elif method == "tools/list" and case in ("list-wrong-id", "wrong-schema", "paginated"):
+        result = json.loads(reply)
+        if case == "list-wrong-id":
+            result["id"] = 1
+        elif case == "wrong-schema":
+            schema = result["result"]["tools"][0]["inputSchema"]
+            schema["properties"]["pattern"]["type"] = "integer"
+        else:
+            result["result"]["nextCursor"] = "another-page"
+        reply = json.dumps(result).encode()
 
     if content_type is not None:
         status_line += f"Content-Type: {content_type}\r\n"
     server.write(f"{status_line}Content-Length: {len(reply)}\r\nConnection: close\r\n\r\n".encode())
     if reply:
         server.write(reply)
-    print(f"Host MCP server accepted {message['method']}", flush=True)
+    print(f"Host MCP server accepted {method}", flush=True)
     return True
 
-def check_mcp_peer(host, guest, log, *, credentials, case):
-    start_https_goal(guest, log, mcp=True, grant=case != "missing-grant")
+def check_mcp_peer(host, guest, log, *, credentials, case, operation="mcp-init"):
+    allowance = start_https_goal(guest, log, operation=operation, grant=case != "missing-grant")
+    listing = operation == "mcp-list"
+    label = b"MCP list" if listing else b"MCP init"
     if case == "missing-grant":
-        finish_https_goal(guest, b"MCP init grant required", allowance=16)
+        reply, spent = label + b" grant required", 1
     else:
         resolve_tls_peer(host)
         context = tls_context(credentials)
-        initialize = TlsPeer(host, context)
-        initialize.exchange(guest, log, partial(relay_mcp, notification=False, case=case),
-                            cancel_on_fin=case == "cancelled")
-        initialize.require_shutdown()
-        if case == "cancelled":
-            finish_https_goal(guest, b"no message", spent=0, allowance=16)
-        elif case in ("wrong-id", "wrong-version"):
-            finish_https_goal(guest, b"MCP init invalid response", allowance=16)
-        else:
-            notification = TlsPeer(host, context)
-            if notification.port == initialize.port:
-                raise RuntimeError("Expected a fresh TCP source port for the notification")
-            complete = case == "complete"
-            marker = b"netd MCP initialized" if complete else b"netd HTTPS probe invalid response"
-            notification.exchange(guest, log, partial(relay_mcp, notification=True, case=case),
-                                  terminal=None if complete else marker)
-            if complete:
-                notification.require_shutdown()
-                finish_https_goal(guest, b"MCP initialized", spent=16, allowance=16)
-            else:
-                if not notification.responded:
+        last_method = {
+            "cancelled": "notifications/initialized" if listing else "initialize",
+            "wrong-id": "initialize",
+            "wrong-version": "initialize",
+            "nonempty-accepted": "notifications/initialized",
+        }.get(case, "tools/list" if listing else "notifications/initialized")
+        ports = set()
+        for method in ("initialize", "notifications/initialized", "tools/list"):
+            peer = TlsPeer(host, context)
+            if peer.port in ports:
+                raise RuntimeError("Expected a fresh TCP source port for each MCP request")
+            ports.add(peer.port)
+            last = method == last_method
+            invalid_http = last and case == "nonempty-accepted"
+            peer.exchange(guest, log, partial(relay_mcp, method=method, case=case),
+                          terminal=b"netd HTTPS probe invalid response" if invalid_http else None,
+                          cancel_on_fin=last and case == "cancelled")
+            if invalid_http:
+                if not peer.responded:
                     raise RuntimeError("The MCP server did not receive the notification")
-                finish_https_goal(guest, b"MCP init invalid response", allowance=16)
+            else:
+                peer.require_shutdown()
+            if last:
+                break
+
+        if case == "cancelled":
+            reply, spent = b"no message", 0
+        elif case == "complete":
+            reply = b"text.search" if listing else b"MCP initialized"
+            spent = allowance
+        else:
+            reply, spent = label + b" invalid response", 1
+    finish_https_goal(guest, reply, spent=spent, allowance=allowance)
     if select([host], [], [], 0.1)[0]:
         raise RuntimeError("Unexpected guest traffic after the MCP result")
 
-def check_tls(*, mcp=False):
+def check_tls(*, mcp_operation=None):
     def openssl(*args):
         run(["openssl", *args], check=True)
 
@@ -913,7 +940,7 @@ def check_tls(*, mcp=False):
     with TemporaryDirectory(prefix="clavenar-tls-") as directory:
         files = Path(directory)
         keygen = ("-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-noenc")
-        for authority in (("fixture",) if mcp else ("fixture", "other")):
+        for authority in (("fixture",) if mcp_operation else ("fixture", "other")):
             openssl("req", "-x509", *keygen, "-days", "4", "-subj", f"/CN={authority} CA",
                     "-addext", "basicConstraints=critical,CA:TRUE",
                     "-addext", "keyUsage=critical,keyCertSign,cRLSign",
@@ -947,12 +974,18 @@ def check_tls(*, mcp=False):
         def rtc(time):
             return "-rtc", f"base={time:%Y-%m-%dT%H:%M:%S},clock=vm"
 
-        if mcp:
-            for case in ("complete", "missing-grant", "wrong-id", "wrong-version", "cancelled",
-                         "nonempty-accepted"):
+        if mcp_operation:
+            cases = {
+                "mcp-init": ("complete", "missing-grant", "wrong-id", "wrong-version",
+                             "cancelled", "nonempty-accepted"),
+                "mcp-list": ("complete", "missing-grant", "wrong-version", "list-wrong-id",
+                             "wrong-schema", "paginated", "cancelled"),
+            }
+            label = "discovery" if mcp_operation == "mcp-list" else "initialization"
+            for case in cases[mcp_operation]:
                 boot(target=target, extra_args=system_rng + rtc(now),
-                     verify=partial(check_mcp_peer, credentials=valid, case=case))
-                print(f"Host verified MCP initialization case {case}", flush=True)
+                     verify=partial(check_mcp_peer, credentials=valid, case=case, operation=mcp_operation))
+                print(f"Host verified MCP {label} case {case}", flush=True)
             return
 
         wrong_name = leaf("wrong-name", "other.clavenar.test", "fixture", 2)
@@ -1004,7 +1037,9 @@ elif sys.argv[1:] == ["http"]:
 elif sys.argv[1:] == ["tls"]:
     check_tls()
 elif sys.argv[1:] == ["mcp"]:
-    check_tls(mcp=True)
+    check_tls(mcp_operation="mcp-init")
+elif sys.argv[1:] == ["mcp-list"]:
+    check_tls(mcp_operation="mcp-list")
 else:
     boot(exercise_network=True)
     print("Host verified Ethernet probes, ARP, ICMP, UDP and TCP echo after clsh>", flush=True)
@@ -1233,11 +1268,54 @@ verify that a GET-only grant stops before DNS, that a wrong ID, wrong
 version or cancellation prevents the notification, and that a nonempty
 HTTP `202` response fails the operation.
 
-On Rust 1.100.1, the `netd` image is about 163.6 KiB with `tls-probe`
-and 171.6 KiB with both probe features. After a successful initialization,
-the lowest nonzero stack bytes were about 63 KiB and 67 KiB below the
-stack top, respectively. The image limit is 172 KiB and the stack reserves
-96 KiB.
+### Discover the MCP search tool over native HTTPS
+
+`--allow-mcp-list` grants one discovery exchange at the same pinned
+`https://probe.clavenar.test:8443/mcp` endpoint. `netd` completes the two
+initialization POSTs and then sends `tools/list` with JSON-RPC ID `2` and
+the negotiated `MCP-Protocol-Version` header. One request ID and deadline
+cover the three connections. The guest accepts one page with the
+`text.search` descriptor and its sole required string `pattern` argument.
+[MCP tool discovery](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#listing-tools)
+
+Start the loopback Python server in one Linux terminal.
+[Start the MCP fixture](#search-a-host-mcp-fixture)
+Run this block from `core` in a second Linux terminal.
+
+```bash
+(
+  set -o pipefail
+  awk '
+    /^### Exchange an Ethernet frame over VirtIO-net$/ { section = 1 }
+    section && /^python3 - .*PY/ { script = 1; next }
+    script && /^PY$/ { exit }
+    script { print }
+  ' docs/qemu-walkthroughs.md | python3 - mcp-list
+)
+```
+
+The successful QEMU boot runs these commands at `clsh>`.
+
+```text
+goal create --reply-bytes 12 --allow-mcp-list
+agent run hello --mcp-list
+wait hello
+recv hello
+goal budget
+goal close
+```
+
+The host logs `initialize`, `notifications/initialized`, then `tools/list`.
+`recv hello` prints `text.search` and `goal budget` reports
+`available=0 reserved=0 spent=12`. The other boots check that an
+initialization-only grant stops before DNS, a rejected initialization or
+cancellation prevents `tools/list`, and a wrong list reply ID, schema, or
+pagination cursor fails discovery.
+
+On Rust 1.100.1, the `netd` image is about 164.7 KiB with `tls-probe`
+and 172.4 KiB with both probe features. After successful discovery, the
+lowest nonzero stack bytes were about 64 KiB and 68 KiB below the stack
+top, respectively. The image limit is 176 KiB and the stack reserves 96 KiB.
 
 ### Probe a VirtIO block device
 

@@ -6,8 +6,8 @@ pub use clv_abi::agent::{
 };
 use clv_abi::agent::{
     EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES, RECV_CHECKPOINT, RUN_CHECKPOINT,
-    RUN_HTTPS_PROBE, RUN_MCP_INIT, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
-    RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED, encode_rename_pair,
+    RUN_HTTPS_PROBE, RUN_MCP_INIT, RUN_MCP_LIST, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT,
+    RUN_REPLY_LIMIT, RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED, encode_rename_pair,
 };
 use clv_abi::tool::{FILE_TOOL_MCP, FILE_TOOL_STDIO};
 use clv_abi::{
@@ -83,6 +83,7 @@ pub enum RunRequest<'a> {
     StageRenamePair([&'a [u8]; 2]),
     HttpsProbe,
     McpInit,
+    McpList,
 }
 
 /// Launches an agent with an optional typed request in its mailbox.
@@ -134,6 +135,10 @@ pub fn launch(
         }
         RunRequest::McpInit => {
             flags |= RUN_MCP_INIT;
+            &[]
+        }
+        RunRequest::McpList => {
+            flags |= RUN_MCP_LIST;
             &[]
         }
     };

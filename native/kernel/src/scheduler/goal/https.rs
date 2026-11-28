@@ -31,6 +31,7 @@ impl Scheduler {
         let available = match kind {
             HttpsRequest::Probe => goal.https_available,
             HttpsRequest::McpInit => goal.mcp_init_available,
+            HttpsRequest::McpList => goal.mcp_list_available,
         };
         if !available {
             return Err(HttpsStatus::Denied);
@@ -52,7 +53,7 @@ impl Scheduler {
         let (goal, launch) = (goal.handle, member.handle);
         let id = match kind {
             HttpsRequest::Probe => launch,
-            HttpsRequest::McpInit => {
+            HttpsRequest::McpInit | HttpsRequest::McpList => {
                 let id = self.next_handle;
                 self.next_handle = id.checked_add(1).ok_or(HttpsStatus::Unavailable)?;
                 id
@@ -70,6 +71,7 @@ impl Scheduler {
         match kind {
             HttpsRequest::Probe => goal.https_available = false,
             HttpsRequest::McpInit => goal.mcp_init_available = false,
+            HttpsRequest::McpList => goal.mcp_list_available = false,
         }
         self.wake_netd(true, false);
         Ok(id)

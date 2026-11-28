@@ -56,7 +56,7 @@ service. It uses smoltcp at `192.0.2.2/24` on a private link to the fixture.
 | --- | --- |
 | Default | The guest answers ARP and IPv4 pings, echoes UDP on port `49152`, and echoes a TCP stream on port `49153`. [Ethernet and IP walkthrough](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net) |
 | `http-probe` | The guest sends `GET /probe` to the peer on port `8080` and checks the HTTP response. [HTTP walkthrough](docs/qemu-walkthroughs.md#fetch-an-http-response-over-native-tcp) |
-| `tls-probe` | A goal can use `--allow-https-probe` for one verified HTTPS GET or `--allow-mcp-init` for one MCP initialization through `netd`. The fixtures use OpenSSL 3 and Python with TLS 1.3 support. [HTTPS GET walkthrough](docs/qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) · [MCP initialization walkthrough](docs/qemu-walkthroughs.md#initialize-mcp-over-native-https) |
+| `tls-probe` | A goal can grant a verified HTTPS GET, MCP initialization, or MCP tool discovery through `netd`. The fixtures use OpenSSL 3 and Python with TLS 1.3 support. [HTTPS GET](docs/qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) · [MCP initialization](docs/qemu-walkthroughs.md#initialize-mcp-over-native-https) · [MCP tool discovery](docs/qemu-walkthroughs.md#discover-the-mcp-search-tool-over-native-https) |
 
 The HTTPS probe uses a separate 32-byte seed from VirtIO RNG for TLS. `netd`
 uses the RTC-backed Unix clock to check certificate validity dates.

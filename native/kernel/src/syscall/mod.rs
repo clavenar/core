@@ -2,8 +2,8 @@ mod network;
 
 use clv_abi::agent::{
     AgentLaunch, CURRENT_AGENT, NO_DEFINITION, RECV_CHECKPOINT, RUN_CHECKPOINT, RUN_HTTPS_PROBE,
-    RUN_MCP_INIT, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT, RUN_STAGE_RENAME,
-    RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED, decode_rename_pair,
+    RUN_MCP_INIT, RUN_MCP_LIST, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
+    RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED, decode_rename_pair,
 };
 use clv_abi::audit::{
     DelegationDenial, EncodedReadDenialSnapshot, PublicationAuditView, ReadAuditView,
@@ -363,6 +363,9 @@ pub(crate) fn dispatch(
                 }
                 RUN_MCP_INIT if a1 == PROGRAM_HELLO && frame.registers[REG_A5] == 0 => {
                     Some(RequestKind::McpInit)
+                }
+                RUN_MCP_LIST if a1 == PROGRAM_HELLO && frame.registers[REG_A5] == 0 => {
+                    Some(RequestKind::McpList)
                 }
                 _ => None,
             };

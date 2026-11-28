@@ -49,14 +49,13 @@ fn exchange(
     let list = request(stream, frame, "2", "tools/list", |frame| {
         frame.write_str("{}")
     })?;
-    let [tools, None] = list.fields([b"tools", b"nextCursor"])? else {
-        return None;
-    };
-    let [name, schema] = tools?.sole_item()?.fields([b"name", b"inputSchema"])?;
-    let [kind, properties, required, additional] =
-        schema?.fields([b"type", b"properties", b"required", b"additionalProperties"])?;
-    if !name?.string_is(mcp::SEARCH_TOOL.as_bytes())
-        || !kind?.string_is(b"object")
+    let [kind, properties, required, additional] = mcp::search_tool_schema(list)?.fields([
+        b"type",
+        b"properties",
+        b"required",
+        b"additionalProperties",
+    ])?;
+    if !kind?.string_is(b"object")
         || !properties?
             .sole_field(b"pattern")?
             .field(b"type")?

@@ -548,6 +548,7 @@ fn agent_run_args(
             }
             GoalFlag::HttpsProbe if args.is_empty() => agent::RunRequest::HttpsProbe,
             GoalFlag::McpInit if args.is_empty() => agent::RunRequest::McpInit,
+            GoalFlag::McpList if args.is_empty() => agent::RunRequest::McpList,
             _ => return None,
         })
     };
@@ -662,15 +663,15 @@ pub(super) fn display_reply(handle: usize, kind: ReplyKind, bytes: &[u8]) {
         ReplyKind::ReadFailed => print(b"cannot read requested file\r\n"),
         ReplyKind::ResultTooLarge => print(b"grep result exceeds 64 bytes\r\n"),
         ReplyKind::DelegationFailed => print(b"cannot delegate child\r\n"),
-        ReplyKind::HttpsFailed | ReplyKind::McpInitFailed => {
+        ReplyKind::HttpsFailed | ReplyKind::McpInitFailed | ReplyKind::McpListFailed => {
             use clv_abi::net::HttpsStatus::{self, *};
             let status = bytes
                 .first()
                 .and_then(|&byte| HttpsStatus::from_raw(byte.into()));
-            let operation: &[u8] = if kind == ReplyKind::McpInitFailed {
-                b"MCP init"
-            } else {
-                b"HTTPS probe"
+            let operation: &[u8] = match kind {
+                ReplyKind::McpInitFailed => b"MCP init",
+                ReplyKind::McpListFailed => b"MCP list",
+                _ => b"HTTPS probe",
             };
             let reason: &[u8] = match status {
                 Some(Denied) => b" grant required",

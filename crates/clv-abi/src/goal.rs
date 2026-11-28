@@ -447,6 +447,8 @@ pub struct CreatePolicy {
     pub allow_https_probe: bool,
     /// Authorize one MCP initialization against the native fixture.
     pub allow_mcp_init: bool,
+    /// Authorize one MCP tool discovery exchange against the native fixture.
+    pub allow_mcp_list: bool,
 }
 
 impl CreatePolicy {
@@ -455,6 +457,7 @@ impl CreatePolicy {
     const DURABLE: usize = 1 << 7;
     const ALLOW_HTTPS_PROBE: usize = 1 << 8;
     const ALLOW_MCP_INIT: usize = 1 << 9;
+    const ALLOW_MCP_LIST: usize = 1 << 10;
 
     pub fn registers(&self) -> Option<[usize; 6]> {
         if let [first, Some(second)] = self.allowed_tools
@@ -482,6 +485,9 @@ impl CreatePolicy {
         if self.allow_mcp_init {
             words[1] |= Self::ALLOW_MCP_INIT;
         }
+        if self.allow_mcp_list {
+            words[1] |= Self::ALLOW_MCP_LIST;
+        }
         Some(words)
     }
 
@@ -490,6 +496,7 @@ impl CreatePolicy {
         let durable = words[1] & Self::DURABLE != 0;
         let allow_https_probe = words[1] & Self::ALLOW_HTTPS_PROBE != 0;
         let allow_mcp_init = words[1] & Self::ALLOW_MCP_INIT != 0;
+        let allow_mcp_list = words[1] & Self::ALLOW_MCP_LIST != 0;
         let rename_limit = if words[1] & Self::ALLOW_TWO_RENAMES != 0 {
             MAX_GOAL_RENAMES
         } else {
@@ -499,7 +506,8 @@ impl CreatePolicy {
             | Self::ALLOW_TWO_RENAMES
             | Self::DURABLE
             | Self::ALLOW_HTTPS_PROBE
-            | Self::ALLOW_MCP_INIT);
+            | Self::ALLOW_MCP_INIT
+            | Self::ALLOW_MCP_LIST);
         let (options, read_limits, allowed_tool) =
             CreateOptions::from_registers_with_allowed_tool(words)?;
         if second_tool.is_some() && (allowed_tool.is_none() || allowed_tool == second_tool) {
@@ -514,6 +522,7 @@ impl CreatePolicy {
             durable,
             allow_https_probe,
             allow_mcp_init,
+            allow_mcp_list,
         })
     }
 }
