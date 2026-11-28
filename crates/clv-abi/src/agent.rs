@@ -21,6 +21,8 @@ pub const RUN_HTTPS_PROBE: usize = 128;
 pub const RUN_MCP_INIT: usize = 256;
 /// Selects an empty request to discover the native MCP search tool.
 pub const RUN_MCP_LIST: usize = 512;
+/// Selects an empty request to invoke the native MCP search tool.
+pub const RUN_MCP_CALL: usize = 1024;
 /// Selects an owner read of the completed checkpoint in reply receive.
 pub const RECV_CHECKPOINT: usize = 1;
 /// A zero agent handle on a delegation call selects the calling task's live agent.

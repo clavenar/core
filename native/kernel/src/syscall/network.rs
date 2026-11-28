@@ -30,9 +30,18 @@ pub(super) fn dispatch(
             }));
         }
         POLL_HTTPS_PROBE => {
-            return scheduler
-                .poll_https(argument)
-                .map_or(WaitResult::Unavailable, WaitResult::Ready);
+            let stack = scheduler.address_space().stack;
+            let address = frame.registers[REG_A2];
+            let capacity = frame.registers[REG_A3];
+            let Some((status, length)) = scheduler.poll_https(argument, |result| {
+                stack.copy_to_user(result, address, capacity)
+            }) else {
+                return WaitResult::Unavailable;
+            };
+            if let Some(length) = length {
+                frame.registers[REG_A1] = length;
+            }
+            return WaitResult::Ready(status);
         }
         _ => {}
     }
@@ -55,8 +64,15 @@ pub(super) fn dispatch(
             return WaitResult::Ready(request);
         }
         COMPLETE_HTTPS_PROBE => {
+            let stack = scheduler.address_space().stack;
+            let address = frame.registers[REG_A3];
+            let length = frame.registers[REG_A4];
             return HttpsStatus::from_raw(frame.registers[REG_A2])
-                .and_then(|status| scheduler.complete_https(argument, status))
+                .and_then(|status| {
+                    scheduler.complete_https(argument, status, length, |result| {
+                        stack.copy_from_user(address, result)
+                    })
+                })
                 .map_or(WaitResult::Unavailable, |()| WaitResult::Ready(0));
         }
         _ => {}

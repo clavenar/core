@@ -34,6 +34,7 @@ pub enum HttpsRequest {
     Probe = 0,
     McpInit = 1,
     McpList = 2,
+    McpCall = 3,
 }
 
 impl HttpsRequest {
@@ -42,6 +43,7 @@ impl HttpsRequest {
             0 => Some(Self::Probe),
             1 => Some(Self::McpInit),
             2 => Some(Self::McpList),
+            3 => Some(Self::McpCall),
             _ => None,
         }
     }

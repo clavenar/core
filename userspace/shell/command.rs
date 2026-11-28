@@ -78,6 +78,8 @@ keywords!(GoalFlag {
     McpInit => "--mcp-init",
     AllowMcpList => "--allow-mcp-list",
     McpList => "--mcp-list",
+    AllowMcpCall => "--allow-mcp-call",
+    McpCall => "--mcp-call",
     PreserveFile => "--preserve-file",
     RenameUnder => "--rename-under",
     RenameLimit => "--rename-limit",

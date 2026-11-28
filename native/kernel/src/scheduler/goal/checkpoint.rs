@@ -589,6 +589,7 @@ impl Scheduler {
             allow_https_probe: false,
             allow_mcp_init: false,
             allow_mcp_list: false,
+            allow_mcp_call: false,
         };
         let rename_policy = RenamePolicy::capture(
             &self.tasks[self.current].fs,

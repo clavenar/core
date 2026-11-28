@@ -14,6 +14,7 @@ continues the previous one. Goal handles and ordinary RamFS changes live for one
   - [Fetch an HTTPS response over native TCP](#fetch-an-https-response-over-native-tcp)
   - [Initialize MCP over native HTTPS](#initialize-mcp-over-native-https)
   - [Discover the MCP search tool over native HTTPS](#discover-the-mcp-search-tool-over-native-https)
+  - [Call the MCP search tool over native HTTPS](#call-the-mcp-search-tool-over-native-https)
   - [Probe a VirtIO block device](#probe-a-virtio-block-device)
   - [Recover a VirtIO block marker after reboot](#recover-a-virtio-block-marker-after-reboot)
   - [Recover a previous journal record](#recover-a-previous-journal-record)
@@ -327,11 +328,46 @@ initialization-only grant stops before DNS, a rejected initialization or
 cancellation prevents `tools/list`, and a wrong list reply ID, schema, or
 pagination cursor fails discovery.
 
-With kernel 0.1.0 and Rust 1.100.1, the `netd` executable segment is
-about 164.8 KiB with `tls-probe` and 172.9 KiB with both probe features.
-After successful discovery, the lowest nonzero stack bytes were about
-64 KiB and 68 KiB below the stack top, respectively. The image limit is
-176 KiB and the stack reserves 96 KiB.
+### Call the MCP search tool over native HTTPS
+
+`--allow-mcp-call` grants one search at the pinned MCP endpoint. Over
+VirtIO-net, `netd` initializes MCP, validates the `tools/list` response
+and sends one `tools/call` for `text.search` with `pattern=Hello`.
+One request ID and deadline cover all four HTTPS connections. The QEMU
+fixture serves as the HTTPS peer and forwards MCP messages to the
+loopback Python server. [Native HTTPS ABI](native-syscall-abi.md#goal-authorized-https)
+
+Start the loopback MCP server in the first Linux terminal.
+[Start the MCP fixture](#search-a-host-mcp-fixture)
+Run the networking fixture from `core` in a second Linux terminal.
+
+```sh
+python3 platforms/qemu-riscv64-virt/network_fixture.py mcp-call
+```
+
+The first QEMU boot runs this sequence at `clsh>`.
+
+```text
+goal create --reply-bytes 14 --allow-mcp-call
+agent run hello --mcp-call
+wait hello
+recv hello
+goal budget
+goal close
+```
+
+The server logs one `tools/call text.search`. The guest prints the
+server's `Hello from MCP` and reports `available=0 reserved=0 spent=14`.
+The other boots check the separate grant, the pinned tool schema, the
+64-byte result limit and reply accounting. Cancellation before the last
+POST prevents the call. A reply delivered after cancellation is discarded
+and a fresh goal in the same VM can call the tool.
+
+With kernel 0.1.1 and Rust 1.100.1, the `netd` executable segment is
+about 166.2 KiB with `tls-probe` and 173.9 KiB with both probe features.
+After a successful call, the lowest nonzero stack bytes were about
+64.6 KiB and 68.5 KiB below the stack top, respectively. The image limit
+is 176 KiB and the stack reserves 96 KiB.
 
 ### Probe a VirtIO block device
 

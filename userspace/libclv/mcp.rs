@@ -130,6 +130,14 @@ impl<'a> Frame<'a> {
         self.write_str(r#","version":"1"}}}"#)
     }
 
+    pub fn search_request(&mut self, pattern: &str) -> fmt::Result {
+        self.write_str(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"#)?;
+        self.string(SEARCH_TOOL)?;
+        self.write_str(r#","arguments":{"pattern":"#)?;
+        self.string(pattern)?;
+        self.write_str("}}}")
+    }
+
     fn append(&mut self, bytes: &[u8]) -> fmt::Result {
         let end = self.length + bytes.len();
         self.buffer
@@ -298,4 +306,19 @@ pub fn validate_search_list(list: Value<'_>) -> Option<()> {
         && required?.sole_item()?.string_is(b"pattern")
         && additional.is_none_or(|value| value.boolean() == Some(false)))
     .then_some(())
+}
+
+/// Decodes a successful search reply containing one text item.
+pub fn decode_search_result(result: Value<'_>, output: &mut [u8]) -> Option<usize> {
+    let [content, is_error] = result.fields([b"content", b"isError"])?;
+    if let Some(is_error) = is_error
+        && is_error.boolean()?
+    {
+        return None;
+    }
+    let [kind, text] = content?.sole_item()?.fields([b"type", b"text"])?;
+    if !kind?.string_is(b"text") {
+        return None;
+    }
+    text?.decode_string(output)
 }

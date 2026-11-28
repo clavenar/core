@@ -1,6 +1,6 @@
 mod mcp;
 
-use clv::net::{self, HTTPS_PROBE_BODY, HttpsRequest, HttpsStatus};
+use clv::net::{self, HTTPS_PROBE_BODY, HttpsRequest, HttpsStatus, MESSAGE_MAX_BYTES};
 use core::ops::Range;
 use embedded_io::{ErrorKind, ErrorType, Read, Write};
 use embedded_tls::blocking::{
@@ -33,6 +33,8 @@ const READ_RECORD_BYTES: usize = 4096;
 const WRITE_RECORD_BYTES: usize = 2048;
 
 enum Failure {
+    EntropyUnavailable,
+    ClockUnavailable,
     DnsLookup,
     DnsTimeout,
     DnsAddress,
@@ -56,37 +58,40 @@ pub(super) fn run(
     rng: Option<&mut ChaCha20Rng>,
 ) {
     network.https_request = probe.request;
-    let (status, message): (HttpsStatus, &[u8]) = match rng {
-        None => (
-            HttpsStatus::Unavailable,
-            b"netd TLS probe entropy unavailable\r\n",
-        ),
-        Some(_) if net::unix_time().is_none() => (
-            HttpsStatus::Unavailable,
-            b"netd TLS probe clock unavailable\r\n",
-        ),
-        Some(rng) => report(
-            exchange(network, handle, dns_handle, &probe, rng),
-            probe.kind,
-        ),
+    let mut output = [0; MESSAGE_MAX_BYTES];
+    let result = match rng {
+        None => Err(Failure::EntropyUnavailable),
+        Some(_) if net::unix_time().is_none() => Err(Failure::ClockUnavailable),
+        Some(rng) => exchange(network, handle, dns_handle, &probe, rng, &mut output),
     };
+    let length = result.as_ref().copied().unwrap_or(0);
+    let (status, message) = report(result, probe.kind);
     network.https_request = 0;
-    if net::complete_https_probe(probe.request, status) {
+    if net::complete_https_probe(probe.request, status, &output[..length]) {
         clv::print(message);
     } else {
         clv::print(b"netd HTTPS probe cancelled\r\n");
     }
 }
 
-fn report(result: Result<(), Failure>, kind: HttpsRequest) -> (HttpsStatus, &'static [u8]) {
+fn report(result: Result<usize, Failure>, kind: HttpsRequest) -> (HttpsStatus, &'static [u8]) {
     match result {
-        Ok(()) => (
+        Ok(_) => (
             HttpsStatus::Complete,
             match kind {
                 HttpsRequest::Probe => b"netd HTTPS probe received Hello from native HTTPS\r\n",
                 HttpsRequest::McpInit => b"netd MCP initialized\r\n",
                 HttpsRequest::McpList => b"netd MCP discovered text.search\r\n",
+                HttpsRequest::McpCall => b"netd MCP called text.search\r\n",
             },
+        ),
+        Err(Failure::EntropyUnavailable) => (
+            HttpsStatus::Unavailable,
+            b"netd TLS probe entropy unavailable\r\n",
+        ),
+        Err(Failure::ClockUnavailable) => (
+            HttpsStatus::Unavailable,
+            b"netd TLS probe clock unavailable\r\n",
         ),
         Err(Failure::DnsLookup) => (HttpsStatus::DnsFailed, b"netd DNS lookup failed\r\n"),
         Err(Failure::DnsTimeout) => (HttpsStatus::TimedOut, b"netd DNS lookup timed out\r\n"),
@@ -128,7 +133,8 @@ fn exchange(
     dns_handle: SocketHandle,
     probe: &net::HttpsProbe,
     rng: &mut ChaCha20Rng,
-) -> Result<(), Failure> {
+    output: &mut [u8; MESSAGE_MAX_BYTES],
+) -> Result<usize, Failure> {
     network
         .receive(Some(Instant::ZERO))
         .ok_or(TlsError::IoError)?;
@@ -146,15 +152,16 @@ fn exchange(
         peer,
         deadline,
         rng,
-        recent_ports: [0; 2],
+        recent_ports: [0; 3],
     };
     let mut response = [0; RESPONSE_BYTES];
     match probe.kind {
         HttpsRequest::Probe => https
             .request(PROBE_REQUEST, b"", ExpectedResponse::Ok, &mut response)
-            .map(|_| ()),
-        HttpsRequest::McpInit => mcp::initialize(&mut https, &mut response),
-        HttpsRequest::McpList => mcp::discover(&mut https, &mut response),
+            .map(|_| 0),
+        HttpsRequest::McpInit => mcp::initialize(&mut https, &mut response).map(|()| 0),
+        HttpsRequest::McpList => mcp::discover(&mut https, &mut response).map(|()| 0),
+        HttpsRequest::McpCall => mcp::call_search(&mut https, &mut response, output),
     }
 }
 
@@ -164,7 +171,7 @@ struct HttpsConnection<'a, 's> {
     peer: IpEndpoint,
     deadline: Instant,
     rng: &'a mut ChaCha20Rng,
-    recent_ports: [u16; 2],
+    recent_ports: [u16; 3],
 }
 
 impl HttpsConnection<'_, '_> {
@@ -191,14 +198,15 @@ impl HttpsConnection<'_, '_> {
         expected: ExpectedResponse,
         response: &mut [u8; RESPONSE_BYTES],
     ) -> Result<Range<usize>, Failure> {
-        // Give each of the up to three POSTs a distinct TCP source port.
+        // Keep a distinct TCP tuple for each of the up to four HTTPS requests.
         let port = loop {
             let port = 0xe000 | (self.rng.next_u32() as u16 & 0x1fff);
             if !self.recent_ports.contains(&port) {
                 break port;
             }
         };
-        self.recent_ports = [self.recent_ports[1], port];
+        self.recent_ports.rotate_left(1);
+        self.recent_ports[2] = port;
         self.network
             .sockets
             .get_mut::<tcp::Socket>(self.handle)

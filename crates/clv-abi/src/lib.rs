@@ -144,6 +144,7 @@ pub enum RequestKind {
     HttpsProbe = 16,
     McpInit = 17,
     McpList = 18,
+    McpCall = 19,
 }
 
 impl RequestKind {
@@ -167,6 +168,7 @@ impl RequestKind {
             value if value == Self::HttpsProbe as usize => Some(Self::HttpsProbe),
             value if value == Self::McpInit as usize => Some(Self::McpInit),
             value if value == Self::McpList as usize => Some(Self::McpList),
+            value if value == Self::McpCall as usize => Some(Self::McpCall),
             _ => None,
         }
     }
@@ -202,6 +204,7 @@ pub enum ReplyKind {
     /// One byte explaining why the agent could not initialize native MCP.
     McpInitFailed = 16,
     McpListFailed = 17,
+    McpCallFailed = 18,
 }
 
 impl ReplyKind {
@@ -224,6 +227,7 @@ impl ReplyKind {
             value if value == Self::HttpsFailed as usize => Some(Self::HttpsFailed),
             value if value == Self::McpInitFailed as usize => Some(Self::McpInitFailed),
             value if value == Self::McpListFailed as usize => Some(Self::McpListFailed),
+            value if value == Self::McpCallFailed as usize => Some(Self::McpCallFailed),
             _ => None,
         }
     }

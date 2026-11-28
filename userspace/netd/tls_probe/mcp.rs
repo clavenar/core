@@ -1,6 +1,7 @@
 //! Stateless MCP initialization and tool discovery over HTTPS.
 
 use clv::mcp::{self, FRAME_BYTES, Frame};
+use clv::net::MESSAGE_MAX_BYTES;
 use core::fmt::{self, Write};
 
 use super::{ExpectedResponse, Failure, HttpsConnection, RESPONSE_BYTES};
@@ -50,6 +51,37 @@ pub(super) fn discover(
     mcp::result(body, "2")
         .and_then(mcp::validate_search_list)
         .ok_or(Failure::InvalidResponse)
+}
+
+pub(super) fn call_search(
+    https: &mut HttpsConnection<'_, '_>,
+    response: &mut [u8; RESPONSE_BYTES],
+    output: &mut [u8; MESSAGE_MAX_BYTES],
+) -> Result<usize, Failure> {
+    discover(https, response)?;
+    let mut buffer = [0; FRAME_BYTES];
+    let mut request = Frame::new(&mut buffer);
+    request.search_request("Hello")?;
+    let body = https.post(
+        request.into_bytes(),
+        Some(mcp::VERSION),
+        ExpectedResponse::McpJson,
+        response,
+    )?;
+    let length = mcp::result(body, "3")
+        .and_then(|result| mcp::decode_search_result(result, output))
+        .ok_or(Failure::InvalidResponse)?;
+    let text = &output[..length];
+    // The shell writes the result to the console, so reject embedded controls.
+    if !text
+        .strip_suffix(b"\n")
+        .unwrap_or(text)
+        .iter()
+        .all(|byte| (b' '..=b'~').contains(byte))
+    {
+        return Err(Failure::InvalidResponse);
+    }
+    Ok(length)
 }
 
 impl HttpsConnection<'_, '_> {

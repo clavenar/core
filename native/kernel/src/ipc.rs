@@ -48,7 +48,8 @@ impl MessageKind {
                 | RequestKind::ReviewRename
                 | RequestKind::HttpsProbe
                 | RequestKind::McpInit
-                | RequestKind::McpList,
+                | RequestKind::McpList
+                | RequestKind::McpCall,
             ) => length == 0,
             Self::Request(RequestKind::WatchReadDenials) => length == 1,
             Self::Reply(ReplyKind::ReadDenialAlert) => {
@@ -69,7 +70,8 @@ impl MessageKind {
                 | ReplyKind::HostToolFailed
                 | ReplyKind::HttpsFailed
                 | ReplyKind::McpInitFailed
-                | ReplyKind::McpListFailed,
+                | ReplyKind::McpListFailed
+                | ReplyKind::McpCallFailed,
             ) => length == 1,
             Self::Reply(
                 ReplyKind::Denied

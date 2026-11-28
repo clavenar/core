@@ -63,7 +63,7 @@ python3 platforms/qemu-riscv64-virt/network_fixture.py
 | --- | --- |
 | Default | The guest answers ARP and IPv4 pings, echoes UDP on port `49152`, and echoes a TCP stream on port `49153`. [Ethernet and IP walkthrough](docs/qemu-walkthroughs.md#exchange-an-ethernet-frame-over-virtio-net) |
 | `http-probe` | The guest sends `GET /probe` to the peer on port `8080` and checks the HTTP response. [HTTP walkthrough](docs/qemu-walkthroughs.md#fetch-an-http-response-over-native-tcp) |
-| `tls-probe` | A goal can grant a verified HTTPS GET, MCP initialization, or MCP tool discovery through `netd`. The fixtures use OpenSSL 3 and Python with TLS 1.3 support. [HTTPS GET](docs/qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) · [MCP initialization](docs/qemu-walkthroughs.md#initialize-mcp-over-native-https) · [MCP tool discovery](docs/qemu-walkthroughs.md#discover-the-mcp-search-tool-over-native-https) |
+| `tls-probe` | A goal can grant a verified HTTPS GET, MCP initialization, tool discovery, or a `text.search` call through `netd`. The fixtures use OpenSSL 3 and Python with TLS 1.3 support. [HTTPS GET](docs/qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) · [MCP initialization](docs/qemu-walkthroughs.md#initialize-mcp-over-native-https) · [MCP tool discovery](docs/qemu-walkthroughs.md#discover-the-mcp-search-tool-over-native-https) · [MCP tool call](docs/qemu-walkthroughs.md#call-the-mcp-search-tool-over-native-https) |
 
 The HTTPS probe uses a separate 32-byte seed from VirtIO RNG for TLS. `netd`
 uses the RTC-backed Unix clock to check certificate validity dates.

@@ -5,7 +5,7 @@ mod mcp_client;
 
 use clv::{ChildReply, ChildStatus, LaunchRequest, agent, bridge, fs, pipe};
 use clv_abi::agent::{LAUNCH_REQUEST_MAX_BYTES, decode_rename_pair};
-use clv_abi::net::{HTTPS_PROBE_BODY, HttpsRequest, HttpsStatus, MCP_INIT_REPLY, MCP_LIST_REPLY};
+use clv_abi::net::{HTTPS_PROBE_BODY, HttpsRequest, MCP_INIT_REPLY, MCP_LIST_REPLY};
 use clv_abi::{
     GrantKind, MESSAGE_MAX_BYTES, PROBE_VALUE, ReplyKind, RequestKind, SYS_EXIT, SYS_PROBE,
     SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
@@ -70,6 +70,10 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, extra: usi
             kind: RequestKind::McpList,
             ..
         }) => run_https(HttpsRequest::McpList),
+        Some(LaunchRequest::Received {
+            kind: RequestKind::McpCall,
+            ..
+        }) => run_https(HttpsRequest::McpCall),
         _ if grant_kind == GrantKind::File as usize && extra != 0 => {
             let status = copy_file(handle, |bytes| pipe::write(extra, bytes));
             pipe::close(extra);
@@ -109,14 +113,19 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, extra: usi
 }
 
 fn run_https(request: HttpsRequest) -> usize {
-    let (body, failure) = match request {
-        HttpsRequest::Probe => (HTTPS_PROBE_BODY, ReplyKind::HttpsFailed),
-        HttpsRequest::McpInit => (MCP_INIT_REPLY, ReplyKind::McpInitFailed),
-        HttpsRequest::McpList => (MCP_LIST_REPLY, ReplyKind::McpListFailed),
+    let (fixed_reply, failure): (Option<&[u8]>, ReplyKind) = match request {
+        HttpsRequest::Probe => (Some(HTTPS_PROBE_BODY), ReplyKind::HttpsFailed),
+        HttpsRequest::McpInit => (Some(MCP_INIT_REPLY), ReplyKind::McpInitFailed),
+        HttpsRequest::McpList => (Some(MCP_LIST_REPLY), ReplyKind::McpListFailed),
+        HttpsRequest::McpCall => (None, ReplyKind::McpCallFailed),
     };
-    match clv::net::request_https(request) {
-        HttpsStatus::Complete => usize::from(!clv::send_reply(ReplyKind::Matches, body)),
-        status => {
+    let mut output = [0; MESSAGE_MAX_BYTES];
+    match clv::net::request_https(request, &mut output) {
+        Ok(text) => usize::from(!clv::send_reply(
+            ReplyKind::Matches,
+            fixed_reply.unwrap_or(text),
+        )),
+        Err(status) => {
             clv::send_reply(failure, &[status as u8]);
             1
         }

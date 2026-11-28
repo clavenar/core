@@ -475,10 +475,12 @@ def send_dns_answer(host, query, address):
     send_udp(host, dns_port, port, header + question + record)
 
 
-def start_https_goal(guest, log, *, operation="https-probe", grant=True, timeout_ms=None):
-    allowance = {"https-probe": 24, "mcp-init": 16, "mcp-list": 12}[operation]
+def start_https_goal(guest, log, *, operation="https-probe", grant=True, timeout_ms=None,
+                     allowance=None):
+    if allowance is None:
+        allowance = {"https-probe": 24, "mcp-init": 16, "mcp-list": 12, "mcp-call": 14}[operation]
     command = f"goal create --reply-bytes {allowance}"
-    other_grant = {"mcp-init": "https-probe", "mcp-list": "mcp-init"}
+    other_grant = {"mcp-init": "https-probe", "mcp-list": "mcp-init", "mcp-call": "mcp-list"}
     granted_operation = operation if grant else other_grant.get(operation)
     if granted_operation:
         command += f" --allow-{granted_operation}"
@@ -492,13 +494,13 @@ def start_https_goal(guest, log, *, operation="https-probe", grant=True, timeout
     return allowance
 
 
-def finish_https_goal(guest, expected, *, spent=1, allowance=24):
+def finish_https_goal(guest, expected, *, spent=1, allowance=24, exit_status=1):
     status = guest_command(guest, "wait hello")
     reply = guest_command(guest, "recv hello")
     budget = guest_command(guest, "goal budget")
     closed = guest_command(guest, "goal close")
-    outcome = (b"hello exited 0x0000000000000000" if spent == allowance else
-               b"hello exited 0x0000000000000001" if spent == 1 else b"hello cancelled")
+    outcome = (b"hello cancelled" if exit_status is None else
+               f"hello exited 0x{exit_status:016x}".encode())
     if (outcome not in status or expected not in reply.splitlines() or
             f"available={allowance - spent} reserved=0 spent={spent}".encode() not in budget or
             b"goal closed" not in closed):
@@ -640,6 +642,14 @@ class TlsPeer:
         if self.server.version() != "TLSv1.3" or not self.close_notify or not self.responded:
             raise RuntimeError("Expected a completed TLS exchange and close_notify before TCP FIN")
 
+    def send_late_reply(self, reply):
+        self.server.write(reply)
+        self.send(self.server_next, self.guest_next, tcp_ack, self.outgoing.read())
+        deadline = monotonic() + 1
+        while select([self.host], [], [], 0.1)[0]:
+            if monotonic() >= deadline or not self.receive()[2] & tcp_rst:
+                raise RuntimeError("Unexpected traffic after the cancelled connection's late response")
+
 
 def check_tls_peer(host, guest, log, *, credentials, case, cached=False):
     expected = {
@@ -699,14 +709,9 @@ def check_tls_peer(host, guest, log, *, credentials, case, cached=False):
         peer.require_shutdown()
 
     if case == "cancelled":
-        finish_https_goal(guest, b"no message", spent=0)
+        finish_https_goal(guest, b"no message", spent=0, exit_status=None)
         # Deliver the old connection's result after its goal closes.
-        peer.server.write(b"".join(chunks))
-        peer.send(peer.server_next, peer.guest_next, tcp_ack, peer.outgoing.read())
-        deadline = monotonic() + 1
-        while select([host], [], [], 0.1)[0]:
-            if monotonic() >= deadline or not peer.receive()[2] & tcp_rst:
-                raise RuntimeError("Unexpected traffic after the cancelled connection's late response")
+        peer.send_late_reply(b"".join(chunks))
         check_tls_peer(host, guest, bytearray(), credentials=credentials, case="complete", cached=True)
         return
 
@@ -715,7 +720,8 @@ def check_tls_peer(host, guest, log, *, credentials, case, cached=False):
         "stalled": b"HTTPS probe timed out",
         "rejected": b"HTTPS probe TLS failed",
     }.get(case, b"HTTPS probe invalid response")
-    finish_https_goal(guest, reply, spent=24 if case == "complete" else 1)
+    complete = case == "complete"
+    finish_https_goal(guest, reply, spent=24 if complete else 1, exit_status=0 if complete else 1)
 
 
 def check_tls_prerequisite(host, guest, log, *, reason):
@@ -734,7 +740,7 @@ def check_https_authority(host, guest, log, *, grant):
         answer_guest_arp(host)
         read_dns_query(host)
         start = monotonic()
-        finish_https_goal(guest, b"no message", spent=0)
+        finish_https_goal(guest, b"no message", spent=0, exit_status=None)
         if monotonic() - start > 2:
             raise RuntimeError("The probe did not stop at the earlier goal deadline")
     else:
@@ -743,7 +749,7 @@ def check_https_authority(host, guest, log, *, grant):
         raise RuntimeError("An ungranted or expired goal sent network traffic")
 
 
-def relay_mcp(server, request, *, method, case):
+def relay_mcp(server, request, *, method, case, hold_reply=None):
     head, separator, body = request.partition(b"\r\n\r\n")
     if len(head) > 1024 or len(body) > 1024:
         raise RuntimeError("The HTTP request exceeded the fixture bounds")
@@ -772,6 +778,8 @@ def relay_mcp(server, request, *, method, case):
         })
     elif method == "tools/list":
         message.update(id=2, params={})
+    elif method == "tools/call":
+        message.update(id=3, params={"name": "text.search", "arguments": {"pattern": "Hello"}})
     if json.loads(body) != message:
         raise RuntimeError(f"Unexpected MCP message {body!r}")
 
@@ -810,59 +818,107 @@ def relay_mcp(server, request, *, method, case):
         else:
             result["result"]["nextCursor"] = "another-page"
         reply = json.dumps(result).encode()
+    elif method == "tools/call" and case in (
+        "call-wrong-id", "tool-error", "max-result", "oversized", "control-text", "late-response",
+    ):
+        result = json.loads(reply)
+        if case == "call-wrong-id":
+            result["id"] = 2
+        elif case == "tool-error":
+            result["result"]["isError"] = True
+        else:
+            result["result"]["content"][0]["text"] = {
+                "max-result": "x" * 63 + "\n",
+                "oversized": "x" * 65,
+                "control-text": "Hello\x1b[0m",
+                "late-response": "Reply from the cancelled call",
+            }[case]
+        reply = json.dumps(result).encode()
 
     if content_type is not None:
         status_line += f"Content-Type: {content_type}\r\n"
-    server.write(f"{status_line}Content-Length: {len(reply)}\r\nConnection: close\r\n\r\n".encode())
-    if reply:
-        server.write(reply)
+    head = f"{status_line}Content-Length: {len(reply)}\r\nConnection: close\r\n\r\n".encode()
+    if hold_reply is not None:
+        hold_reply(head + reply)
+    else:
+        server.write(head)
+        if reply:
+            server.write(reply)
     print(f"Host MCP server accepted {method}", flush=True)
     return True
 
 
-def check_mcp_peer(host, guest, log, *, credentials, case, operation="mcp-init"):
-    allowance = start_https_goal(guest, log, operation=operation, grant=case != "missing-grant")
-    listing = operation == "mcp-list"
-    label = b"MCP list" if listing else b"MCP init"
+def check_mcp_peer(host, guest, log, *, credentials, case, operation="mcp-init", cached=False):
+    allowance = start_https_goal(
+        guest, log, operation=operation, grant=case != "missing-grant",
+        allowance={"short-budget": 13, "max-result": 64}.get(case),
+    )
+    label = operation.replace("mcp-", "MCP ").encode()
+    held_reply = None
+    exit_status = 1
     if case == "missing-grant":
         reply, spent = label + b" grant required", 1
     else:
-        resolve_tls_peer(host)
+        resolve_tls_peer(host, cached=cached)
         context = tls_context(credentials)
+        methods = ("initialize", "notifications/initialized", "tools/list", "tools/call")
+        count = {"mcp-init": 2, "mcp-list": 3, "mcp-call": 4}[operation]
         last_method = {
-            "cancelled": "notifications/initialized" if listing else "initialize",
+            "cancelled": methods[count - 2],
             "wrong-id": "initialize",
             "wrong-version": "initialize",
             "nonempty-accepted": "notifications/initialized",
-        }.get(case, "tools/list" if listing else "notifications/initialized")
+            "wrong-schema": "tools/list",
+        }.get(case, methods[count - 1])
+
+        def hold_reply(data):
+            nonlocal held_reply
+            held_reply = data
+            cancel_https_goal(guest, log)
+
         ports = set()
-        for method in ("initialize", "notifications/initialized", "tools/list"):
+        for method in methods[:count]:
             peer = TlsPeer(host, context)
             if peer.port in ports:
                 raise RuntimeError("Expected a fresh TCP source port for each MCP request")
             ports.add(peer.port)
             last = method == last_method
-            invalid_http = last and case == "nonempty-accepted"
-            peer.exchange(guest, log, partial(relay_mcp, method=method, case=case),
-                          terminal=b"netd HTTPS probe invalid response" if invalid_http else None,
+            terminal = {
+                "nonempty-accepted": b"netd HTTPS probe invalid response",
+                "late-response": b"netd HTTPS probe cancelled",
+            }.get(case) if last else None
+            respond = partial(relay_mcp, method=method, case=case,
+                              hold_reply=hold_reply if last and case == "late-response" else None)
+            peer.exchange(guest, log, respond, terminal=terminal,
                           cancel_on_fin=last and case == "cancelled")
-            if invalid_http:
+            if terminal is not None:
                 if not peer.responded:
-                    raise RuntimeError("The MCP server did not receive the notification")
+                    raise RuntimeError(f"The MCP server did not receive {method}")
             else:
                 peer.require_shutdown()
             if last:
                 break
 
-        if case == "cancelled":
+        if case in ("cancelled", "late-response"):
             reply, spent = b"no message", 0
-        elif case == "complete":
-            reply = b"text.search" if listing else b"MCP initialized"
-            spent = allowance
+            exit_status = None
+        elif case == "short-budget":
+            reply, spent = b"no message", 0
+        elif case in ("complete", "max-result"):
+            reply = {
+                "mcp-init": b"MCP initialized",
+                "mcp-list": b"text.search",
+                "mcp-call": b"Hello from MCP",
+            }[operation] if case == "complete" else b"x" * 63
+            spent, exit_status = allowance, 0
         else:
             reply, spent = label + b" invalid response", 1
-    finish_https_goal(guest, reply, spent=spent, allowance=allowance)
-    if select([host], [], [], 0.1)[0]:
+    finish_https_goal(guest, reply, spent=spent, allowance=allowance, exit_status=exit_status)
+    if held_reply is not None:
+        peer.send_late_reply(held_reply)
+        check_mcp_peer(host, guest, bytearray(), credentials=credentials, case="complete",
+                       operation=operation, cached=True)
+    elif select([host], [], [], 0.1)[0]:
         raise RuntimeError("Unexpected guest traffic after the MCP result")
 
 
@@ -915,8 +971,12 @@ def check_tls(*, mcp_operation=None):
                              "cancelled", "nonempty-accepted"),
                 "mcp-list": ("complete", "missing-grant", "wrong-version", "list-wrong-id",
                              "wrong-schema", "paginated", "cancelled"),
+                "mcp-call": ("complete", "missing-grant", "wrong-schema", "call-wrong-id",
+                             "tool-error", "max-result", "oversized", "control-text",
+                             "short-budget", "cancelled", "late-response"),
             }
-            label = "discovery" if mcp_operation == "mcp-list" else "initialization"
+            label = {"mcp-init": "initialization", "mcp-list": "discovery",
+                     "mcp-call": "invocation"}[mcp_operation]
             for case in cases[mcp_operation]:
                 boot(image, extra_args=system_rng + rtc(now),
                      verify=partial(check_mcp_peer, credentials=valid, case=case, operation=mcp_operation))
@@ -965,10 +1025,10 @@ def check_tls(*, mcp_operation=None):
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
-        epilog="For mcp (initialization) and mcp-list (discovery), start mcp_fixture.py on 127.0.0.1:8765 first.",
+        epilog="For the MCP modes, start mcp_fixture.py on 127.0.0.1:8765 first.",
     )
     parser.add_argument("mode", nargs="?", default="ethernet",
-                        choices=("ethernet", "http", "rng", "rtc", "tls", "mcp", "mcp-list"),
+                        choices=("ethernet", "http", "rng", "rtc", "tls", "mcp", "mcp-list", "mcp-call"),
                         help="walkthrough to run (default: ethernet)")
     mode = parser.parse_args().mode
     if mode == "ethernet":
@@ -977,8 +1037,8 @@ def main():
         print("Host verified Ethernet probes, ARP, ICMP, UDP and TCP echo after clsh>", flush=True)
         boot(image)
         print("Silent peer reached clsh>", flush=True)
-    elif mode in ("tls", "mcp", "mcp-list"):
-        operation = {"tls": None, "mcp": "mcp-init", "mcp-list": "mcp-list"}[mode]
+    elif mode in ("tls", "mcp", "mcp-list", "mcp-call"):
+        operation = {"tls": None, "mcp": "mcp-init", "mcp-list": "mcp-list", "mcp-call": "mcp-call"}[mode]
         check_tls(mcp_operation=operation)
     else:
         image = build_kernel("target/http-probe", feature="http-probe")

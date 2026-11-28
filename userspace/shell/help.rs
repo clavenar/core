@@ -74,6 +74,7 @@ entries! {
         "  --allow-https-probe" => "Authorize one GET to the native HTTPS fixture",
         "  --allow-mcp-init" => "Authorize one native MCP initialization",
         "  --allow-mcp-list" => "Authorize one native MCP tool discovery",
+        "  --allow-mcp-call" => "Authorize one native MCP text.search call",
     },
     GrantFile {
         "goal grant-file [mode] <path>" => "Grant a read-only file. Choose at most one mode",
@@ -126,6 +127,7 @@ entries! {
         "  --https-probe" => "Fetch the granted native HTTPS fixture",
         "  --mcp-init" => "Initialize the granted native MCP fixture",
         "  --mcp-list" => "Discover the search tool at the granted native MCP fixture",
+        "  --mcp-call" => "Search for Hello at the granted native MCP fixture",
         "  --delegate --with-file --reply-bytes N grep -F <pattern>" =>
             "Ask grep to search the file",
     },

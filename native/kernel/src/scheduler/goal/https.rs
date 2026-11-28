@@ -1,3 +1,4 @@
+use clv_abi::MESSAGE_MAX_BYTES;
 use clv_abi::goal::GoalDeadline;
 use clv_abi::net::{HTTPS_PROBE_TIMEOUT_NS, HttpsRequest, HttpsStatus};
 
@@ -9,7 +10,7 @@ use crate::programs::NETD_TASK_INDEX;
 enum Phase {
     Queued,
     Running,
-    Finished(HttpsStatus),
+    Finished { status: HttpsStatus, length: usize },
 }
 
 pub(in crate::scheduler) struct HttpsExchange {
@@ -19,6 +20,7 @@ pub(in crate::scheduler) struct HttpsExchange {
     kind: HttpsRequest,
     deadline: u64,
     phase: Phase,
+    result: [u8; MESSAGE_MAX_BYTES],
 }
 
 impl Scheduler {
@@ -34,6 +36,7 @@ impl Scheduler {
             HttpsRequest::Probe => &mut goal.https_available,
             HttpsRequest::McpInit => &mut goal.mcp_init_available,
             HttpsRequest::McpList => &mut goal.mcp_list_available,
+            HttpsRequest::McpCall => &mut goal.mcp_call_available,
         };
         if !*grant {
             return Err(HttpsStatus::Denied);
@@ -54,7 +57,7 @@ impl Scheduler {
         }
         let id = match kind {
             HttpsRequest::Probe => launch,
-            HttpsRequest::McpInit | HttpsRequest::McpList => {
+            HttpsRequest::McpInit | HttpsRequest::McpList | HttpsRequest::McpCall => {
                 let id = self.next_handle;
                 self.next_handle = id.checked_add(1).ok_or(HttpsStatus::Unavailable)?;
                 id
@@ -67,13 +70,18 @@ impl Scheduler {
             kind,
             deadline,
             phase: Phase::Queued,
+            result: [0; MESSAGE_MAX_BYTES],
         });
         *grant = false;
         self.wake_netd(true, false);
         Ok(id)
     }
 
-    pub(crate) fn poll_https(&mut self, request: usize) -> Option<usize> {
+    pub(crate) fn poll_https(
+        &mut self,
+        request: usize,
+        copy: impl FnOnce(&[u8]) -> bool,
+    ) -> Option<(usize, Option<usize>)> {
         let exchange = self.https.as_ref()?;
         if exchange.id != request
             || !self
@@ -84,13 +92,21 @@ impl Scheduler {
         {
             return None;
         }
-        let status = match exchange.phase {
-            Phase::Finished(status) => status,
-            Phase::Queued if monotonic_nanos() >= exchange.deadline => HttpsStatus::TimedOut,
-            _ => return Some(0),
+        let (status, length) = match exchange.phase {
+            Phase::Finished { status, length } => (status, length),
+            Phase::Queued if monotonic_nanos() >= exchange.deadline => (HttpsStatus::TimedOut, 0),
+            _ => return Some((0, None)),
+        };
+        let copied = if exchange.kind == HttpsRequest::McpCall && status == HttpsStatus::Complete {
+            if !copy(&exchange.result[..length]) {
+                return None;
+            }
+            Some(length)
+        } else {
+            None
         };
         self.https = None;
-        Some(status as usize)
+        Some((status as usize, copied))
     }
 
     pub(crate) fn https_queued(&self) -> bool {
@@ -105,7 +121,10 @@ impl Scheduler {
             .as_mut()
             .filter(|exchange| exchange.phase == Phase::Queued)?;
         if monotonic_nanos() >= exchange.deadline {
-            self.finish_https(HttpsStatus::TimedOut);
+            exchange.phase = Phase::Finished {
+                status: HttpsStatus::TimedOut,
+                length: 0,
+            };
             return None;
         }
         exchange.phase = Phase::Running;
@@ -115,7 +134,7 @@ impl Scheduler {
     pub(crate) fn https_pending(&self) -> bool {
         self.https
             .as_ref()
-            .is_some_and(|exchange| !matches!(exchange.phase, Phase::Finished(_)))
+            .is_some_and(|exchange| !matches!(exchange.phase, Phase::Finished { .. }))
     }
 
     pub(crate) fn https_deadline(&self, request: usize) -> Option<u64> {
@@ -123,32 +142,47 @@ impl Scheduler {
         (exchange.id == request && exchange.phase == Phase::Running).then_some(exchange.deadline)
     }
 
-    pub(crate) fn complete_https(&mut self, request: usize, status: HttpsStatus) -> Option<()> {
-        let deadline = self.https_deadline(request)?;
-        self.finish_https(if monotonic_nanos() >= deadline {
+    pub(crate) fn complete_https(
+        &mut self,
+        request: usize,
+        status: HttpsStatus,
+        length: usize,
+        copy: impl FnOnce(&mut [u8]) -> bool,
+    ) -> Option<()> {
+        let exchange = self
+            .https
+            .as_mut()
+            .filter(|exchange| exchange.id == request && exchange.phase == Phase::Running)?;
+        let status = if monotonic_nanos() >= exchange.deadline {
             HttpsStatus::TimedOut
         } else {
             status
-        });
+        };
+        let length = if exchange.kind == HttpsRequest::McpCall && status == HttpsStatus::Complete {
+            let result = exchange.result.get_mut(..length)?;
+            if !copy(result) {
+                return None;
+            }
+            length
+        } else {
+            0
+        };
+        exchange.phase = Phase::Finished { status, length };
         Some(())
     }
 
-    fn finish_https(&mut self, status: HttpsStatus) {
-        let Some(exchange) = &mut self.https else {
-            return;
-        };
-        exchange.phase = Phase::Finished(status);
-    }
-
     pub(in crate::scheduler) fn stop_https_task(&mut self, index: usize) {
-        let Some(exchange) = &self.https else {
+        let Some(exchange) = &mut self.https else {
             return;
         };
         if self.tasks[index].has_launch(exchange.launch) {
             self.https = None;
             self.wake_netd(true, true);
-        } else if index == NETD_TASK_INDEX && !matches!(exchange.phase, Phase::Finished(_)) {
-            self.finish_https(HttpsStatus::Unavailable);
+        } else if index == NETD_TASK_INDEX && !matches!(exchange.phase, Phase::Finished { .. }) {
+            exchange.phase = Phase::Finished {
+                status: HttpsStatus::Unavailable,
+                length: 0,
+            };
         }
     }
 }

@@ -1,6 +1,6 @@
 # Native syscall ABI
 
-The RV64 prototype implements the 78 calls defined by `clv-abi` 0.0.18,
+The RV64 prototype implements the 78 calls defined by `clv-abi` 0.0.19,
 numbered from 0 through 77.
 The caller places the call number in `a7`, passes up to six arguments in
 `a0`–`a5`, and executes `ecall`.
@@ -221,6 +221,7 @@ queued reply.
 | 15 `HttpsFailed` | 1 byte | Failure status for the [goal-authorized HTTPS probe](#goal-authorized-https). |
 | 16 `McpInitFailed` | 1 byte | Failure status for [native MCP initialization](#goal-authorized-https). |
 | 17 `McpListFailed` | 1 byte | Failure status for [native MCP tool discovery](#goal-authorized-https). |
+| 18 `McpCallFailed` | 1 byte | Failure status for the [native MCP search call](#goal-authorized-https). |
 
 For `ReadFile`, `hello` opens the requested path through its directory grant
 using `open_at`. The child exits with status 0 after sending a successful reply
@@ -351,10 +352,10 @@ and the boot offset. Only `netd` can call it.
 
 ### Goal-authorized HTTPS
 
-On a `tls-probe` build, policy bit 8 grants one `GET /probe`, bit 9 grants
-one MCP initialization, and bit 10 grants one MCP tool discovery. Both MCP
-operations use `/mcp`. All three operations fix the destination to
-`probe.clavenar.test:8443` at `192.0.2.3`.
+On a `tls-probe` build, policy bits 8–11 independently grant one
+`GET /probe`, MCP initialization, MCP tool discovery, or MCP tool call,
+respectively. The MCP operations use `/mcp`. All operations fix the
+destination to `probe.clavenar.test:8443` at `192.0.2.3`.
 Admission consumes the selected grant and binds the operation to the calling
 agent's live goal and boot-unique child launch. The GET uses the launch handle
 as its request ID. Each MCP operation receives a fresh request ID for the
@@ -363,15 +364,17 @@ and the goal deadline.
 
 | Operation in `a0` | Caller and arguments | Result |
 | --- | --- | --- |
-| 3 submit | Live goal agent, operation selector in `a1` (0 for GET, 1 for MCP initialization, 2 for MCP tool discovery) | Request ID in `a0`, or -1 with the denial, timeout or availability status in `a1` |
-| 4 poll | The submitting agent, request ID in `a1` | 0 while pending, a final status consumed once, or -1 for an unrelated or invalid request |
+| 3 submit | Live goal agent, operation selector in `a1` (0 for GET, 1 for MCP initialization, 2 for MCP tool discovery, 3 for MCP tool call) | Request ID in `a0`, or -1 with the denial, timeout or availability status in `a1` |
+| 4 poll | The submitting agent, request ID in `a1`. For a successful MCP call, stack destination in `a2` and capacity in `a3`. | 0 while pending, a final status consumed once in `a0` and the copied length in `a1` for a successful MCP call, or -1 for an invalid request or result buffer |
 | 5 take | `netd` | 0 while idle, or request ID in `a0`, permitted IPv4 as four little-endian octets in `a1`, absolute deadline in nanoseconds in `a2` and operation selector in `a3` |
-| 6 complete | `netd`, request ID in `a1` and final status in `a2` | 0 after recording the result, or -1 for an invalid status or stale request |
+| 6 complete | `netd`, request ID in `a1` and final status in `a2`. For a successful MCP call, stack source in `a3` and length in `a4`. | 0 after recording the result, or -1 for an invalid status, result buffer or stale request |
 
 Final status values are 1 complete, 2 grant denied, 3 unavailable, 4 timed
 out, 5 DNS failure, 6 destination denied, 7 TLS failure and 8 invalid
 response. The kernel rejects late completion after revocation and records
 timeout if an otherwise live request completes after its deadline.
+It stages up to 64 result bytes from a successful MCP call. An invalid
+poll buffer leaves the result available for the submitting agent to retry.
 
 For frame I/O during the exchange, `netd` puts the request ID in `a4`.
 The kernel checks it before accessing the device, including when a parked
@@ -386,13 +389,18 @@ to discard its DNS and TCP state.
 `netd` checks the resolved address before connecting and verifies TLS
 against the original hostname. MCP initialization covers the `initialize`
 and `notifications/initialized` POSTs. Tool discovery continues with
-`tools/list` under the same request ID and deadline.
-After validation, the agent returns the GET's 24-byte body, the 16-byte
-MCP acknowledgment, or the 12-byte tool name including its newline as
-`Matches`. Failed operations send `HttpsFailed`, `McpInitFailed`, or
-`McpListFailed` with the status byte. Queuing a reply spends its payload
-length from the agent's reply-byte allowance.
-[HTTPS GET](qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) · [MCP initialization](qemu-walkthroughs.md#initialize-mcp-over-native-https) · [MCP tool discovery](qemu-walkthroughs.md#discover-the-mcp-search-tool-over-native-https)
+`tools/list` under the same request ID and deadline. The MCP call also
+validates the discovery response, then sends one `tools/call` for
+`text.search` with `pattern=Hello`. It accepts a matching successful RPC
+response with one text item of up to 64 bytes. The text contains printable
+ASCII and may end with a newline.
+
+The agent returns the GET body, the MCP acknowledgment, the discovered
+tool name, or the decoded call result as `Matches`. Failed operations
+send `HttpsFailed`, `McpInitFailed`, `McpListFailed`, or `McpCallFailed`
+with the status byte. Queuing a reply spends its payload length from the
+agent's reply-byte allowance.
+[HTTPS GET](qemu-walkthroughs.md#fetch-an-https-response-over-native-tcp) · [MCP initialization](qemu-walkthroughs.md#initialize-mcp-over-native-https) · [MCP tool discovery](qemu-walkthroughs.md#discover-the-mcp-search-tool-over-native-https) · [MCP tool call](qemu-walkthroughs.md#call-the-mcp-search-tool-over-native-https)
 
 ## Goal and agent calls
 
@@ -556,8 +564,8 @@ a writable journal with flush support. Use the single-file format
 (`CLVRNM01`) for bit 7 alone or the pair format (`CLVRNM02`) for bits 6 and 7.
 A supplied rename directory must be the root for either format.
 Bit 8 grants one [native HTTPS probe](#goal-authorized-https) to a live
-agent in this goal. Bits 9 and 10 independently grant one native MCP
-initialization and one native MCP tool discovery, respectively.
+agent in this goal. Bits 9–11 independently grant one native MCP
+initialization, discovery, or invocation, respectively.
 
 An omitted descriptor is `NO_RAMFS_HANDLE` (all ones). Zero is a valid
 descriptor. A read or rename directory must be open in the owner's handle
@@ -903,7 +911,7 @@ The kernel binds the child to the goal before its first instruction.
 The agent run calls also create and bind the agent in that operation.
 Call 56 queues a typed request before the agent starts. Bit 0 starts it
 suspended. Bit 1 selects the explicit agent reply allowance in `a3`.
-Otherwise the agent inherits the available balance. Bits 2–5 and 7–9 select
+Otherwise the agent inherits the available balance. Bits 2–5 and 7–10 select
 the request format. Bit 6 requests a durable checkpoint for the revision 2 or 7
 `PlanDefinition` request.
 
@@ -917,6 +925,7 @@ the request format. Bit 6 requests a durable checkpoint for the revision 2 or 7
 | Bit 7 only | `HttpsProbe` (tag 16) | Empty request for `hello`. It asks call 77 to admit the [goal's HTTPS operation](#goal-authorized-https). |
 | Bit 8 only | `McpInit` (tag 17) | Empty request for `hello`. It asks call 77 to admit the [goal's MCP initialization](#goal-authorized-https). |
 | Bit 9 only | `McpList` (tag 18) | Empty request for `hello`. It asks call 77 to admit the [goal's MCP tool discovery](#goal-authorized-https). |
+| Bit 10 only | `McpCall` (tag 19) | Empty request for `hello`. It asks call 77 to admit the [goal's MCP tool call](#goal-authorized-https). |
 
 Unknown flag bits, multiple format bits set, an unreadable buffer or the wrong
 length fail before admission. For tag 6 the kernel also verifies that the

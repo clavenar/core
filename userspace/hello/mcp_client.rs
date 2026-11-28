@@ -64,24 +64,8 @@ fn exchange(
         return None;
     }
 
-    let result = request(stream, frame, "3", |frame| {
-        frame.write_str(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"#)?;
-        frame.string(mcp::SEARCH_TOOL)?;
-        frame.write_str(r#","arguments":{"pattern":"#)?;
-        frame.string(pattern)?;
-        frame.write_str("}}}")
-    })?;
-    let [content, is_error] = result.fields([b"content", b"isError"])?;
-    if let Some(is_error) = is_error
-        && is_error.boolean()?
-    {
-        return None;
-    }
-    let [kind, text] = content?.sole_item()?.fields([b"type", b"text"])?;
-    if !kind?.string_is(b"text") {
-        return None;
-    }
-    text?.decode_string(matches)
+    let result = request(stream, frame, "3", |frame| frame.search_request(pattern))?;
+    mcp::decode_search_result(result, matches)
 }
 
 fn request<'a>(

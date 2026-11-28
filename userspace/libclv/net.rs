@@ -1,3 +1,4 @@
+pub use clv_abi::MESSAGE_MAX_BYTES;
 pub use clv_abi::net::{
     CRYPTO_SEED_BYTES, HTTPS_PROBE_BODY, HttpsRequest, HttpsStatus, MAX_FRAME_BYTES, crypto_seed,
     unix_nanos,
@@ -49,17 +50,31 @@ pub fn unix_time() -> Option<u64> {
 }
 
 /// Submit the goal's fixed HTTPS operation and collect its result.
-pub fn request_https(kind: HttpsRequest) -> HttpsStatus {
+pub fn request_https(kind: HttpsRequest, output: &mut [u8]) -> Result<&[u8], HttpsStatus> {
     let (request, status, ..) = ecall(SYS_NET_FRAME, SUBMIT_HTTPS_PROBE, kind as usize, 0, 0, 0);
     let Some(request) = syscall_result(request) else {
-        return HttpsStatus::from_raw(status).unwrap_or(HttpsStatus::Unavailable);
+        return Err(HttpsStatus::from_raw(status).unwrap_or(HttpsStatus::Unavailable));
     };
     // Keep the agent runnable so the shell can wait while netd is parked on the NIC.
     loop {
-        let result = syscall(SYS_NET_FRAME, POLL_HTTPS_PROBE, request, 0);
-        if result != 0 {
-            return HttpsStatus::from_raw(result).unwrap_or(HttpsStatus::Unavailable);
+        let (status, length, ..) = ecall(
+            SYS_NET_FRAME,
+            POLL_HTTPS_PROBE,
+            request,
+            output.as_mut_ptr().expose_provenance(),
+            output.len(),
+            0,
+        );
+        if status == 0 {
+            continue;
         }
+        return match HttpsStatus::from_raw(status).unwrap_or(HttpsStatus::Unavailable) {
+            HttpsStatus::Complete if kind == HttpsRequest::McpCall => {
+                output.get(..length).ok_or(HttpsStatus::InvalidResponse)
+            }
+            HttpsStatus::Complete => Ok(&[]),
+            status => Err(status),
+        };
     }
 }
 
@@ -81,11 +96,14 @@ pub fn take_https_probe() -> Option<HttpsProbe> {
     })
 }
 
-pub fn complete_https_probe(request: usize, status: HttpsStatus) -> bool {
-    syscall(
+pub fn complete_https_probe(request: usize, status: HttpsStatus, result: &[u8]) -> bool {
+    let (completed, ..) = ecall(
         SYS_NET_FRAME,
         COMPLETE_HTTPS_PROBE,
         request,
         status as usize,
-    ) == 0
+        result.as_ptr().expose_provenance(),
+        result.len(),
+    );
+    completed == 0
 }

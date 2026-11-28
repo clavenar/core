@@ -143,6 +143,7 @@ pub fn create_with_timeout(
             allow_https_probe: false,
             allow_mcp_init: false,
             allow_mcp_list: false,
+            allow_mcp_call: false,
         },
         files,
         timeout_ms,
