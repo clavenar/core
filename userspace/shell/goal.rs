@@ -362,6 +362,7 @@ fn create_goal(options: &GoalOptions<'_>) -> Option<usize> {
         rename_limit: options.rename_limit.unwrap_or(1),
         durable: options.durable,
         allow_https_probe: options.allow_https_probe,
+        allow_mcp_init: options.allow_mcp_init,
     };
     // Keep the policy descriptors open through goal creation.
     let read_directory = open_policy_handle(options.read_under)?;

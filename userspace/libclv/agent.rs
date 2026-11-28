@@ -5,8 +5,8 @@ pub use clv_abi::agent::{
     FileDelegation, FileToolInvocation, PlanIntent, ResumeReceipt,
 };
 use clv_abi::agent::{
-    DELEGATION_REQUEST_MAX_BYTES, EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES, RECV_CHECKPOINT,
-    RUN_CHECKPOINT, RUN_HTTPS_PROBE, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
+    EncodedDefinitionPin, LAUNCH_REQUEST_MAX_BYTES, RECV_CHECKPOINT, RUN_CHECKPOINT,
+    RUN_HTTPS_PROBE, RUN_MCP_INIT, RUN_PLAN_DEFINITION, RUN_PLAN_INTENT, RUN_REPLY_LIMIT,
     RUN_STAGE_RENAME, RUN_STAGE_RENAME_PAIR, RUN_SUSPENDED, encode_rename_pair,
 };
 use clv_abi::tool::{FILE_TOOL_MCP, FILE_TOOL_STDIO};
@@ -82,6 +82,7 @@ pub enum RunRequest<'a> {
     StageRename(&'a [u8]),
     StageRenamePair([&'a [u8]; 2]),
     HttpsProbe,
+    McpInit,
 }
 
 /// Launches an agent with an optional typed request in its mailbox.
@@ -129,6 +130,10 @@ pub fn launch(
         }
         RunRequest::HttpsProbe => {
             flags |= RUN_HTTPS_PROBE;
+            &[]
+        }
+        RunRequest::McpInit => {
+            flags |= RUN_MCP_INIT;
             &[]
         }
     };

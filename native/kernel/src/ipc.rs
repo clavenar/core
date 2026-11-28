@@ -46,7 +46,8 @@ impl MessageKind {
                 | RequestKind::ObservePublication
                 | RequestKind::ResumeAgent
                 | RequestKind::ReviewRename
-                | RequestKind::HttpsProbe,
+                | RequestKind::HttpsProbe
+                | RequestKind::McpInit,
             ) => length == 0,
             Self::Request(RequestKind::WatchReadDenials) => length == 1,
             Self::Reply(ReplyKind::ReadDenialAlert) => {
@@ -63,7 +64,10 @@ impl MessageKind {
                 length == size_of::<EncodedRenameReviewReceipt>()
             }
             Self::Reply(
-                ReplyKind::HostPlanFailed | ReplyKind::HostToolFailed | ReplyKind::HttpsFailed,
+                ReplyKind::HostPlanFailed
+                | ReplyKind::HostToolFailed
+                | ReplyKind::HttpsFailed
+                | ReplyKind::McpInitFailed,
             ) => length == 1,
             Self::Reply(
                 ReplyKind::Denied

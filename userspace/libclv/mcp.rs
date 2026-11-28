@@ -1,4 +1,4 @@
-//! Framing and JSON-RPC envelopes for the local MCP stdio session.
+//! MCP JSON-RPC messages and local stdio framing.
 
 mod json;
 
@@ -64,10 +64,10 @@ impl Stdio {
         buffer: &mut [u8; FRAME_BYTES],
         message: impl FnOnce(&mut Frame<'_>) -> fmt::Result,
     ) -> Option<()> {
-        let mut frame = Frame { buffer, length: 0 };
+        let mut frame = Frame::new(buffer);
         message(&mut frame).ok()?;
         frame.write_char('\n').ok()?;
-        pipe::write_all(self.handle, &frame.buffer[..frame.length])
+        pipe::write_all(self.handle, frame.into_bytes())
     }
 
     pub fn send_result(
@@ -107,7 +107,15 @@ pub struct Frame<'a> {
     length: usize,
 }
 
-impl Frame<'_> {
+impl<'a> Frame<'a> {
+    pub fn new(buffer: &'a mut [u8; FRAME_BYTES]) -> Self {
+        Self { buffer, length: 0 }
+    }
+
+    pub fn into_bytes(self) -> &'a [u8] {
+        &self.buffer[..self.length]
+    }
+
     fn append(&mut self, bytes: &[u8]) -> fmt::Result {
         let end = self.length + bytes.len();
         self.buffer
@@ -216,7 +224,7 @@ fn request_id(value: Value<'_>) -> Option<&str> {
     (encoded.len() <= MAX_ID_BYTES && (value.is_string() || value.integer())).then_some(encoded)
 }
 
-/// Extracts a successful response to a request issued by the local client.
+/// Extracts a successful response to a specific JSON-RPC request.
 pub fn result<'a>(frame: &'a [u8], expected_id: &str) -> Option<Value<'a>> {
     let [version, id, result, error, method] =
         json::parse(frame)?.fields([b"jsonrpc", b"id", b"result", b"error", b"method"])?;
@@ -235,4 +243,17 @@ pub fn is_implementation(value: Value<'_>) -> bool {
         return false;
     };
     name.is_string() && version.is_string()
+}
+
+pub fn accepts_initialize(result: Value<'_>) -> bool {
+    let Some([Some(version), Some(capabilities), Some(server)]) =
+        result.fields([b"protocolVersion", b"capabilities", b"serverInfo"])
+    else {
+        return false;
+    };
+    version.string_is(VERSION.as_bytes())
+        && capabilities
+            .field(b"tools")
+            .is_some_and(|tools| tools.is_object())
+        && is_implementation(server)
 }

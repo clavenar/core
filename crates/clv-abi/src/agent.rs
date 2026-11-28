@@ -17,6 +17,8 @@ pub const RUN_STAGE_RENAME_PAIR: usize = 32;
 pub const RUN_CHECKPOINT: usize = 64;
 /// Selects an empty request to fetch the approved HTTPS fixture.
 pub const RUN_HTTPS_PROBE: usize = 128;
+/// Selects an empty request to initialize the native MCP fixture.
+pub const RUN_MCP_INIT: usize = 256;
 /// Selects an owner read of the completed checkpoint in reply receive.
 pub const RECV_CHECKPOINT: usize = 1;
 /// A zero agent handle on a delegation call selects the calling task's live agent.

@@ -74,6 +74,8 @@ keywords!(GoalFlag {
     AllowTool => "--allow-tool",
     AllowHttpsProbe => "--allow-https-probe",
     HttpsProbe => "--https-probe",
+    AllowMcpInit => "--allow-mcp-init",
+    McpInit => "--mcp-init",
     PreserveFile => "--preserve-file",
     RenameUnder => "--rename-under",
     RenameLimit => "--rename-limit",

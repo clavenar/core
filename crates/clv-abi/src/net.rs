@@ -24,6 +24,25 @@ pub const COMPLETE_HTTPS_PROBE: usize = 6;
 pub const HTTPS_PROBE_IPV4: [u8; 4] = [192, 0, 2, 3];
 pub const HTTPS_PROBE_TIMEOUT_NS: u64 = 5_000_000_000;
 pub const HTTPS_PROBE_BODY: &[u8] = b"Hello from native HTTPS\n";
+pub const MCP_INIT_REPLY: &[u8] = b"MCP initialized\n";
+
+/// The fixed HTTPS operation authorized by the goal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HttpsRequest {
+    Probe = 0,
+    McpInit = 1,
+}
+
+impl HttpsRequest {
+    pub const fn from_raw(value: usize) -> Option<Self> {
+        match value {
+            0 => Some(Self::Probe),
+            1 => Some(Self::McpInit),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

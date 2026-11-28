@@ -1,8 +1,8 @@
 use clv_abi::SYSCALL_ERROR;
 use clv_abi::net::{
-    COMPLETE_HTTPS_PROBE, ETHERNET_HEADER_BYTES, FrameOperation, HTTPS_PROBE_IPV4, HttpsStatus,
-    MAX_FRAME_BYTES, NO_RECEIVE_DEADLINE, POLL_HTTPS_PROBE, READ_UNIX_TIME, SUBMIT_HTTPS_PROBE,
-    TAKE_HTTPS_PROBE,
+    COMPLETE_HTTPS_PROBE, ETHERNET_HEADER_BYTES, FrameOperation, HTTPS_PROBE_IPV4, HttpsRequest,
+    HttpsStatus, MAX_FRAME_BYTES, NO_RECEIVE_DEADLINE, POLL_HTTPS_PROBE, READ_UNIX_TIME,
+    SUBMIT_HTTPS_PROBE, TAKE_HTTPS_PROBE,
 };
 
 use super::{REG_A0, REG_A1, REG_A2, REG_A3, REG_A4};
@@ -21,7 +21,9 @@ pub(super) fn dispatch(
     let argument = frame.registers[REG_A1];
     match operation {
         SUBMIT_HTTPS_PROBE => {
-            let result = scheduler.submit_https(interface.is_some());
+            let result = HttpsRequest::from_raw(argument)
+                .ok_or(HttpsStatus::Unavailable)
+                .and_then(|kind| scheduler.submit_https(kind, interface.is_some()));
             return WaitResult::Ready(result.unwrap_or_else(|status| {
                 frame.registers[REG_A1] = status as usize;
                 SYSCALL_ERROR
@@ -44,11 +46,12 @@ pub(super) fn dispatch(
                 .map_or(WaitResult::Unavailable, WaitResult::Ready);
         }
         TAKE_HTTPS_PROBE => {
-            let Some((request, deadline)) = scheduler.take_https() else {
+            let Some((request, deadline, kind)) = scheduler.take_https() else {
                 return WaitResult::Ready(0);
             };
             frame.registers[REG_A1] = u32::from_le_bytes(HTTPS_PROBE_IPV4) as usize;
             frame.registers[REG_A2] = deadline as usize;
+            frame.registers[REG_A3] = kind as usize;
             return WaitResult::Ready(request);
         }
         COMPLETE_HTTPS_PROBE => {

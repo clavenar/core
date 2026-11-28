@@ -142,6 +142,7 @@ pub enum RequestKind {
     /// The denial threshold for the bound read-scope watch.
     WatchReadDenials = 15,
     HttpsProbe = 16,
+    McpInit = 17,
 }
 
 impl RequestKind {
@@ -163,6 +164,7 @@ impl RequestKind {
             value if value == Self::ObservePublication as usize => Some(Self::ObservePublication),
             value if value == Self::WatchReadDenials as usize => Some(Self::WatchReadDenials),
             value if value == Self::HttpsProbe as usize => Some(Self::HttpsProbe),
+            value if value == Self::McpInit as usize => Some(Self::McpInit),
             _ => None,
         }
     }
@@ -195,6 +197,8 @@ pub enum ReplyKind {
     ReadDenialAlert = 14,
     /// One byte explaining why the agent could not fetch the approved HTTPS fixture.
     HttpsFailed = 15,
+    /// One byte explaining why the agent could not initialize native MCP.
+    McpInitFailed = 16,
 }
 
 impl ReplyKind {
@@ -215,6 +219,7 @@ impl ReplyKind {
             value if value == Self::PublicationObserved as usize => Some(Self::PublicationObserved),
             value if value == Self::ReadDenialAlert as usize => Some(Self::ReadDenialAlert),
             value if value == Self::HttpsFailed as usize => Some(Self::HttpsFailed),
+            value if value == Self::McpInitFailed as usize => Some(Self::McpInitFailed),
             _ => None,
         }
     }

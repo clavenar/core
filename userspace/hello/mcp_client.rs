@@ -39,12 +39,7 @@ fn exchange(
         frame.string(mcp::VERSION)?;
         frame.write_str(r#","capabilities":{},"clientInfo":{"name":"hello","version":"1"}}"#)
     })?;
-    let [version, capabilities, server] =
-        initialize.fields([b"protocolVersion", b"capabilities", b"serverInfo"])?;
-    if !version?.string_is(mcp::VERSION.as_bytes())
-        || !capabilities?.field(b"tools")?.is_object()
-        || !mcp::is_implementation(server?)
-    {
+    if !mcp::accepts_initialize(initialize) {
         return None;
     }
     stream.send(frame, |frame| {

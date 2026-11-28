@@ -1,5 +1,6 @@
 pub use clv_abi::net::{
-    CRYPTO_SEED_BYTES, HTTPS_PROBE_BODY, HttpsStatus, MAX_FRAME_BYTES, crypto_seed, unix_nanos,
+    CRYPTO_SEED_BYTES, HTTPS_PROBE_BODY, HttpsRequest, HttpsStatus, MAX_FRAME_BYTES, crypto_seed,
+    unix_nanos,
 };
 
 use clv_abi::SYS_NET_FRAME;
@@ -48,8 +49,8 @@ pub fn unix_time() -> Option<u64> {
 }
 
 /// Submit the goal's fixed HTTPS operation and collect its result.
-pub fn https_probe() -> HttpsStatus {
-    let (request, status, ..) = ecall(SYS_NET_FRAME, SUBMIT_HTTPS_PROBE, 0, 0, 0, 0);
+pub fn request_https(kind: HttpsRequest) -> HttpsStatus {
+    let (request, status, ..) = ecall(SYS_NET_FRAME, SUBMIT_HTTPS_PROBE, kind as usize, 0, 0, 0);
     let Some(request) = syscall_result(request) else {
         return HttpsStatus::from_raw(status).unwrap_or(HttpsStatus::Unavailable);
     };
@@ -64,15 +65,17 @@ pub fn https_probe() -> HttpsStatus {
 
 pub struct HttpsProbe {
     pub request: usize,
+    pub kind: HttpsRequest,
     pub ipv4: [u8; 4],
     pub deadline: u64,
 }
 
 /// Claim a goal-bound HTTPS operation as the dedicated network service.
 pub fn take_https_probe() -> Option<HttpsProbe> {
-    let (request, ipv4, deadline, _) = ecall(SYS_NET_FRAME, TAKE_HTTPS_PROBE, 0, 0, 0, 0);
+    let (request, ipv4, deadline, kind) = ecall(SYS_NET_FRAME, TAKE_HTTPS_PROBE, 0, 0, 0, 0);
     Some(HttpsProbe {
         request: syscall_result(request).filter(|&request| request != 0)?,
+        kind: HttpsRequest::from_raw(kind)?,
         ipv4: (ipv4 as u32).to_le_bytes(),
         deadline: deadline as u64,
     })

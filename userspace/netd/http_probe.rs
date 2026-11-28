@@ -6,7 +6,7 @@ use smoltcp::socket::tcp;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 
-use super::http_response::{RESPONSE_BYTES, body_range};
+use super::http_response::{ExpectedResponse, RESPONSE_BYTES, body_range};
 
 const PEER: IpEndpoint = IpEndpoint::new(IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1)), 8080);
 const FALLBACK_PORT: u16 = 49154;
@@ -164,8 +164,8 @@ impl<'a> Probe<'a> {
                 .recv_slice(&mut self.bytes[self.received..])
                 .map_err(|_| Failure::Connection)?;
             if self.body.is_none() {
-                self.body =
-                    body_range(&self.bytes[..self.received]).map_err(|_| Failure::Invalid)?;
+                self.body = body_range(&self.bytes[..self.received], ExpectedResponse::Ok)
+                    .map_err(|_| Failure::Invalid)?;
             }
             if let Some(body) = &self.body
                 && self.received >= body.end

@@ -12,6 +12,7 @@ continues the previous one. Goal handles and ordinary RamFS changes live for one
   - [Seed TCP with VirtIO RNG](#seed-tcp-with-virtio-rng)
   - [Check the guest Unix clock](#check-the-guest-unix-clock)
   - [Fetch an HTTPS response over native TCP](#fetch-an-https-response-over-native-tcp)
+  - [Initialize MCP over native HTTPS](#initialize-mcp-over-native-https)
   - [Probe a VirtIO block device](#probe-a-virtio-block-device)
   - [Recover a VirtIO block marker after reboot](#recover-a-virtio-block-marker-after-reboot)
   - [Recover a previous journal record](#recover-a-previous-journal-record)
@@ -60,7 +61,7 @@ and stable launch selectors. A versioned file tool maps an exact tool ID
 to one of those programs. [Program registry](../crates/clv-abi/src/program.rs) · [File tool registry](../crates/clv-abi/src/tool.rs)
 The loader accepts static, little-endian ELF64 executables with one
 read/execute segment at `0x00400000`. The kernel build takes the 64 KiB limit
-from `clv-abi` and allows up to 164 KiB for `netd` with `tls-probe`. When
+from `clv-abi` and allows up to 172 KiB for `netd` with `tls-probe`. When
 linking a shell program directly with `userspace/user.ld`, pass
 `--defsym=USER_IMAGE_MAX_BYTES=65536` to the linker. The loader allocates
 frames based on the segment's memory size (`p_memsz`) and zero-fills any
@@ -84,7 +85,7 @@ top of the stack. Nonempty syscall buffers must fit within the calling
 task's stack. The kernel, UART and attached VirtIO MMIO mappings are
 shared in supervisor mode. The boot pool has room for five full-size images,
 seven task stacks and the page tables. It holds 114 frames in the standard
-build, 116 with `http-probe` and 159 with `tls-probe`. The pool, kernel and
+build, 116 with `http-probe` and 161 with `tls-probe`. The pool, kernel and
 64 KiB supervisor stack fit within one aligned 2 MiB physical region.
 
 OpenSBI timer interrupts drive round-robin scheduling. A `timer switch` line
@@ -122,6 +123,9 @@ python3 - <<'PY'
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from functools import partial
+from http.client import HTTPConnection, parse_headers
+from io import BytesIO
+import json
 import os
 from pathlib import Path
 import re
@@ -548,27 +552,30 @@ def send_dns_answer(host, query, address):
         record = b"\xc0\x0c" + pack("!HHIH", 1, 1, 60, 4) + address
     send_udp(host, dns_port, port, header + question + record)
 
-def start_https_goal(guest, log, *, grant=True, timeout_ms=None):
-    command = "goal create --reply-bytes 24"
+def start_https_goal(guest, log, *, grant=True, timeout_ms=None, mcp=False):
+    operation = "mcp-init" if mcp else "https-probe"
+    command = f"goal create --reply-bytes {16 if mcp else 24}"
     if grant:
+        command += f" --allow-{operation}"
+    elif mcp:
         command += " --allow-https-probe"
     if timeout_ms is not None:
         command += f" --timeout-ms {timeout_ms}"
     created = guest_command(guest, command)
-    launched = guest_command(guest, "agent run hello --https-probe")
+    launched = guest_command(guest, f"agent run hello --{operation}")
     if b"goal created" not in created or b"child=0x" not in launched:
         raise RuntimeError("Could not launch the HTTPS goal")
     log.extend(created + launched)
 
-def finish_https_goal(guest, expected, *, spent=1):
+def finish_https_goal(guest, expected, *, spent=1, allowance=24):
     status = guest_command(guest, "wait hello")
     reply = guest_command(guest, "recv hello")
     budget = guest_command(guest, "goal budget")
     closed = guest_command(guest, "goal close")
-    outcome = (b"hello exited 0x0000000000000000" if spent == 24 else
+    outcome = (b"hello exited 0x0000000000000000" if spent == allowance else
                b"hello exited 0x0000000000000001" if spent == 1 else b"hello cancelled")
     if (outcome not in status or expected not in reply or
-            f"available={24 - spent} reserved=0 spent={spent}".encode() not in budget or
+            f"available={allowance - spent} reserved=0 spent={spent}".encode() not in budget or
             b"goal closed" not in closed):
         raise RuntimeError("Unexpected goal result, reply budget or close")
 
@@ -600,20 +607,110 @@ def check_dns_failure(host, guest, log, *, case):
         raise RuntimeError("Expected the guest to stop sending traffic after DNS failure")
     finish_https_goal(guest, reply)
 
-def check_tls_peer(host, guest, log, *, credentials, case, cached=False):
-    name = "probe.clavenar.test"
+def tls_context(credentials):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_3
     context.num_tickets = 0
     context.load_cert_chain(*credentials)
 
     def check_sni(_server, requested, _context):
-        if requested != name:
+        if requested != "probe.clavenar.test":
             return ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
 
     context.sni_callback = check_sni
-    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
-    server = context.wrap_bio(incoming, outgoing, server_side=True)
+    return context
+
+def resolve_tls_peer(host, *, cached=False):
+    if not cached:
+        answer_guest_arp(host)
+    send_dns_answer(host, read_dns_query(host), https_ip)
+    if not cached:
+        answer_guest_arp(host, https_ip)
+
+def cancel_https_goal(guest, log):
+    cancelled = guest_command(guest, "goal cancel")
+    if b"goal cancelled" not in cancelled:
+        raise RuntimeError("Could not cancel the HTTPS goal")
+    log.extend(cancelled)
+
+class TlsPeer:
+    def __init__(self, host, context):
+        self.host = host
+        self.incoming, self.outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+        self.server = context.wrap_bio(self.incoming, self.outgoing, server_side=True)
+        self.port, (sequence, _, flags, data) = read_tcp_segment(host, 8443, peer_ip=https_ip)
+        if self.port < 57344 or flags != tcp_syn or data:
+            raise RuntimeError("Expected a TLS SYN from a seeded source port")
+        self.guest_next = (sequence + 1) & 0xffffffff
+        self.server_next = 0x23456789
+        self.send = partial(send_tcp, host, 8443, guest_port=self.port, peer_ip=https_ip)
+        self.receive = partial(receive_tcp, host, 8443, guest_port=self.port, peer_ip=https_ip)
+        self.send(self.server_next, self.guest_next, tcp_syn | tcp_ack)
+        self.server_next += 1
+        self.pending = b""
+        self.request = bytearray()
+        self.authenticated = self.close_notify = self.responded = False
+
+    def exchange(self, guest, log, respond, *, terminal=None, cancel_on_fin=False):
+        deadline = monotonic() + 7
+        while terminal is None or terminal not in log:
+            ready = select([self.host, guest.stdout], [], [], max(0, deadline - monotonic()))[0]
+            if not ready or monotonic() >= deadline:
+                raise RuntimeError(f"Timed out during TLS exchange waiting for {terminal!r}")
+            if self.host in ready:
+                sequence, acknowledged, flags, data = self.receive()
+                if (flags & tcp_syn or (terminal is None and flags & tcp_rst) or
+                        acknowledged > self.server_next):
+                    raise RuntimeError("Unexpected TCP control or acknowledgement during TLS")
+                finished = bool(flags & tcp_fin)
+                if data or finished:
+                    if sequence != self.guest_next:
+                        raise RuntimeError("Unexpected TCP stream sequence during TLS")
+                    self.guest_next = (self.guest_next + len(data) + finished) & 0xffffffff
+                    if not (finished and cancel_on_fin):
+                        self.send(self.server_next, self.guest_next, tcp_ack | (flags & tcp_fin))
+                        self.server_next += int(finished)
+                if data:
+                    self.consume(data, respond)
+                if finished:
+                    if cancel_on_fin:
+                        cancel_https_goal(guest, log)
+                    else:
+                        ack = (self.guest_next, self.server_next, tcp_ack, b"")
+                        if self.receive() != ack:
+                            raise RuntimeError("Expected the guest's final TCP ACK")
+                    return
+                if self.pending and acknowledged == self.server_next:
+                    chunk, self.pending = self.pending[:512], self.pending[512:]
+                    self.send(self.server_next, self.guest_next, tcp_ack, chunk)
+                    self.server_next += len(chunk)
+            if guest.stdout in ready:
+                log.extend(read_serial(guest))
+
+    def consume(self, data, respond):
+        self.incoming.write(data)
+        try:
+            if not self.authenticated:
+                self.server.do_handshake()
+                self.authenticated = True
+            while True:
+                plaintext = self.server.read(4096)
+                if not plaintext:
+                    self.close_notify = True
+                    break
+                if self.responded:
+                    raise RuntimeError("Unexpected HTTP bytes after the request")
+                self.request.extend(plaintext)
+                self.responded = respond(self.server, bytes(self.request))
+        except ssl.SSLWantReadError:
+            pass
+        self.pending += self.outgoing.read()
+
+    def require_shutdown(self):
+        if self.server.version() != "TLSv1.3" or not self.close_notify or not self.responded:
+            raise RuntimeError("Expected a completed TLS exchange and close_notify before TCP FIN")
+
+def check_tls_peer(host, guest, log, *, credentials, case, cached=False):
     expected = {
         "complete": b"netd HTTPS probe received Hello from native HTTPS",
         "malformed": b"netd HTTPS probe invalid response",
@@ -641,95 +738,43 @@ def check_tls_peer(host, guest, log, *, credentials, case, cached=False):
     elif case == "wrong-body":
         chunks = chunks[:-1] + (body[5:].upper(),)
 
-    port = 8443
+    def respond(server, request):
+        if not expected_request.startswith(request):
+            raise RuntimeError(f"Unexpected HTTPS request {request!r}")
+        if request != expected_request:
+            return False
+        if case == "cancelled":
+            cancel_https_goal(guest, log)
+        else:
+            for chunk in chunks:
+                server.write(chunk)
+            if case == "truncated":
+                server.unwrap()
+        return True
+
     start_https_goal(guest, log)
-    if not cached:
-        answer_guest_arp(host)
-    send_dns_answer(host, read_dns_query(host), https_ip)
-    if not cached:
-        answer_guest_arp(host, https_ip)
-    guest_port, (initial_sequence, _, flags, data) = read_tcp_segment(host, port, peer_ip=https_ip)
-    if guest_port < 57344 or flags != tcp_syn or data:
-        raise RuntimeError("Expected a TLS probe SYN from a seeded source port")
-    guest_next = (initial_sequence + 1) & 0xffffffff
-    server_next = 0x23456789
-    send = partial(send_tcp, host, port, guest_port=guest_port, peer_ip=https_ip)
-    receive = partial(receive_tcp, host, port, guest_port=guest_port, peer_ip=https_ip)
-    send(server_next, guest_next, tcp_syn | tcp_ack)
-    server_next += 1
-    pending = b""
-    request = bytearray()
-    completed = False
-    close_notify = False
-    finished = False
-    deadline = monotonic() + 7
-    while expected not in log or (case == "complete" and not finished):
-        ready = select([host, guest.stdout], [], [], max(0, deadline - monotonic()))[0]
-        if not ready or monotonic() >= deadline:
-            raise RuntimeError(f"Timed out waiting for {expected!r}")
-        if host in ready:
-            sequence, acknowledged, flags, data = receive()
-            if flags & tcp_syn or (case == "complete" and flags & tcp_rst) or acknowledged > server_next:
-                raise RuntimeError("Unexpected TCP control or acknowledgement during TLS")
-            if data or flags & tcp_fin:
-                if sequence != guest_next:
-                    raise RuntimeError("Unexpected TCP stream sequence during TLS")
-                finished = bool(flags & tcp_fin)
-                guest_next = (guest_next + len(data) + finished) & 0xffffffff
-                send(server_next, guest_next, tcp_ack | (flags & tcp_fin))
-                server_next += int(finished)
-            if data:
-                incoming.write(data)
-                try:
-                    if not completed:
-                        server.do_handshake()
-                        completed = True
-                        if case == "rejected":
-                            raise RuntimeError("The guest completed TLS with a rejected certificate")
-                    plaintext = server.read(len(expected_request) + 1)
-                    if plaintext:
-                        request.extend(plaintext)
-                        if not expected_request.startswith(request):
-                            raise RuntimeError(f"Unexpected HTTPS request {request!r}")
-                        if request == expected_request:
-                            if case == "cancelled":
-                                cancelled = guest_command(guest, "goal cancel")
-                                if b"goal cancelled" not in cancelled:
-                                    raise RuntimeError("Could not cancel the stalled HTTPS goal")
-                                log.extend(cancelled)
-                            else:
-                                for chunk in chunks:
-                                    server.write(chunk)
-                                if case == "truncated":
-                                    server.unwrap()
-                    else:
-                        close_notify = True
-                except ssl.SSLWantReadError:
-                    pass
-                pending += outgoing.read()
-            if pending and acknowledged == server_next:
-                chunk, pending = pending[:512], pending[512:]
-                send(server_next, guest_next, tcp_ack, chunk)
-                server_next += len(chunk)
-        if guest.stdout in ready:
-            log.extend(read_serial(guest))
+    resolve_tls_peer(host, cached=cached)
+    peer = TlsPeer(host, tls_context(credentials))
+    peer.exchange(guest, log, respond, terminal=None if case == "complete" else expected)
+    if expected not in log:
+        log.extend(wait_for_serial(guest, expected))
 
     authenticated = case != "rejected"
-    if completed != authenticated or (authenticated and server.version() != "TLSv1.3"):
+    if peer.authenticated != authenticated or (authenticated and peer.server.version() != "TLSv1.3"):
         raise RuntimeError("Unexpected TLS handshake result")
-    if request != (expected_request if authenticated else b""):
-        raise RuntimeError(f"Unexpected decrypted request bytes {request!r}")
-    if case == "complete" and not close_notify:
-        raise RuntimeError("Expected the guest to send TLS close_notify before TCP FIN")
+    if peer.request != (expected_request if authenticated else b""):
+        raise RuntimeError(f"Unexpected decrypted request bytes {peer.request!r}")
+    if case == "complete":
+        peer.require_shutdown()
 
     if case == "cancelled":
         finish_https_goal(guest, b"no message", spent=0)
         # Deliver the old connection's result after its goal closes.
-        server.write(b"".join(chunks))
-        send(server_next, guest_next, tcp_ack, outgoing.read())
+        peer.server.write(b"".join(chunks))
+        peer.send(peer.server_next, peer.guest_next, tcp_ack, peer.outgoing.read())
         deadline = monotonic() + 1
         while select([host], [], [], 0.1)[0]:
-            if monotonic() >= deadline or not receive()[2] & tcp_rst:
+            if monotonic() >= deadline or not peer.receive()[2] & tcp_rst:
                 raise RuntimeError("Unexpected traffic after the cancelled connection's late response")
         check_tls_peer(host, guest, bytearray(), credentials=credentials, case="complete", cached=True)
         return
@@ -764,7 +809,103 @@ def check_https_authority(host, guest, log, *, grant):
     if select([host], [], [], 0.1)[0]:
         raise RuntimeError("An ungranted or expired goal sent network traffic")
 
-def check_tls():
+def relay_mcp(server, request, *, notification, case):
+    head, separator, body = request.partition(b"\r\n\r\n")
+    if len(head) > 1024 or len(body) > 1024:
+        raise RuntimeError("The HTTP request exceeded the fixture bounds")
+    if not separator:
+        return False
+    line, _, headers = head.partition(b"\r\n")
+    headers = parse_headers(BytesIO(headers + b"\r\n\r\n"))
+    version = "2025-11-25"
+    protocol_header = version if notification else None
+    if (line != b"POST /mcp HTTP/1.1" or headers.get("Host") != "probe.clavenar.test:8443" or
+            headers.get("Connection") != "close" or headers.get("Content-Type") != "application/json" or
+            headers.get("Accept") != "application/json, text/event-stream" or
+            headers.get("MCP-Protocol-Version") != protocol_header or "MCP-Session-Id" in headers):
+        raise RuntimeError(f"Unexpected MCP request headers {head!r}")
+    length, = headers.get_all("Content-Length", [])
+    if len(body) < int(length):
+        return False
+    if len(body) != int(length):
+        raise RuntimeError("Unexpected MCP request length")
+
+    message = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+    if not notification:
+        message = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": version, "capabilities": {},
+            "clientInfo": {"name": "clavenar-netd", "version": "1"},
+        }}
+    if json.loads(body) != message:
+        raise RuntimeError(f"Unexpected MCP message {body!r}")
+
+    forwarded = {name: headers[name] for name in ("Accept", "Content-Type", "MCP-Protocol-Version")
+                 if name in headers}
+    connection = HTTPConnection("127.0.0.1", 8765, timeout=2)
+    try:
+        connection.request("POST", "/mcp", body, forwarded)
+        response = connection.getresponse()
+        reply = response.read(1025)
+        status_line = f"HTTP/1.1 {response.status} {response.reason}\r\n"
+        content_type = response.getheader("Content-Type")
+        if (response.status != (202 if notification else 200) or len(reply) > 1024 or
+                (notification and reply) or (not notification and content_type != "application/json")):
+            raise RuntimeError(f"Unexpected MCP SDK response {status_line.strip()} {reply!r}")
+    finally:
+        connection.close()
+
+    if case in ("wrong-id", "wrong-version"):
+        result = json.loads(reply)
+        if case == "wrong-id":
+            result["id"] = 2
+        else:
+            result["result"]["protocolVersion"] = "2025-06-18"
+        reply = json.dumps(result).encode()
+    elif notification and case == "nonempty-accepted":
+        reply = b"{}"
+
+    if content_type is not None:
+        status_line += f"Content-Type: {content_type}\r\n"
+    server.write(f"{status_line}Content-Length: {len(reply)}\r\nConnection: close\r\n\r\n".encode())
+    if reply:
+        server.write(reply)
+    print(f"Host MCP server accepted {message['method']}", flush=True)
+    return True
+
+def check_mcp_peer(host, guest, log, *, credentials, case):
+    start_https_goal(guest, log, mcp=True, grant=case != "missing-grant")
+    if case == "missing-grant":
+        finish_https_goal(guest, b"MCP init grant required", allowance=16)
+    else:
+        resolve_tls_peer(host)
+        context = tls_context(credentials)
+        initialize = TlsPeer(host, context)
+        initialize.exchange(guest, log, partial(relay_mcp, notification=False, case=case),
+                            cancel_on_fin=case == "cancelled")
+        initialize.require_shutdown()
+        if case == "cancelled":
+            finish_https_goal(guest, b"no message", spent=0, allowance=16)
+        elif case in ("wrong-id", "wrong-version"):
+            finish_https_goal(guest, b"MCP init invalid response", allowance=16)
+        else:
+            notification = TlsPeer(host, context)
+            if notification.port == initialize.port:
+                raise RuntimeError("Expected a fresh TCP source port for the notification")
+            complete = case == "complete"
+            marker = b"netd MCP initialized" if complete else b"netd HTTPS probe invalid response"
+            notification.exchange(guest, log, partial(relay_mcp, notification=True, case=case),
+                                  terminal=None if complete else marker)
+            if complete:
+                notification.require_shutdown()
+                finish_https_goal(guest, b"MCP initialized", spent=16, allowance=16)
+            else:
+                if not notification.responded:
+                    raise RuntimeError("The MCP server did not receive the notification")
+                finish_https_goal(guest, b"MCP init invalid response", allowance=16)
+    if select([host], [], [], 0.1)[0]:
+        raise RuntimeError("Unexpected guest traffic after the MCP result")
+
+def check_tls(*, mcp=False):
     def openssl(*args):
         run(["openssl", *args], check=True)
 
@@ -772,7 +913,7 @@ def check_tls():
     with TemporaryDirectory(prefix="clavenar-tls-") as directory:
         files = Path(directory)
         keygen = ("-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-noenc")
-        for authority in ("fixture", "other"):
+        for authority in (("fixture",) if mcp else ("fixture", "other")):
             openssl("req", "-x509", *keygen, "-days", "4", "-subj", f"/CN={authority} CA",
                     "-addext", "basicConstraints=critical,CA:TRUE",
                     "-addext", "keyUsage=critical,keyCertSign,cRLSign",
@@ -793,8 +934,6 @@ def check_tls():
             return pem, key
 
         valid = leaf("valid", "probe.clavenar.test", "fixture", 1)
-        wrong_name = leaf("wrong-name", "other.clavenar.test", "fixture", 2)
-        other_ca = leaf("other-ca", "probe.clavenar.test", "other", 1)
         run(["cargo", "rustc", "--locked", "--manifest-path", "native/kernel/Cargo.toml",
              "--features", "tls-probe", "--target", "riscv64gc-unknown-none-elf",
              "--target-dir", target, "--release", "--",
@@ -808,6 +947,16 @@ def check_tls():
         def rtc(time):
             return "-rtc", f"base={time:%Y-%m-%dT%H:%M:%S},clock=vm"
 
+        if mcp:
+            for case in ("complete", "missing-grant", "wrong-id", "wrong-version", "cancelled",
+                         "nonempty-accepted"):
+                boot(target=target, extra_args=system_rng + rtc(now),
+                     verify=partial(check_mcp_peer, credentials=valid, case=case))
+                print(f"Host verified MCP initialization case {case}", flush=True)
+            return
+
+        wrong_name = leaf("wrong-name", "other.clavenar.test", "fixture", 2)
+        other_ca = leaf("other-ca", "probe.clavenar.test", "other", 1)
         for label, credentials, time in (
             ("expired certificate", valid, now + timedelta(days=3)),
             ("wrong certificate name", wrong_name, now),
@@ -854,6 +1003,8 @@ elif sys.argv[1:] == ["http"]:
     print("Host verified the guest HTTP request, split response, truncation and timeout", flush=True)
 elif sys.argv[1:] == ["tls"]:
     check_tls()
+elif sys.argv[1:] == ["mcp"]:
+    check_tls(mcp=True)
 else:
     boot(exercise_network=True)
     print("Host verified Ethernet probes, ARP, ICMP, UDP and TCP echo after clsh>", flush=True)
@@ -1032,10 +1183,61 @@ cancels a stalled request and delivers its old response before running
 a fresh goal in the same VM. Each boot reads `/hello.txt` before the
 fixture stops QEMU.
 
-On Rust 1.100.1, the `netd` image is about 155 KiB with TLS and 162.5 KiB
-with both probe features. The lowest nonzero stack bytes after success
-were about 61 KiB and 65 KiB below the stack top, respectively. The
-image limit is 164 KiB and the stack reserves 96 KiB.
+### Initialize MCP over native HTTPS
+
+On the `tls-probe` build, `--allow-mcp-init` grants one stateless MCP
+initialization at `https://probe.clavenar.test:8443/mcp`. The guest reuses
+the pinned DNS address and certificate checks from the HTTPS walkthrough.
+One goal-bound deadline covers both TLS connections. The first POST
+requests protocol version `2025-11-25` and expects an HTTP `200` JSON
+response without a session ID. `netd` checks the JSON-RPC ID, version,
+tools capability and server information before sending
+`notifications/initialized` with the negotiated `MCP-Protocol-Version`
+header. It expects HTTP `202 Accepted` with `Content-Length: 0`.
+[MCP lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)
+
+Start the loopback Python server from [Search a host MCP fixture](#search-a-host-mcp-fixture)
+in the first Linux terminal. In a second Linux terminal, run this block
+from `core` to build and run the QEMU fixture. The guest opens both TLS
+connections through VirtIO-net. The fixture's HTTPS peer forwards the RPC
+messages to the Python server on host loopback.
+
+```bash
+(
+  set -o pipefail
+  awk '
+    /^### Exchange an Ethernet frame over VirtIO-net$/ { section = 1 }
+    section && /^python3 - .*PY/ { script = 1; next }
+    script && /^PY$/ { exit }
+    script { print }
+  ' docs/qemu-walkthroughs.md | python3 - mcp
+)
+```
+
+The successful QEMU boot runs this sequence at `clsh>` and stops after the
+checks.
+
+```text
+goal create --reply-bytes 16 --allow-mcp-init
+agent run hello --mcp-init
+wait hello
+recv hello
+goal budget
+goal close
+```
+
+The host prints `Host MCP server accepted initialize` followed by
+`Host MCP server accepted notifications/initialized`. The guest prints
+`MCP initialized` and `available=0 reserved=0 spent=16`. The other boots
+verify that a GET-only grant stops before DNS, that a wrong ID, wrong
+version or cancellation prevents the notification, and that a nonempty
+HTTP `202` response fails the operation.
+
+On Rust 1.100.1, the `netd` image is about 163.6 KiB with `tls-probe`
+and 171.6 KiB with both probe features. After a successful initialization,
+the lowest nonzero stack bytes were about 63 KiB and 67 KiB below the
+stack top, respectively. The image limit is 172 KiB and the stack reserves
+96 KiB.
 
 ### Probe a VirtIO block device
 

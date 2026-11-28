@@ -1,4 +1,7 @@
-use clv::net::{self, HTTPS_PROBE_BODY, HttpsStatus};
+use clv::mcp::{self, FRAME_BYTES, Frame};
+use clv::net::{self, HTTPS_PROBE_BODY, HttpsRequest, HttpsStatus};
+use core::fmt::Write as _;
+use core::ops::Range;
 use embedded_io::{ErrorKind, ErrorType, Read, Write};
 use embedded_tls::blocking::{
     Aes128GcmSha256, Certificate, CertificateEntryRef, CertificateRef, CertificateVerifyRef,
@@ -16,13 +19,13 @@ use smoltcp::wire::{
 };
 use webpki::EndEntityCert;
 
-use super::http_response::{RESPONSE_BYTES, body_range};
+use super::http_response::{ExpectedResponse, RESPONSE_BYTES, body_range};
 use super::{GUEST_ADDRESS, Network, UDP_ECHO_ENDPOINT};
 
 pub(super) const RESOLVER: IpAddress = IpAddress::Ipv4(Ipv4Address::new(192, 0, 2, 1));
 const HTTPS_PORT: u16 = 8443;
 const SERVER_NAME: &str = "probe.clavenar.test";
-const REQUEST: &[u8] =
+const PROBE_REQUEST: &[u8] =
     b"GET /probe HTTP/1.1\r\nHost: probe.clavenar.test:8443\r\nConnection: close\r\n\r\n";
 const TRUST_ANCHOR: &[u8] = include_bytes!(env!("CLV_TLS_CA_DER"));
 const CERTIFICATE_BYTES: usize = 1024;
@@ -62,15 +65,10 @@ pub(super) fn run(
             HttpsStatus::Unavailable,
             b"netd TLS probe clock unavailable\r\n",
         ),
-        Some(rng) => {
-            let result = exchange(network, handle, dns_handle, &probe, rng);
-            let socket = network.sockets.get_mut::<tcp::Socket>(handle);
-            // Reuse the buffers with a clean socket and no queued traffic from this request.
-            socket.abort();
-            socket.listen(HTTPS_PORT).unwrap();
-            socket.close();
-            report(result)
-        }
+        Some(rng) => report(
+            exchange(network, handle, dns_handle, &probe, rng),
+            probe.kind,
+        ),
     };
     network.https_request = 0;
     if net::complete_https_probe(probe.request, status) {
@@ -80,8 +78,11 @@ pub(super) fn run(
     }
 }
 
-fn report(result: Result<(), Failure>) -> (HttpsStatus, &'static [u8]) {
+fn report(result: Result<(), Failure>, kind: HttpsRequest) -> (HttpsStatus, &'static [u8]) {
     match result {
+        Ok(()) if kind == HttpsRequest::McpInit => {
+            (HttpsStatus::Complete, b"netd MCP initialized\r\n")
+        }
         Ok(()) => (
             HttpsStatus::Complete,
             b"netd HTTPS probe received Hello from native HTTPS\r\n",
@@ -138,54 +139,165 @@ fn exchange(
     let peer = peer?;
     clv::print(b"netd DNS resolved probe.clavenar.test\r\n");
 
-    let port = 0xe000 | (rng.next_u32() as u16 & 0x1fff);
-    network
-        .sockets
-        .get_mut::<tcp::Socket>(handle)
-        .connect(network.interface.context(), peer, port)
-        .map_err(|_| TlsError::ConnectionClosed)?;
-
-    let mut stream = TcpStream {
+    let mut https = HttpsConnection {
         network,
         handle,
+        peer,
         deadline,
-    };
-    while stream.socket().state() == tcp::State::SynSent {
-        stream.wait().map_err(TlsError::Io)?;
-    }
-    if stream.socket().state() != tcp::State::Established {
-        return Err(TlsError::ConnectionClosed.into());
-    }
-
-    let mut read_buffer = [0; READ_RECORD_BYTES];
-    let mut write_buffer = [0; WRITE_RECORD_BYTES];
-    let mut tls = TlsConnection::new(stream, &mut read_buffer, &mut write_buffer);
-    let config = TlsConfig::new().with_server_name(SERVER_NAME);
-    let mut provider = Provider {
         rng,
-        peer: PeerVerifier {
-            inner: CertVerifier::new(Certificate::X509(TRUST_ANCHOR)),
-            state: Verification::Certificate,
-        },
+        last_port: 0,
     };
-    tls.open(TlsContext::new(&config, &mut provider))?;
-    if provider.peer.state != Verification::Complete {
-        return Err(TlsError::InvalidCertificate.into());
+    let mut response = [0; RESPONSE_BYTES];
+    match probe.kind {
+        HttpsRequest::Probe => https
+            .request(PROBE_REQUEST, b"", ExpectedResponse::Ok, &mut response)
+            .map(|_| ()),
+        HttpsRequest::McpInit => mcp_initialize(&mut https, &mut response),
     }
-    clv::print(b"netd TLS probe authenticated probe.clavenar.test\r\n");
-    tls.write_all(REQUEST)?;
-    tls.flush()?;
-    read_response(&mut tls)?;
+}
 
-    let mut stream = tls.close().map_err(|(_, error)| error)?;
-    stream.socket().close();
-    while !matches!(
-        stream.socket().state(),
-        tcp::State::Closed | tcp::State::TimeWait
-    ) {
-        stream.wait().map_err(TlsError::Io)?;
+fn mcp_initialize(
+    https: &mut HttpsConnection<'_, '_>,
+    response: &mut [u8; RESPONSE_BYTES],
+) -> Result<(), Failure> {
+    let mut buffer = [0; FRAME_BYTES];
+    let mut initialize = Frame::new(&mut buffer);
+    write!(
+        initialize,
+        concat!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"{}","#,
+            r#""capabilities":{{}},"clientInfo":{{"name":"clavenar-netd","version":"1"}}}}}}"#
+        ),
+        mcp::VERSION
+    )
+    .map_err(|_| Failure::InvalidResponse)?;
+    let result = https.post(initialize.into_bytes(), ExpectedResponse::McpJson, response)?;
+    if !mcp::result(result, "1").is_some_and(mcp::accepts_initialize) {
+        return Err(Failure::InvalidResponse);
     }
+    https.post(
+        br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        ExpectedResponse::McpAccepted,
+        response,
+    )?;
     Ok(())
+}
+
+struct HttpsConnection<'a, 's> {
+    network: &'a mut Network<'s>,
+    handle: SocketHandle,
+    peer: IpEndpoint,
+    deadline: Instant,
+    rng: &'a mut ChaCha20Rng,
+    last_port: u16,
+}
+
+impl HttpsConnection<'_, '_> {
+    fn post<'a>(
+        &mut self,
+        body: &[u8],
+        expected: ExpectedResponse,
+        response: &'a mut [u8; RESPONSE_BYTES],
+    ) -> Result<&'a [u8], Failure> {
+        let mut buffer = [0; FRAME_BYTES];
+        let mut header = Frame::new(&mut buffer);
+        let mut write_header = || {
+            header.write_str(concat!(
+                "POST /mcp HTTP/1.1\r\nHost: probe.clavenar.test:8443\r\n",
+                "Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n",
+                "Connection: close\r\n"
+            ))?;
+            if expected == ExpectedResponse::McpAccepted {
+                write!(header, "MCP-Protocol-Version: {}\r\n", mcp::VERSION)?;
+            }
+            write!(header, "Content-Length: {}\r\n\r\n", body.len())
+        };
+        write_header().map_err(|_| Failure::InvalidResponse)?;
+        self.request(header.into_bytes(), body, expected, response)
+    }
+
+    fn request<'a>(
+        &mut self,
+        header: &[u8],
+        body: &[u8],
+        expected: ExpectedResponse,
+        response: &'a mut [u8; RESPONSE_BYTES],
+    ) -> Result<&'a [u8], Failure> {
+        let range = self.round_trip(header, body, expected, response);
+        let socket = self.network.sockets.get_mut::<tcp::Socket>(self.handle);
+        // Discard the old tuple and queued traffic before reusing the buffers.
+        socket.abort();
+        socket.listen(HTTPS_PORT).unwrap();
+        socket.close();
+        Ok(&response[range?])
+    }
+
+    fn round_trip(
+        &mut self,
+        header: &[u8],
+        body: &[u8],
+        expected: ExpectedResponse,
+        response: &mut [u8; RESPONSE_BYTES],
+    ) -> Result<Range<usize>, Failure> {
+        let port = loop {
+            let port = 0xe000 | (self.rng.next_u32() as u16 & 0x1fff);
+            if port != self.last_port {
+                break port;
+            }
+        };
+        self.last_port = port;
+        self.network
+            .sockets
+            .get_mut::<tcp::Socket>(self.handle)
+            .connect(self.network.interface.context(), self.peer, port)
+            .map_err(|_| TlsError::ConnectionClosed)?;
+
+        let mut stream = TcpStream {
+            network: self.network,
+            handle: self.handle,
+            deadline: self.deadline,
+        };
+        while stream.socket().state() == tcp::State::SynSent {
+            stream.wait().map_err(TlsError::Io)?;
+        }
+        if stream.socket().state() != tcp::State::Established {
+            return Err(TlsError::ConnectionClosed.into());
+        }
+
+        let mut read_buffer = [0; READ_RECORD_BYTES];
+        let mut write_buffer = [0; WRITE_RECORD_BYTES];
+        let mut tls = TlsConnection::new(stream, &mut read_buffer, &mut write_buffer);
+        let config = TlsConfig::new().with_server_name(SERVER_NAME);
+        let mut provider = Provider {
+            rng: self.rng,
+            peer: PeerVerifier {
+                inner: CertVerifier::new(Certificate::X509(TRUST_ANCHOR)),
+                state: Verification::Certificate,
+            },
+        };
+        tls.open(TlsContext::new(&config, &mut provider))?;
+        if provider.peer.state != Verification::Complete {
+            return Err(TlsError::InvalidCertificate.into());
+        }
+        clv::print(b"netd TLS probe authenticated probe.clavenar.test\r\n");
+        tls.write_all(header)?;
+        tls.write_all(body)?;
+        tls.flush()?;
+        let range = read_response(&mut tls, expected, response)?;
+        if expected == ExpectedResponse::Ok && &response[range.clone()] != HTTPS_PROBE_BODY {
+            return Err(Failure::UnexpectedBody);
+        }
+
+        let mut stream = tls.close().map_err(|(_, error)| error)?;
+        stream.socket().close();
+        while !matches!(
+            stream.socket().state(),
+            tcp::State::Closed | tcp::State::TimeWait
+        ) {
+            stream.wait().map_err(TlsError::Io)?;
+        }
+        Ok(range)
+    }
 }
 
 fn resolve_peer(
@@ -248,8 +360,9 @@ pub(super) fn reply_uses_echo_port(frame: &[u8]) -> bool {
 
 fn read_response(
     tls: &mut TlsConnection<'_, TcpStream<'_, '_>, Aes128GcmSha256>,
-) -> Result<(), Failure> {
-    let mut bytes = [0; RESPONSE_BYTES];
+    expected: ExpectedResponse,
+    bytes: &mut [u8; RESPONSE_BYTES],
+) -> Result<Range<usize>, Failure> {
     let mut received = 0;
     let mut body = None;
     loop {
@@ -269,7 +382,8 @@ fn read_response(
             .copy_from_slice(chunk);
         received = end;
         if body.is_none() {
-            body = body_range(&bytes[..received]).map_err(|_| Failure::InvalidResponse)?;
+            body =
+                body_range(&bytes[..received], expected).map_err(|_| Failure::InvalidResponse)?;
         }
         if let Some(range) = &body
             && received >= range.end
@@ -277,10 +391,7 @@ fn read_response(
             if received != range.end {
                 return Err(Failure::InvalidResponse);
             }
-            if &bytes[range.clone()] != HTTPS_PROBE_BODY {
-                return Err(Failure::UnexpectedBody);
-            }
-            return Ok(());
+            return Ok(range.clone());
         }
     }
 }

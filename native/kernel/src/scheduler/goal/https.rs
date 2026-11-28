@@ -1,5 +1,5 @@
 use clv_abi::goal::GoalDeadline;
-use clv_abi::net::{HTTPS_PROBE_TIMEOUT_NS, HttpsStatus};
+use clv_abi::net::{HTTPS_PROBE_TIMEOUT_NS, HttpsRequest, HttpsStatus};
 
 use super::super::{Scheduler, TaskState};
 use crate::arch::monotonic_nanos;
@@ -14,16 +14,25 @@ enum Phase {
 
 pub(in crate::scheduler) struct HttpsExchange {
     goal: usize,
-    // Each goal authorizes one request. Its boot-unique launch is also the request ID.
     launch: usize,
+    id: usize,
+    kind: HttpsRequest,
     deadline: u64,
     phase: Phase,
 }
 
 impl Scheduler {
-    pub(crate) fn submit_https(&mut self, network_available: bool) -> Result<usize, HttpsStatus> {
+    pub(crate) fn submit_https(
+        &mut self,
+        kind: HttpsRequest,
+        network_available: bool,
+    ) -> Result<usize, HttpsStatus> {
         let (goal, member, _) = self.current_agent_member().ok_or(HttpsStatus::Denied)?;
-        if !goal.https_available {
+        let available = match kind {
+            HttpsRequest::Probe => goal.https_available,
+            HttpsRequest::McpInit => goal.mcp_init_available,
+        };
+        if !available {
             return Err(HttpsStatus::Denied);
         }
         let now = monotonic_nanos();
@@ -40,25 +49,39 @@ impl Scheduler {
         {
             return Err(HttpsStatus::Unavailable);
         }
-        let launch = member.handle;
+        let (goal, launch) = (goal.handle, member.handle);
+        let id = match kind {
+            HttpsRequest::Probe => launch,
+            HttpsRequest::McpInit => {
+                let id = self.next_handle;
+                self.next_handle = id.checked_add(1).ok_or(HttpsStatus::Unavailable)?;
+                id
+            }
+        };
         self.https = Some(HttpsExchange {
-            goal: goal.handle,
+            goal,
             launch,
+            id,
+            kind,
             deadline,
             phase: Phase::Queued,
         });
-        self.goal.as_mut().unwrap().https_available = false;
+        let goal = self.goal.as_mut().unwrap();
+        match kind {
+            HttpsRequest::Probe => goal.https_available = false,
+            HttpsRequest::McpInit => goal.mcp_init_available = false,
+        }
         self.wake_netd(true, false);
-        Ok(launch)
+        Ok(id)
     }
 
     pub(crate) fn poll_https(&mut self, request: usize) -> Option<usize> {
         let exchange = self.https.as_ref()?;
-        if exchange.launch != request
+        if exchange.id != request
             || !self
                 .current_agent_member()
                 .is_some_and(|(goal, member, _)| {
-                    goal.handle == exchange.goal && member.handle == request
+                    goal.handle == exchange.goal && member.handle == exchange.launch
                 })
         {
             return None;
@@ -78,7 +101,7 @@ impl Scheduler {
             .is_some_and(|exchange| exchange.phase == Phase::Queued)
     }
 
-    pub(crate) fn take_https(&mut self) -> Option<(usize, u64)> {
+    pub(crate) fn take_https(&mut self) -> Option<(usize, u64, HttpsRequest)> {
         let exchange = self
             .https
             .as_mut()
@@ -88,7 +111,7 @@ impl Scheduler {
             return None;
         }
         exchange.phase = Phase::Running;
-        Some((exchange.launch, exchange.deadline))
+        Some((exchange.id, exchange.deadline, exchange.kind))
     }
 
     pub(crate) fn https_pending(&self) -> bool {
@@ -99,8 +122,7 @@ impl Scheduler {
 
     pub(crate) fn https_deadline(&self, request: usize) -> Option<u64> {
         let exchange = self.https.as_ref()?;
-        (exchange.launch == request && exchange.phase == Phase::Running)
-            .then_some(exchange.deadline)
+        (exchange.id == request && exchange.phase == Phase::Running).then_some(exchange.deadline)
     }
 
     pub(crate) fn complete_https(&mut self, request: usize, status: HttpsStatus) -> Option<()> {

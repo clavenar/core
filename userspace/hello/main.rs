@@ -5,7 +5,7 @@ mod mcp_client;
 
 use clv::{ChildReply, ChildStatus, LaunchRequest, agent, bridge, fs, pipe};
 use clv_abi::agent::{LAUNCH_REQUEST_MAX_BYTES, decode_rename_pair};
-use clv_abi::net::{HTTPS_PROBE_BODY, HttpsStatus};
+use clv_abi::net::{HTTPS_PROBE_BODY, HttpsRequest, HttpsStatus, MCP_INIT_REPLY};
 use clv_abi::{
     GrantKind, MESSAGE_MAX_BYTES, PROBE_VALUE, ReplyKind, RequestKind, SYS_EXIT, SYS_PROBE,
     SYS_TIMER_FIRED, SYS_WRITE_CONSOLE, SYSCALL_ERROR,
@@ -59,14 +59,27 @@ extern "C" fn reply_or_report_ready(handle: usize, grant_kind: usize, extra: usi
             ..
         }) => run_plan(kind, bytes),
         Some(LaunchRequest::Received {
-            kind: RequestKind::HttpsProbe,
+            kind: kind @ (RequestKind::HttpsProbe | RequestKind::McpInit),
             ..
         }) => {
-            let result = clv::net::https_probe();
-            if result == HttpsStatus::Complete {
-                usize::from(!clv::send_reply(ReplyKind::Matches, HTTPS_PROBE_BODY))
+            let (request, body, failure) = if kind == RequestKind::McpInit {
+                (
+                    HttpsRequest::McpInit,
+                    MCP_INIT_REPLY,
+                    ReplyKind::McpInitFailed,
+                )
             } else {
-                clv::send_reply(ReplyKind::HttpsFailed, &[result as u8]);
+                (
+                    HttpsRequest::Probe,
+                    HTTPS_PROBE_BODY,
+                    ReplyKind::HttpsFailed,
+                )
+            };
+            let result = clv::net::request_https(request);
+            if result == HttpsStatus::Complete {
+                usize::from(!clv::send_reply(ReplyKind::Matches, body))
+            } else {
+                clv::send_reply(failure, &[result as u8]);
                 1
             }
         }

@@ -547,6 +547,7 @@ fn agent_run_args(
                 }
             }
             GoalFlag::HttpsProbe if args.is_empty() => agent::RunRequest::HttpsProbe,
+            GoalFlag::McpInit if args.is_empty() => agent::RunRequest::McpInit,
             _ => return None,
         })
     };
@@ -661,20 +662,26 @@ pub(super) fn display_reply(handle: usize, kind: ReplyKind, bytes: &[u8]) {
         ReplyKind::ReadFailed => print(b"cannot read requested file\r\n"),
         ReplyKind::ResultTooLarge => print(b"grep result exceeds 64 bytes\r\n"),
         ReplyKind::DelegationFailed => print(b"cannot delegate child\r\n"),
-        ReplyKind::HttpsFailed => {
+        ReplyKind::HttpsFailed | ReplyKind::McpInitFailed => {
             use clv_abi::net::HttpsStatus::{self, *};
             let status = bytes
                 .first()
                 .and_then(|&byte| HttpsStatus::from_raw(byte.into()));
-            print(match status {
-                Some(Denied) => b"HTTPS probe grant required\r\n",
-                Some(Unavailable) => b"HTTPS probe unavailable\r\n",
-                Some(TimedOut) => b"HTTPS probe timed out\r\n",
-                Some(DnsFailed) => b"HTTPS probe DNS lookup failed\r\n",
-                Some(AddressDenied) => b"HTTPS probe destination denied\r\n",
-                Some(TlsFailed) => b"HTTPS probe TLS failed\r\n",
-                _ => b"HTTPS probe invalid response\r\n",
-            });
+            let operation: &[u8] = if kind == ReplyKind::McpInitFailed {
+                b"MCP init"
+            } else {
+                b"HTTPS probe"
+            };
+            let reason: &[u8] = match status {
+                Some(Denied) => b" grant required",
+                Some(Unavailable) => b" unavailable",
+                Some(TimedOut) => b" timed out",
+                Some(DnsFailed) => b" DNS lookup failed",
+                Some(AddressDenied) => b" destination denied",
+                Some(TlsFailed) => b" TLS failed",
+                _ => b" invalid response",
+            };
+            print_line(&[operation, reason]);
         }
         ReplyKind::HostPlanFailed | ReplyKind::HostToolFailed => {
             use BridgeFailure::*;

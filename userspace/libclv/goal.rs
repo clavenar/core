@@ -141,6 +141,7 @@ pub fn create_with_timeout(
             rename_limit: 1,
             durable: false,
             allow_https_probe: false,
+            allow_mcp_init: false,
         },
         files,
         timeout_ms,
